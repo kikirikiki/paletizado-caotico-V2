@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from statistics import mean
+from typing import Iterable
+
+from ..packer.pallet_model import PalletModel
+
+
+def layer_utilization(pallet: PalletModel) -> dict[int, float]:
+    used_area: dict[int, int] = {}
+    for placement in pallet.placements:
+        used_area[placement.layer_id] = used_area.get(placement.layer_id, 0) + (
+            int(placement.length_mm) * int(placement.width_mm)
+        )
+    if pallet.bin_area_mm2 <= 0:
+        return {layer_id: 0.0 for layer_id in used_area}
+    return {
+        layer_id: float(area) / float(pallet.bin_area_mm2)
+        for layer_id, area in used_area.items()
+    }
+
+
+def volume_utilization(pallet: PalletModel) -> float:
+    max_volume = float(pallet.bin_area_mm2) * float(pallet.spec.max_height_mm)
+    if max_volume <= 0:
+        return 0.0
+    used = 0.0
+    for placement in pallet.placements:
+        used += float(placement.length_mm) * float(placement.width_mm) * float(placement.height_mm)
+    return used / max_volume
+
+
+def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> dict[str, object]:
+    volume_by_dest: dict[int, float] = {}
+    layer_util_by_dest: dict[int, dict[int, float]] = {}
+    pallets_count: dict[int, int] = {}
+    support_checks = 0
+    support_rejects = 0
+    corner_checks = 0
+    corner_rejects = 0
+    settle_count = 0
+    settle_total = 0.0
+    settle_max = 0.0
+    floating_total = 0
+    balance_quadrant_sum = [0.0, 0.0, 0.0, 0.0]
+    balance_scores: list[float] = []
+    com_dx: list[float] = []
+    com_dy: list[float] = []
+
+    for dest, pallets in pallets_by_dest.items():
+        pallet_list = list(pallets)
+        pallets_count[dest] = len(pallet_list)
+        if not pallet_list:
+            volume_by_dest[dest] = 0.0
+            layer_util_by_dest[dest] = {}
+            continue
+
+        vol_values = [volume_utilization(pallet) for pallet in pallet_list]
+        volume_by_dest[dest] = mean(vol_values) if vol_values else 0.0
+
+        layer_accum: dict[int, list[float]] = {}
+        for pallet in pallet_list:
+            for layer_id, util in layer_utilization(pallet).items():
+                layer_accum.setdefault(layer_id, []).append(util)
+            support_checks += int(pallet.stats.support_ratio_checks)
+            support_rejects += int(pallet.stats.support_ratio_rejects)
+            corner_checks += int(pallet.stats.corner_checks)
+            corner_rejects += int(pallet.stats.corner_rejects)
+            settle_count += int(pallet.stats.settle_adjustments_count)
+            settle_total += float(pallet.stats.settle_total_mm)
+            settle_max = max(settle_max, float(pallet.stats.settle_max_mm))
+            floating_total += int(pallet.stats.floating_boxes_count)
+
+            metrics = pallet.balance_metrics()
+            for i, val in enumerate(metrics.quadrant_weights):
+                balance_quadrant_sum[i] += float(val)
+            balance_scores.append(float(metrics.balance_score))
+            com_dx.append(float(metrics.com_offset_mm[0]))
+            com_dy.append(float(metrics.com_offset_mm[1]))
+        layer_util_by_dest[dest] = {
+            layer_id: mean(vals) if vals else 0.0 for layer_id, vals in layer_accum.items()
+        }
+
+    support_pct = (100.0 * support_rejects / max(1, support_checks)) if support_checks else 0.0
+    corner_pct = (100.0 * corner_rejects / max(1, corner_checks)) if corner_checks else 0.0
+    avg_settle = (settle_total / settle_count) if settle_count else 0.0
+    balance_score = mean(balance_scores) if balance_scores else 0.0
+    com_offset = (
+        float(mean(com_dx)) if com_dx else 0.0,
+        float(mean(com_dy)) if com_dy else 0.0,
+    )
+
+    return {
+        "pallets_count": pallets_count,
+        "pallet_volume_utilization": volume_by_dest,
+        "pallet_layer_utilization": layer_util_by_dest,
+        "rejected_by_support_ratio_count": support_rejects,
+        "rejected_by_support_ratio_pct": support_pct,
+        "rejected_by_corner_support_count": corner_rejects,
+        "rejected_by_corner_support_pct": corner_pct,
+        "settle_adjustments_count": settle_count,
+        "avg_settle_mm": avg_settle,
+        "max_settle_mm": settle_max,
+        "floating_boxes_count": floating_total,
+        "balance_quadrant_weights": balance_quadrant_sum,
+        "com_offset_mm": {"x": com_offset[0], "y": com_offset[1]},
+        "balance_score": balance_score,
+    }

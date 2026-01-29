@@ -1,0 +1,70 @@
+{
+  "model": "M2",
+  "params": {
+    "n_per_pallet": 30,
+    "t_pick_place": 14.0,
+    "t_changeover": 60.0,
+    "t_stage": 6.0,
+    "t_unstage": 10.0,
+    "ramp_cap": 15,
+    "staging_cap": 3
+  },
+  "metrics": {
+    "total_boxes": 186,
+    "processed_boxes": 186,
+    "sim_start": 0.0,
+    "sim_end": 15015.0,
+    "makespan": 15015.0,
+    "throughput_per_hour": 44.595404595404595,
+    "robot_busy_time": 2604.0,
+    "robot_utilization_percent": 17.34265734265734,
+    "upstream_blocked_time": {
+      "1": 0.0,
+      "2": 0.0
+    },
+    "hol_blocked_time": {
+      "1": 0.0,
+      "2": 0.0
+    },
+    "max_ramp_occupancy": {
+      "1": 3,
+      "2": 1
+    },
+    "ramp_wait_percentiles": {
+      "1": {
+        "p50": 0.0,
+        "p90": 12.299999999999997,
+        "p99": 29.03
+      },
+      "2": {
+        "p50": 0.0,
+        "p90": 10.299999999999997,
+        "p99": 19.649999999999977
+      }
+    },
+    "changeovers_by_destination": {
+      "1": 1,
+      "2": 0,
+      "3": 1,
+      "4": 0,
+      "5": 1,
+      "6": 0
+    },
+    "changeover_time_by_destination": {
+      "1": 60.0,
+      "2": 0.0,
+      "3": 60.0,
+      "4": 0.0,
+      "5": 60.0,
+      "6": 0.0
+    },
+    "staging_max_occupancy": {
+      "1": 0,
+      "2": 0
+    },
+    "staging_full_percent": {
+      "1": 0.0,
+      "2": 0.0
+    }
+  }
+}

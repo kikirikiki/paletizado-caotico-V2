@@ -1,0 +1,7 @@
+K: 1  # 1,3,5,10,15
+selection:
+  t_base: 0.0
+  t_step: 0.0
+weights:
+  time_penalty: 1.0
+  starvation: 0.0
