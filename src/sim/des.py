@@ -113,6 +113,7 @@ class SimulationResult:
     staging_max_occupancy: dict[int, int]
     staging_full_percent: dict[int, float]
     pallet_kpis: dict[str, object] = field(default_factory=dict)
+    stop_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -135,6 +136,7 @@ class SimulationResult:
             "staging_max_occupancy": dict(self.staging_max_occupancy),
             "staging_full_percent": dict(self.staging_full_percent),
             "pallet_kpis": dict(self.pallet_kpis),
+            "stop_reason": self.stop_reason,
         }
 
 
@@ -239,6 +241,7 @@ def simulate(
             staging_max_occupancy={1: 0, 2: 0},
             staging_full_percent={1: 0.0, 2: 0.0},
             pallet_kpis={},
+            stop_reason=None,
         )
 
     logger = config.logger or logging.getLogger(__name__)
@@ -282,6 +285,7 @@ def simulate(
     robot_busy = False
     robot_busy_time = 0.0
     processed_boxes = 0
+    stop_reason: str | None = None
 
     ramp_wait_times: dict[int, list[float]] = {1: [], 2: []}
     upstream_blocked_time: dict[int, float] = {1: 0.0, 2: 0.0}
@@ -545,6 +549,46 @@ def simulate(
                             dest_key = int(dest_id) if str(dest_id).isdigit() else dest_id
                             if dest_key in destinations and destinations[dest_key].state == "ACTIVE":
                                 start_changeover(dest_key, current_time, reason=map_policy_reason(str(reason)))
+                    policy_stop = getattr(policy, "stop_reason", None)
+                    if policy_stop == "DEADLOCK":
+                        stop_reason = "DEADLOCK"
+                        details = getattr(policy, "stop_details", {}) or {}
+                        logger.error(
+                            "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s remaining=%s",
+                            details.get("box_id"),
+                            details.get("dims"),
+                            details.get("reason"),
+                            sum(
+                                len(ramp.queue) + len(ramp.upstream) + len(ramp.staging)
+                                for ramp in ramps.values()
+                            ),
+                        )
+                        print(
+                            "[DEADLOCK] no feasible placement. item=%s dims=%s reason=%s remaining=%s"
+                            % (
+                                details.get("box_id"),
+                                details.get("dims"),
+                                details.get("reason"),
+                                sum(
+                                    len(ramp.queue) + len(ramp.upstream) + len(ramp.staging)
+                                    for ramp in ramps.values()
+                                ),
+                            ),
+                            flush=True,
+                        )
+                        break
+                    if not events and not robot_busy and system_has_boxes():
+                        stop_reason = "DEADLOCK"
+                        logger.error(
+                            "DEADLOCK: no plan and no pending events with boxes remaining (t=%.3f).",
+                            current_time,
+                        )
+                        print(
+                            "[DEADLOCK] no plan and no pending events with boxes remaining (t=%.3f)."
+                            % current_time,
+                            flush=True,
+                        )
+                        break
                 else:
                     ramp = ramps[plan.ramp_id]
                     box = pick_from_queue(ramp, int(plan.buffer_index), current_time, "PICK")
@@ -564,6 +608,8 @@ def simulate(
 
         update_flags()
 
+        if stop_reason is not None:
+            break
         if not events and not robot_busy and not system_has_boxes():
             break
 
@@ -613,6 +659,7 @@ def simulate(
         staging_max_occupancy={rid: ramp.max_staging for rid, ramp in ramps.items()},
         staging_full_percent=staging_full_percent,
         pallet_kpis=pallet_kpis,
+        stop_reason=stop_reason,
     )
 
 

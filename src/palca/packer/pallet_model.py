@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Iterable
 
 from ..domain.box import Box
@@ -35,6 +36,7 @@ class PalletStats:
     support_ratio_rejects: int = 0
     corner_checks: int = 0
     corner_rejects: int = 0
+    settle_checks: int = 0
     settle_adjustments_count: int = 0
     settle_total_mm: float = 0.0
     settle_max_mm: float = 0.0
@@ -53,6 +55,24 @@ class BalanceMetrics:
     com_offset_norm: float
     imbalance_ratio: float
     balance_score: float
+
+
+@dataclass
+class _PreviewBudget:
+    max_candidates: int | None
+    deadline: float | None
+    candidates_checked: int = 0
+    limit_hit: bool = False
+    timeout_hit: bool = False
+
+    def should_stop(self) -> bool:
+        if self.max_candidates is not None and self.candidates_checked >= self.max_candidates:
+            self.limit_hit = True
+            return True
+        if self.deadline is not None and time.perf_counter() >= self.deadline:
+            self.timeout_hit = True
+            return True
+        return False
 
 
 class PalletModel:
@@ -86,10 +106,36 @@ class PalletModel:
         last = self.layers[-1]
         return last.z_mm + last.height_mm
 
-    def preview_place(self, box: Box) -> PlacementPreview:
+    def preview_place(
+        self,
+        box: Box,
+        *,
+        max_tries_per_item: int | None = None,
+        max_candidates: int | None = None,
+        max_seconds_per_item: float | None = None,
+    ) -> PlacementPreview:
         length_mm = int(box.length_mm)
         width_mm = int(box.width_mm)
         height_mm = int(box.height_mm)
+
+        candidates_limit = None
+        for val in (max_tries_per_item, max_candidates):
+            if val is None:
+                continue
+            if int(val) <= 0:
+                continue
+            if candidates_limit is None:
+                candidates_limit = int(val)
+            else:
+                candidates_limit = min(candidates_limit, int(val))
+
+        deadline = None
+        if max_seconds_per_item is not None and float(max_seconds_per_item) > 0:
+            deadline = time.perf_counter() + float(max_seconds_per_item)
+
+        budget = None
+        if candidates_limit is not None or deadline is not None:
+            budget = _PreviewBudget(max_candidates=candidates_limit, deadline=deadline)
 
         if length_mm <= 0 or width_mm <= 0 or height_mm <= 0:
             return PlacementPreview(
@@ -98,7 +144,7 @@ class PalletModel:
                 packing_gain=0.0,
                 fragmentation=0.0,
                 infeasible_reason="OVERSIZE",
-                debug={"reason": "non_positive_dims"},
+                debug={"reason": "non_positive_dims", "candidates_evaluated": 0},
             )
 
         bin_l = self.spec.bin_length_mm
@@ -112,7 +158,11 @@ class PalletModel:
                     packing_gain=0.0,
                     fragmentation=0.0,
                     infeasible_reason="OVERSIZE",
-                    debug={"bin": (bin_l, bin_w), "box": (length_mm, width_mm)},
+                    debug={
+                        "bin": (bin_l, bin_w),
+                        "box": (length_mm, width_mm),
+                        "candidates_evaluated": 0,
+                    },
                 )
 
         if not self.controls.manifest.is_eligible(box, self):
@@ -122,24 +172,27 @@ class PalletModel:
                 packing_gain=0.0,
                 fragmentation=0.0,
                 infeasible_reason="MANIFEST_BLOCKED",
-                debug={"reason": "manifest_control"},
+                debug={"reason": "manifest_control", "candidates_evaluated": 0},
             )
 
         candidates: list[_LayerCandidate] = []
         rejected_by_controls = 0
+        budget_hit = False
 
         active_layer = self.layers[-1] if self.layers else None
         if active_layer is not None:
-            layer_candidates, layer_rejected = self._preview_in_layer(
+            layer_candidates, layer_rejected, layer_budget_hit = self._preview_in_layer(
                 active_layer,
                 box,
                 length_mm,
                 width_mm,
                 height_mm,
                 is_new_layer=False,
+                budget=budget,
             )
             candidates.extend(layer_candidates)
             rejected_by_controls += layer_rejected
+            budget_hit = budget_hit or layer_budget_hit
 
         if self._can_open_new_layer(height_mm):
             new_layer_id = len(self.layers)
@@ -149,16 +202,18 @@ class PalletModel:
                 z_mm=z_mm,
                 bin=MaxRects2D(bin_l, bin_w, heuristic=self.heuristic),
             )
-            layer_candidates, layer_rejected = self._preview_in_layer(
+            layer_candidates, layer_rejected, layer_budget_hit = self._preview_in_layer(
                 new_layer,
                 box,
                 length_mm,
                 width_mm,
                 height_mm,
                 is_new_layer=True,
+                budget=budget,
             )
             candidates.extend(layer_candidates)
             rejected_by_controls += layer_rejected
+            budget_hit = budget_hit or layer_budget_hit
 
         if not candidates:
             reason = "NO_SPACE"
@@ -166,13 +221,25 @@ class PalletModel:
                 reason = "HEIGHT_LIMIT"
             if rejected_by_controls > 0:
                 reason = "STABILITY"
+            if budget is not None:
+                if budget.timeout_hit:
+                    reason = "TIMEOUT"
+                elif budget.limit_hit:
+                    reason = "CANDIDATE_LIMIT"
+            debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
+            if budget is not None:
+                debug["candidates_evaluated"] = int(budget.candidates_checked)
+                if budget.limit_hit:
+                    debug["candidate_limit_hit"] = True
+                if budget.timeout_hit:
+                    debug["timeout_hit"] = True
             return PlacementPreview(
                 feasible=False,
                 placement=None,
                 packing_gain=0.0,
                 fragmentation=0.0,
                 infeasible_reason=reason,
-                debug={"height_used": self.current_height_mm()},
+                debug=debug,
             )
 
         best = max(
@@ -180,6 +247,14 @@ class PalletModel:
             key=lambda c: (c.packing_gain - c.fragmentation + c.score_delta, -c.layer_id),
         )
         placement = best.placement
+        debug = dict(best.debug)
+        debug["rejected_by_controls"] = rejected_by_controls
+        if budget is not None:
+            debug["candidates_evaluated"] = int(budget.candidates_checked)
+            if budget.limit_hit:
+                debug["candidate_limit_hit"] = True
+            if budget.timeout_hit:
+                debug["timeout_hit"] = True
         return PlacementPreview(
             feasible=True,
             placement=placement,
@@ -187,7 +262,7 @@ class PalletModel:
             fragmentation=best.fragmentation,
             score_adjustment=best.score_delta,
             infeasible_reason=None,
-            debug=best.debug,
+            debug=debug,
         )
 
     def commit_place(self, preview: PlacementPreview) -> Placement:
@@ -240,9 +315,12 @@ class PalletModel:
         height_mm: int,
         *,
         is_new_layer: bool,
-    ) -> tuple[list[_LayerCandidate], int]:
+        budget: _PreviewBudget | None = None,
+    ) -> tuple[list[_LayerCandidate], int, bool]:
         candidates: list[_LayerCandidate] = []
         rejected_by_controls = 0
+        if budget is not None and budget.should_stop():
+            return candidates, rejected_by_controls, True
         for rot90, (l_mm, w_mm) in self._orientations(length_mm, width_mm):
             next_height = max(layer.height_mm, height_mm)
             if layer.z_mm + next_height > self.spec.max_height_mm:
@@ -254,6 +332,10 @@ class PalletModel:
                 height_mm=height_mm,
                 is_new_layer=is_new_layer,
             ):
+                if budget is not None and budget.should_stop():
+                    return candidates, rejected_by_controls, True
+                if budget is not None:
+                    budget.candidates_checked += 1
                 free_after = layer.bin.simulate_place(cand)
                 gain = packing_gain(l_mm * w_mm, self.bin_area_mm2)
                 frag = fragmentation(free_after)
@@ -315,7 +397,7 @@ class PalletModel:
                         debug=debug,
                     )
                 )
-        return candidates, rejected_by_controls
+        return candidates, rejected_by_controls, False
 
     def _orientations(self, length_mm: int, width_mm: int) -> list[tuple[bool, tuple[int, int]]]:
         orientations = [(False, (length_mm, width_mm))]

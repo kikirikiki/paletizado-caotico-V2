@@ -51,21 +51,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-support", type=float, default=0.75, help="Ratio mínimo de soporte")
     parser.add_argument("--stability-eps-mm", type=float, default=1.0, help="Epsilon de estabilidad (mm)")
     parser.add_argument("--settle-snap-grid", action="store_true", help="Snap de settle a grid")
+    parser.add_argument(
+        "--settle-max-iter",
+        type=int,
+        default=0,
+        help="Max iteraciones para settle (0 = sin limite)",
+    )
+    parser.add_argument(
+        "--settle-timeout-ms",
+        type=int,
+        default=0,
+        help="Timeout de settle (ms, 0 = sin limite)",
+    )
     parser.add_argument("--grid-mm", type=int, default=None, help="Tamaño de grid (mm)")
     parser.add_argument("--heavy-bottom", action="store_true", help="Penaliza pesado sobre débil")
     parser.add_argument("--max-overweight-ratio", type=float, default=1.5, help="Ratio máximo peso/soporte")
     parser.add_argument("--loadbear-penalty-weight", type=float, default=1.0, help="Peso de penalización loadbear")
     parser.add_argument("--loadbear-factor", type=float, default=1.0, help="Factor para capacidad loadbear")
-    parser.add_argument(
-        "--priority-mode",
-        type=str,
-        default="none",
-        help="none | weight | excel[:colname]",
-    )
+    parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
     parser.add_argument("--weight-col", type=str, default=None, help="Columna peso (opcional)")
+    parser.add_argument(
+        "--max-tries-per-item",
+        type=int,
+        default=0,
+        help="Limite de intentos/candidatos por item (0 = sin limite)",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=0,
+        help="Limite de candidatos evaluados por decision (0 = sin limite)",
+    )
+    parser.add_argument(
+        "--max-seconds-per-item",
+        type=float,
+        default=0.0,
+        help="Timeout por item (segundos, 0 = sin limite)",
+    )
+    parser.add_argument(
+        "--watchdog-heartbeat-sec",
+        type=float,
+        default=1.0,
+        help="Intervalo de heartbeat watchdog (segundos, 0 = deshabilitar)",
+    )
 
     # Output
     parser.add_argument("--out", type=str, default=None, help="Ruta de salida .json o .csv (opcional)")
@@ -194,6 +225,10 @@ def run_simulation(
     balance_weight: float = 0.0,
     time_budget_ms: int = 120,
     weight_col: str | None = None,
+    max_tries_per_item: int = 0,
+    max_candidates: int = 0,
+    max_seconds_per_item: float = 0.0,
+    watchdog_heartbeat_sec: float = 1.0,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -283,17 +318,18 @@ def run_simulation(
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             priority_mode=priority_mode,
+            max_tries_per_item=max_tries_per_item,
+            max_candidates=max_candidates,
+            max_seconds_per_item=max_seconds_per_item,
+            heartbeat_sec=watchdog_heartbeat_sec,
         )
 
-        # Attach viewer de forma robusta:
         if viewer is not None and rect_cls is not None:
             if hasattr(decision_policy, "attach_viewer"):
-                # preferido (si lo implementaste)
                 decision_policy.attach_viewer(viewer, rect_cls, debug=viz_debug)  # type: ignore[attr-defined]
                 if viz_debug:
                     print("[VIZ] attached via decision_policy.attach_viewer()", flush=True)
             else:
-                # fallback a tu método actual (privado)
                 decision_policy._viewer = viewer  # type: ignore[attr-defined]
                 decision_policy._viewer_rect_cls = rect_cls  # type: ignore[attr-defined]
                 if viz_debug:
@@ -339,6 +375,11 @@ def run_simulation(
             "balance_weight": balance_weight,
             "time_budget_ms": time_budget_ms,
             "weight_col": weight_col,
+            "max_tries_per_item": max_tries_per_item,
+            "max_candidates": max_candidates,
+            "max_seconds_per_item": max_seconds_per_item,
+            "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
+            "viz_dest": viz_dest,
         },
         "metrics": result.to_dict(),
     }
@@ -391,12 +432,17 @@ def main() -> None:
         balance_weight=args.balance_weight,
         time_budget_ms=args.time_budget_ms,
         weight_col=args.weight_col,
+        max_tries_per_item=int(args.max_tries_per_item),
+        max_candidates=int(args.max_candidates),
+        max_seconds_per_item=float(args.max_seconds_per_item),
+        watchdog_heartbeat_sec=float(args.watchdog_heartbeat_sec),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
         viz_labels=bool(args.viz_labels),
         viz_block=bool(args.viz_block),
         viz_debug=bool(args.viz_debug),
+        viz_dest=int(args.viz_dest),
     )
 
     if (not args.out) or args.print:

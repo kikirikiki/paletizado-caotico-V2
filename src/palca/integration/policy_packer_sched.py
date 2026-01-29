@@ -37,6 +37,12 @@ class PolicyConfig:
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
     priority_mode: str = "none"
+    max_tries_per_item: int = 0
+    max_candidates: int = 0
+    max_seconds_per_item: float = 0.0
+    heartbeat_sec: float = 1.0
+    settle_max_iter: int = 0
+    settle_timeout_ms: int = 0
 
 
 class PolicyPackerScheduler:
@@ -60,6 +66,10 @@ class PolicyPackerScheduler:
         self._closures_by_reason: dict[str, int] = {}
         self._closed_early: dict[int | str, int] = {}
         self._closed_early_by_reason: dict[str, int] = {}
+
+        # stop conditions
+        self.stop_reason: str | None = None
+        self.stop_details: dict[str, Any] = {}
 
         # KPI de lookahead
         self.total_picks = 0
@@ -92,6 +102,12 @@ class PolicyPackerScheduler:
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
         priority_mode: str = "none",
+        max_tries_per_item: int = 0,
+        max_candidates: int = 0,
+        max_seconds_per_item: float = 0.0,
+        heartbeat_sec: float = 1.0,
+        settle_max_iter: int = 0,
+        settle_timeout_ms: int = 0,
     ) -> "PolicyPackerScheduler":
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
             raise ValueError(f"K no soportado: {lookahead_k}")
@@ -104,6 +120,10 @@ class PolicyPackerScheduler:
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
             priority_weight=priority_weight,
+            max_tries_per_item=max_tries_per_item,
+            max_candidates=max_candidates,
+            max_seconds_per_item=max_seconds_per_item,
+            heartbeat_sec=heartbeat_sec,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -120,6 +140,12 @@ class PolicyPackerScheduler:
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             priority_mode=priority_mode,
+            max_tries_per_item=max_tries_per_item,
+            max_candidates=max_candidates,
+            max_seconds_per_item=max_seconds_per_item,
+            heartbeat_sec=heartbeat_sec,
+            settle_max_iter=settle_max_iter,
+            settle_timeout_ms=settle_timeout_ms,
         )
         return cls(config=config)
 
@@ -130,6 +156,8 @@ class PolicyPackerScheduler:
         destinations: Mapping[int, Any],
         now: float,
     ) -> PickPlan | None:
+        self.stop_reason = None
+        self.stop_details = {}
         pallets = self._collect_pallets(ramps)
         ramp_boxes = self._collect_ramp_boxes(ramps)
         blocked = {
@@ -138,11 +166,23 @@ class PolicyPackerScheduler:
             if getattr(state, "state", "ACTIVE") != "ACTIVE"
         }
 
+        ramp_sizes: dict[int, int] = {}
+        remaining_total = 0
+        for ramp_id, ramp in ramps.items():
+            queue = getattr(ramp, "queue", [])
+            upstream = getattr(ramp, "upstream", [])
+            staging = getattr(ramp, "staging", [])
+            count = len(queue) + len(upstream) + len(staging)
+            ramp_sizes[int(ramp_id)] = count
+            remaining_total += count
+
         sim_state = SchedulerSimState(
             now=float(now),
             ramps=ramp_boxes,
             pallets=pallets,
             pallet_blocked=blocked,
+            ramp_sizes=ramp_sizes,
+            remaining_total=int(remaining_total),
         )
 
         plan = self._scheduler.choose_action(sim_state)

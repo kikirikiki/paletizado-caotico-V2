@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import time
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
@@ -20,6 +20,10 @@ class SchedulerConfig:
     starvation_weight: float = 0.0
     time_budget_ms: int = 120
     priority_weight: float = 1.0
+    max_tries_per_item: int = 0
+    max_candidates: int = 0
+    max_seconds_per_item: float = 0.0
+    heartbeat_sec: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,8 @@ class SchedulerSimState:
     ramps: Mapping[int, Sequence[Box]]
     pallets: Mapping[int | str, PalletModel]
     pallet_blocked: set[int | str]
+    ramp_sizes: Mapping[int, int] = field(default_factory=dict)
+    remaining_total: int = 0
 
 
 class SchedulerV1:
@@ -46,26 +52,41 @@ class SchedulerV1:
         self.config = config or SchedulerConfig()
         self.last_blocked_pallets: dict[int | str, str] = {}
         self.deadline_cutoffs_count = 0
+        self.last_deadlock = False
+        self.last_deadlock_item: dict[str, Any] | None = None
+        self.last_eval_stats: dict[str, Any] = {}
         self._logger = logging.getLogger(__name__)
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
+        self.last_deadlock = False
+        self.last_deadlock_item = None
+        self.last_eval_stats = {}
         k = max(1, int(self.config.lookahead_k))
 
         deadline = None
         if self.config.time_budget_ms and self.config.time_budget_ms > 0:
             deadline = time.perf_counter() + (float(self.config.time_budget_ms) / 1000.0)
 
+        heartbeat_sec = float(self.config.heartbeat_sec) if self.config.heartbeat_sec else 0.0
+        next_heartbeat = time.perf_counter() + heartbeat_sec if heartbeat_sec > 0 else None
+
         best: PickPlan | None = None
         best_score = float("-inf")
         best_dt = float("inf")
         best_timestamp = float("inf")
         cutoff = False
+        cutoff_reason = ""
+
+        items_evaluated = 0
+        items_feasible = 0
+        deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
             ramp_items = list(ramp)[:k]
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
+                cutoff_reason = "time_budget"
                 break
 
             max_priority = 0.0
@@ -78,6 +99,11 @@ class SchedulerV1:
             for idx, box in enumerate(ramp_items):
                 if deadline is not None and time.perf_counter() >= deadline:
                     cutoff = True
+                    cutoff_reason = "time_budget"
+                    break
+                if self.config.max_candidates and items_evaluated >= int(self.config.max_candidates):
+                    cutoff = True
+                    cutoff_reason = "max_candidates"
                     break
                 pallet_id = box.destination
                 if pallet_id is None:
@@ -88,11 +114,79 @@ class SchedulerV1:
                 if pallet is None:
                     continue
 
-                preview = pallet.preview_place(box)
+                items_evaluated += 1
+                preview = pallet.preview_place(
+                    box,
+                    max_tries_per_item=int(self.config.max_tries_per_item) or None,
+                    max_seconds_per_item=float(self.config.max_seconds_per_item) or None,
+                )
+
+                if next_heartbeat is not None and time.perf_counter() >= next_heartbeat:
+                    dims = (
+                        getattr(box, "length_mm", None),
+                        getattr(box, "width_mm", None),
+                        getattr(box, "height_mm", None),
+                    )
+                    n_placed = len(getattr(pallet, "placements", []) or [])
+                    n_remaining = int(sim_state.remaining_total or 0)
+                    free_rects = 0
+                    free_area = 0
+                    layers = len(getattr(pallet, "layers", []) or [])
+                    height_mm = 0
+                    if layers > 0:
+                        active = pallet.layers[-1]
+                        free_rects = len(getattr(active.bin, "free_rects", []) or [])
+                        try:
+                            free_area = int(active.bin.free_area())
+                        except Exception:
+                            free_area = 0
+                        try:
+                            height_mm = int(pallet.current_height_mm())
+                        except Exception:
+                            height_mm = 0
+                    else:
+                        free_rects = 1
+                        try:
+                            free_area = int(pallet.bin_area_mm2)
+                        except Exception:
+                            free_area = 0
+                        height_mm = 0
+
+                    print(
+                        "[WATCHDOG] item_id=%s dims=%s n_placed=%s n_remaining=%s "
+                        "n_candidates=%s free_rects=%s free_area_mm2=%s layers=%s height_mm=%s"
+                        % (
+                            getattr(box, "box_id", None),
+                            dims,
+                            n_placed,
+                            n_remaining,
+                            items_evaluated,
+                            free_rects,
+                            free_area,
+                            layers,
+                            height_mm,
+                        ),
+                        flush=True,
+                    )
+                    next_heartbeat = time.perf_counter() + heartbeat_sec
+
                 if not preview.feasible:
                     if preview.infeasible_reason in ("NO_SPACE", "HEIGHT_LIMIT"):
                         self.last_blocked_pallets[pallet_id] = preview.infeasible_reason
+                    else:
+                        if deadlock_item is None:
+                            deadlock_item = {
+                                "box_id": getattr(box, "box_id", None),
+                                "pallet_id": pallet_id,
+                                "reason": preview.infeasible_reason,
+                                "dims": (
+                                    getattr(box, "length_mm", None),
+                                    getattr(box, "width_mm", None),
+                                    getattr(box, "height_mm", None),
+                                ),
+                            }
                     continue
+                items_feasible += 1
 
                 dt_extra = selection_dt(idx, self.config.t_select_base, self.config.t_select_step)
                 time_cost = time_penalty(dt_extra, self.config.time_penalty_weight)
@@ -139,6 +233,27 @@ class SchedulerV1:
 
         if cutoff:
             self.deadline_cutoffs_count += 1
-            self._logger.info("Scheduler time budget hit (budget_ms=%s).", self.config.time_budget_ms)
+            self._logger.info(
+                "Scheduler cutoff (%s). budget_ms=%s max_candidates=%s.",
+                cutoff_reason,
+                self.config.time_budget_ms,
+                self.config.max_candidates,
+            )
+
+        self.last_eval_stats = {
+            "items_evaluated": int(items_evaluated),
+            "items_feasible": int(items_feasible),
+            "cutoff": bool(cutoff),
+            "cutoff_reason": cutoff_reason,
+        }
+
+        if items_evaluated > 0 and items_feasible == 0 and not cutoff and not self.last_blocked_pallets:
+            self.last_deadlock = True
+            self.last_deadlock_item = deadlock_item or {
+                "box_id": None,
+                "pallet_id": None,
+                "reason": "NO_FEASIBLE_PLACEMENT",
+                "dims": None,
+            }
 
         return best
