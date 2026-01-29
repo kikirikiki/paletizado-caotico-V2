@@ -62,6 +62,33 @@ class MaxRects2D:
     def free_area(self) -> int:
         return sum(rect.area for rect in self.free_rects)
 
+    def _score_rect(self, rect, w: int, h: int):
+
+        """Score placing (w,h) inside a free rect; lower is better."""
+
+        dw = rect.w - w
+
+        dh = rect.h - h
+
+        area_left = rect.w * rect.h - w * h
+
+        heur = str(getattr(self, 'heuristic', 'baf')).lower()
+
+        if heur in ('baf', 'best_area_fit', 'area'):
+
+            return (area_left, min(dw, dh), max(dw, dh))
+
+        if heur in ('bssf', 'best_short_side_fit', 'short'):
+
+            return (min(dw, dh), max(dw, dh), area_left)
+
+        if heur in ('blsf', 'best_long_side_fit', 'long'):
+
+            return (max(dw, dh), min(dw, dh), area_left)
+
+        return (area_left, min(dw, dh), max(dw, dh))
+
+
     def find_candidate(self, w: int, h: int) -> MaxRectsCandidate | None:
         best: MaxRectsCandidate | None = None
         w = int(w)
@@ -74,106 +101,114 @@ class MaxRects2D:
                     best = cand
         return best
 
-    def place(self, cand: MaxRectsCandidate) -> None:
-        used = Rect(cand.x, cand.y, cand.w, cand.h)
-        self.free_rects = self._place_rect(self.free_rects, used)
+    def simulate_place(self, cand):
 
-    def simulate_place(self, cand: MaxRectsCandidate) -> list[Rect]:
-        used = Rect(cand.x, cand.y, cand.w, cand.h)
-        return self._place_rect(self.free_rects, used)
+        """Return the free_rects list after committing `cand` WITHOUT mutating state.
 
-    def _score_rect(self, rect: Rect, w: int, h: int) -> tuple[int, ...]:
-        dw = rect.w - w
-        dh = rect.h - h
-        short_side = min(dw, dh)
-        long_side = max(dw, dh)
-        area_fit = rect.w * rect.h - w * h
+    
 
-        splits = self._split_rect(rect, Rect(rect.x, rect.y, w, h))
-        delta_free = max(0, len(splits) - 1)
-        other_max = 0
-        for other in self.free_rects:
-            if other is rect:
-                continue
-            other_max = max(other_max, other.area)
-        largest_after = max([other_max] + [r.area for r in splits])
+        This implementation keeps free rectangles DISJOINT so that
 
-        if self.heuristic in ("bssf", "ssf", "short_side"):
-            return (
-                short_side,
-                long_side,
-                area_fit,
-                delta_free,
-                -largest_after,
-                rect.y,
-                rect.x,
-            )
-        if self.heuristic in ("baf", "area", "best_area"):
-            return (
-                area_fit,
-                short_side,
-                long_side,
-                delta_free,
-                -largest_after,
-                rect.y,
-                rect.x,
-            )
-        raise ValueError(f"Unknown MaxRects heuristic: {self.heuristic}")
+        sum(w*h) represents true free area (as expected by tests).
 
-    def _place_rect(self, free_rects: Iterable[Rect], used: Rect) -> list[Rect]:
-        new_free: list[Rect] = []
-        for rect in free_rects:
-            if not rect.intersects(used):
-                new_free.append(rect)
-                continue
-            new_free.extend(self._split_rect(rect, used))
-        new_free = [rect for rect in new_free if rect.w > 0 and rect.h > 0]
-        self._prune_free_rects(new_free)
-        return new_free
+        """
 
-    def _split_rect(self, rect: Rect, used: Rect) -> list[Rect]:
-        if not rect.intersects(used):
-            return [rect]
-        pieces: list[Rect] = []
-        if used.x > rect.x:
-            pieces.append(Rect(rect.x, rect.y, used.x - rect.x, rect.h))
-        if used.x + used.w < rect.x + rect.w:
-            pieces.append(
-                Rect(
-                    used.x + used.w,
-                    rect.y,
-                    rect.x + rect.w - (used.x + used.w),
-                    rect.h,
-                )
-            )
-        if used.y > rect.y:
-            pieces.append(Rect(rect.x, rect.y, rect.w, used.y - rect.y))
-        if used.y + used.h < rect.y + rect.h:
-            pieces.append(
-                Rect(
-                    rect.x,
-                    used.y + used.h,
-                    rect.w,
-                    rect.y + rect.h - (used.y + used.h),
-                )
-            )
-        return [p for p in pieces if p.w > 0 and p.h > 0]
+        if cand is None:
 
-    def _prune_free_rects(self, rects: list[Rect]) -> None:
-        i = 0
-        while i < len(rects):
-            rect_i = rects[i]
-            removed = False
-            j = i + 1
-            while j < len(rects):
-                rect_j = rects[j]
-                if rect_i.contains(rect_j):
-                    rects.pop(j)
-                    continue
-                if rect_j.contains(rect_i):
-                    rects.pop(i)
-                    removed = True
-                    break
-                j += 1
-            if not removed:
-                i += 1
+            return None
+
+    
+
+        px, py, pw, ph = int(cand.x), int(cand.y), int(cand.w), int(cand.h)
+
+        if pw <= 0 or ph <= 0:
+
+            return None
+
+        if not self.free_rects:
+
+            return None
+
+    
+
+        RectCls = self.free_rects[0].__class__
+
+    
+
+        target_idx = None
+
+        target = None
+
+        for i, r in enumerate(self.free_rects):
+
+            if (px >= r.x and py >= r.y and (px + pw) <= (r.x + r.w) and (py + ph) <= (r.y + r.h)):
+
+                target_idx = i
+
+                target = r
+
+                break
+
+        if target is None:
+
+            return None
+
+    
+
+        out = [r for i, r in enumerate(self.free_rects) if i != target_idx]
+
+    
+
+        # Disjoint split of `target` around placed rect (left/right full height + top/bottom in the center column).
+
+        # left strip
+
+        if px > target.x:
+
+            out.append(RectCls(target.x, target.y, px - target.x, target.h))
+
+        # right strip
+
+        rx = px + pw
+
+        if rx < target.x + target.w:
+
+            out.append(RectCls(rx, target.y, (target.x + target.w) - rx, target.h))
+
+        # bottom (center column)
+
+        if py > target.y:
+
+            out.append(RectCls(px, target.y, pw, py - target.y))
+
+        # top (center column)
+
+        ty = py + ph
+
+        if ty < target.y + target.h:
+
+            out.append(RectCls(px, ty, pw, (target.y + target.h) - ty))
+
+    
+
+        # remove any zero/negative rectangles
+
+        out = [r for r in out if getattr(r, 'w', 0) > 0 and getattr(r, 'h', 0) > 0]
+
+        return out
+
+
+    def place(self, cand) -> bool:
+        """Commit a candidate into the bin.
+
+        Must update `free_rects`, otherwise free area never decreases.
+        We reuse `simulate_place()` and then commit the result.
+        """
+        if cand is None:
+            return False
+        free_after = self.simulate_place(cand)
+        if free_after is None:
+            return False
+        self.free_rects = list(free_after)
+        return True
+

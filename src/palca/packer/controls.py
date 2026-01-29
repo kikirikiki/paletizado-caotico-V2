@@ -143,6 +143,20 @@ class StabilityPlacementControl:
             )
             debug["settle_mm"] = float(settle_mm)
 
+        if cfg.enable_corners():
+            pallet.stats.corner_checks += 1
+            corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
+            debug["corners_supported"] = bool(corners_ok)
+            if not corners_ok:
+                pallet.stats.corner_rejects += 1
+                return PlacementControlResult(
+                    feasible=False,
+                    placement=adjusted,
+                    score_delta=0.0,
+                    reason="CORNER_SUPPORT",
+                    debug=debug,
+                )
+
         if cfg.enable_ratio():
             pallet.stats.support_ratio_checks += 1
             ratio, support_area = pallet.support_surface_ratio(adjusted, eps_mm=eps)
@@ -158,19 +172,6 @@ class StabilityPlacementControl:
                     debug=debug,
                 )
 
-        if cfg.enable_corners():
-            pallet.stats.corner_checks += 1
-            corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
-            debug["corners_supported"] = bool(corners_ok)
-            if not corners_ok:
-                pallet.stats.corner_rejects += 1
-                return PlacementControlResult(
-                    feasible=False,
-                    placement=adjusted,
-                    score_delta=0.0,
-                    reason="CORNER_SUPPORT",
-                    debug=debug,
-                )
 
         return PlacementControlResult(
             feasible=True,

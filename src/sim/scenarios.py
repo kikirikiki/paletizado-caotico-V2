@@ -54,7 +54,7 @@ class ScenarioParams:
         t_pick = _format_float(self.t_pick_place)
         k_tag = f"k{self.lookahead_k}"
         ts_tag = f"ts{_format_float(self.time_scale)}"
-        return f\"{self.model}_n{self.n_per_pallet}_t{t_pick}_s{self.staging_cap}_{self.policy}_{k_tag}_{ts_tag}.json\"
+        return f"{self.model}_n{self.n_per_pallet}_t{t_pick}_s{self.staging_cap}_{self.policy}_{k_tag}_{ts_tag}.json"
 
 
 @dataclass(frozen=True)
@@ -135,7 +135,7 @@ def run_grid(
     policy: str = "legacy",
     lookahead_ks: Iterable[int] = (1,),
     time_scales: Iterable[float] = (1.0,),
-    out_csv: str | Path,
+    out_csv: str | Path = 'outputs/grid_results.csv',
     out_json_dir: str | Path = "outputs/grid_json",
 ) -> list[dict[str, object]]:
     out_csv_path = _resolve_output_path(out_csv)
@@ -171,7 +171,7 @@ def run_grid(
             n_per_pallet=params.n_per_pallet,
             t_pick_place=params.t_pick_place,
             staging_cap=params.staging_cap,
-            out_json=str(out_json),
+            out_path=str(out_json),
             policy=params.policy,
             lookahead_k=params.lookahead_k,
             time_scale=params.time_scale,

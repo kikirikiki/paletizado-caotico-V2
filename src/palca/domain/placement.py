@@ -26,6 +26,6 @@ class PlacementPreview:
     placement: Placement | None
     packing_gain: float
     fragmentation: float
+    infeasible_reason: str | None = None
     score_adjustment: float = 0.0
-    infeasible_reason: str | None
     debug: dict[str, Any] | None = None
