@@ -193,6 +193,18 @@ class PolicyPackerScheduler:
             self._pending_closures = dict(self._scheduler.last_blocked_pallets)
             return None
 
+        if plan is None and self._scheduler.last_deadlock:
+            self.stop_reason = "DEADLOCK"
+            details = self._scheduler.last_deadlock_item or {}
+            self.stop_details = dict(details)
+            self._logger.error(
+                "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s",
+                details.get("box_id"),
+                details.get("dims"),
+                details.get("reason"),
+            )
+            return None
+
         # KPI: medir non-head picks + dt_extra
         if plan is not None:
             self.total_picks += 1
@@ -410,6 +422,8 @@ class PolicyPackerScheduler:
                 eps_mm=self.config.stability_eps_mm,
                 settle_snap_grid=self.config.settle_snap_grid,
                 grid_mm=self.config.grid_mm,
+                settle_max_iter=self.config.settle_max_iter,
+                settle_timeout_ms=self.config.settle_timeout_ms,
             ),
             loadbear=LoadBearConfig(
                 heavy_bottom=self.config.heavy_bottom,

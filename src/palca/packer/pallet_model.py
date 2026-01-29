@@ -445,7 +445,10 @@ class PalletModel:
         eps_mm: float,
         snap_grid: bool,
         grid_mm: int | None,
+        max_iter: int | None = None,
+        timeout_ms: int | None = None,
     ) -> tuple[Placement, float]:
+        self.stats.settle_checks += 1
         if placement.z_mm <= eps_mm:
             return placement, 0.0
 
@@ -455,7 +458,15 @@ class PalletModel:
         base_y1 = placement.y_mm + placement.width_mm
 
         candidates: list[int] = [0]
-        for other in self.placements:
+        deadline = None
+        if timeout_ms is not None and int(timeout_ms) > 0:
+            deadline = time.perf_counter() + (float(timeout_ms) / 1000.0)
+        max_iter = int(max_iter) if max_iter is not None else None
+        for idx, other in enumerate(self.placements):
+            if max_iter is not None and max_iter > 0 and idx >= max_iter:
+                break
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
             if not _overlaps_xy_bounds(
                 base_x0,
                 base_y0,
