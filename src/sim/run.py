@@ -339,7 +339,15 @@ def run_simulation(
         result = simulate(arrivals, config, decision_policy=decision_policy)
     finally:
         if viewer is not None:
-            viewer.finalize(block=bool(viz_block))
+            if viz_block:
+                print("[VIZ] Press Enter to continue...", flush=True)
+                viewer.finalize(block=False)
+                try:
+                    input()
+                except EOFError:
+                    pass
+            else:
+                viewer.finalize(block=False)
 
     payload: dict[str, Any] = {
         "model": model,
