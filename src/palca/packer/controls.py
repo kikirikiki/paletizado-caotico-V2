@@ -5,8 +5,8 @@ from typing import Any, Iterable, Protocol, Sequence, TYPE_CHECKING
 
 from ..domain.box import Box
 from ..domain.placement import Placement
-from .maxrects2d import MaxRectsCandidate
 from .layer import LayerState
+from .maxrects2d import MaxRectsCandidate
 
 if TYPE_CHECKING:
     from .pallet_model import PalletModel
@@ -159,6 +159,9 @@ class StabilityPlacementControl:
             if float(settle_mm) > 0.0:
                 pallet.stats.record_settle(float(settle_mm))
 
+        ratio_failed = False
+        corners_failed = False
+
         # 1) SUPPORT RATIO (primero)
         if cfg.enable_ratio():
             pallet.stats.support_ratio_checks += 1
@@ -167,14 +170,34 @@ class StabilityPlacementControl:
             debug["support_area_mm2"] = float(support_area)
             if ratio + 1e-9 < float(cfg.min_support_ratio):
                 pallet.stats.support_ratio_rejects += 1
-                return PlacementControlResult(
-                    feasible=False,
-                    placement=adjusted,
-                    score_delta=0.0,
-                    reason="SUPPORT_RATIO",
-                    debug=debug,
-                )
+                ratio_failed = True
 
+        # 2) CORNERS SUPPORT (después del ratio)
+        if cfg.enable_corners():
+            pallet.stats.corner_checks += 1
+            corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
+            debug["corners_supported"] = bool(corners_ok)
+            if not corners_ok:
+                pallet.stats.corner_rejects += 1
+                corners_failed = True
+
+        if corners_failed:
+            return PlacementControlResult(
+                feasible=False,
+                placement=adjusted,
+                score_delta=0.0,
+                reason="CORNER_SUPPORT",
+                debug=debug,
+            )
+
+        if ratio_failed:
+            return PlacementControlResult(
+                feasible=False,
+                placement=adjusted,
+                score_delta=0.0,
+                reason="SUPPORT_RATIO",
+                debug=debug,
+            )
 
         return PlacementControlResult(
             feasible=True,
