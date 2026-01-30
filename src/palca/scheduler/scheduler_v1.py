@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 import logging
 import time
 from typing import Any, Mapping, Sequence
@@ -115,11 +116,7 @@ class SchedulerV1:
                     continue
 
                 items_evaluated += 1
-                preview = pallet.preview_place(
-                    box,
-                    max_tries_per_item=int(self.config.max_tries_per_item) or None,
-                    max_seconds_per_item=float(self.config.max_seconds_per_item) or None,
-                )
+                preview = self._preview_place(pallet, box)
 
                 if next_heartbeat is not None and time.perf_counter() >= next_heartbeat:
                     dims = (
@@ -257,3 +254,46 @@ class SchedulerV1:
             }
 
         return best
+
+    def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
+        kwargs: dict[str, object] = {}
+        max_tries = int(self.config.max_tries_per_item) if self.config.max_tries_per_item else 0
+        max_seconds = float(self.config.max_seconds_per_item) if self.config.max_seconds_per_item else 0.0
+        if max_tries > 0:
+            kwargs["max_tries_per_item"] = max_tries
+        if max_seconds > 0:
+            kwargs["max_seconds_per_item"] = max_seconds
+
+        preview_fn = pallet.preview_place
+        if not kwargs:
+            return preview_fn(box)
+
+        filtered = self._filter_preview_kwargs(preview_fn, kwargs)
+        if not filtered:
+            return preview_fn(box)
+
+        try:
+            return preview_fn(box, **filtered)
+        except TypeError as exc:
+            if self._is_unexpected_kwarg(exc):
+                return preview_fn(box)
+            raise
+
+    @staticmethod
+    def _filter_preview_kwargs(preview_fn: object, kwargs: dict[str, object]) -> dict[str, object]:
+        try:
+            sig = inspect.signature(preview_fn)
+        except (TypeError, ValueError):
+            return dict(kwargs)
+
+        params = sig.parameters.values()
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+            return dict(kwargs)
+
+        accepted = {p.name for p in params}
+        return {k: v for k, v in kwargs.items() if k in accepted}
+
+    @staticmethod
+    def _is_unexpected_kwarg(exc: TypeError) -> bool:
+        msg = str(exc)
+        return "unexpected keyword argument" in msg or "got an unexpected keyword argument" in msg
