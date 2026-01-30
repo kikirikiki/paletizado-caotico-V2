@@ -109,6 +109,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--viz-labels", action="store_true", help="Muestra box_id/orientacion en cada rect")
     parser.add_argument("--viz-block", action="store_true", help="Mantiene la ventana abierta al final")
     parser.add_argument(
+        "--viz-dest",
+        type=int,
+        default=0,
+        help="Si >0, visualiza solo ese destino/palet (1..6). 0 = todos los detectados.",
+    )
+    parser.add_argument(
         "--viz-debug",
         action="store_true",
         help="Debug del visor (imprime destinos detectados y confirma attach)",
@@ -118,16 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _detect_destinations(arrivals: list[Arrival]) -> list[int]:
-    """
-    Intenta detectar destinos reales del excel para configurar el viewer con pallet_ids correctos.
-    Normalmente serán 1..6 o 0..5.
-    """
     dests: set[int] = set()
     for a in arrivals:
         try:
             dests.add(int(a.destination))
         except Exception:
-            # Si algún destino no es int, lo ignoramos aquí; en tu proyecto deberían ser 0..5 o 1..6.
             continue
     return sorted(dests)
 
@@ -141,10 +142,6 @@ def _create_viewer_if_enabled(
     viz_debug: bool,
     pallet_ids: list[int] | None,
 ) -> tuple[Any | None, Any | None]:
-    """
-    Crea el viewer de forma perezosa. Si matplotlib no está instalado, falla solo si enabled=True.
-    Devuelve (viewer, Rect2DClass).
-    """
     if not enabled:
         return None, None
 
@@ -158,16 +155,14 @@ def _create_viewer_if_enabled(
     except ImportError as exc:
         raise SystemExit("ERROR: matplotlib es requerido para --viz. Instala con `pip install matplotlib`.") from exc
 
-    # Si no detectamos destinos o no son 6, por defecto usamos 1..6
-    if not pallet_ids or len(pallet_ids) != 6:
-        pallet_ids = [1, 2, 3, 4, 5, 6]
+    # si no hay destinos detectables, al menos crea 1
+    if not pallet_ids:
+        pallet_ids = [1]
 
     if viz_debug:
         print(f"[VIZ] pallet_ids for viewer: {pallet_ids}", flush=True)
 
-    # IMPORTANTE: para depurar, NO limpiar por capa.
-    # Esto evita el efecto “solo veo una caja que cambia” si layer_idx está mal.
-    show_current_layer_only = False
+    show_current_layer_only = False  # más fácil depurar
 
     if viz_mode == "3d":
         viewer = PalletViewer3D(
@@ -175,6 +170,7 @@ def _create_viewer_if_enabled(
             pallet_ids=tuple(pallet_ids),
             update_every=viz_every,
             show_current_layer_only=show_current_layer_only,
+            debug=viz_debug,
         )
     else:
         viewer = PalletViewer(
@@ -238,20 +234,22 @@ def run_simulation(
     viz_labels: bool = False,
     viz_block: bool = False,
     viz_debug: bool = False,
+    viz_dest: int = 0,
 ) -> dict[str, Any]:
     if out_path is None and out_json is not None:
         out_path = out_json
+
     priority_col = None
     if isinstance(priority_mode, str) and priority_mode.lower().startswith("excel"):
         parts = priority_mode.split(":", 1)
         if len(parts) == 2 and parts[1].strip():
             priority_col = parts[1].strip()
+
     arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
 
-    # time_scale afecta a la llegada (más picos)
     if time_scale != 1.0:
         arrivals = [
             Arrival(
@@ -265,8 +263,17 @@ def run_simulation(
             for a in arrivals
         ]
 
-    # Crear viewer *después* de cargar arrivals, para detectar destinos reales
     pallet_ids = _detect_destinations(arrivals) if viz else None
+
+    # aplicar filtro de un solo destino para ver 1 palet
+    if viz and viz_dest and viz_dest > 0:
+        if pallet_ids and viz_dest in pallet_ids:
+            pallet_ids = [viz_dest]
+        else:
+            pallet_ids = [viz_dest]
+        if viz_debug:
+            print(f"[VIZ] viz_dest={viz_dest} => pallet_ids={pallet_ids}", flush=True)
+
     viewer, rect_cls = _create_viewer_if_enabled(
         enabled=viz,
         viz_mode=viz_mode,
@@ -278,7 +285,6 @@ def run_simulation(
 
     if viz_debug and viz:
         print(f"[VIZ] detected destinations from excel: {pallet_ids}", flush=True)
-        # Esto ayuda a policies que lean env var
         os.environ["PALCA_VIZ_DEBUG"] = "1"
 
     config = SimConfig(
@@ -366,7 +372,6 @@ def run_simulation(
             "policy": policy,
             "lookahead_k": lookahead_k,
             "time_scale": time_scale,
-            # palca
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
             "t_select_base": t_select_base,

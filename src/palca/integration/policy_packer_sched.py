@@ -276,7 +276,14 @@ class PolicyPackerScheduler:
                 rect=rect_cls(float(x_mm), float(y_mm), float(w_mm), float(h_mm_2d)),
                 box_id=str(getattr(placement, "box_id", None)) if getattr(placement, "box_id", None) is not None else None,
                 orientation=90 if getattr(placement, "rot90", False) else 0,
-                meta={"z0": float(z0_mm), "h": float(h_mm)},
+                meta={
+                    "z_mm": float(z0_mm),
+                    "height_mm": float(h_mm),
+                    # dejamos también las antiguas por compatibilidad
+                    "z0": float(z0_mm),
+                    "h": float(h_mm),
+                },
+
             )
 
             if self._viz_debug:
@@ -287,7 +294,7 @@ class PolicyPackerScheduler:
                     print(
                         f"[VIZ] n={self._viewer_event_count} dest={plan.pallet_id} mapped={pallet_id} "
                         f"layer_id={getattr(placement,'layer_id',None)} layer_idx={getattr(placement,'layer_idx',None)} "
-                        f"z0={z0_mm:.1f} "
+                        f"z0={z0_mm:.1f} h={h_mm:.1f} "
                         f"src={src} chosen=({x_mm:.1f},{y_mm:.1f},{w_mm:.1f},{h_mm_2d:.1f}) "
                         f"preview=({px},{py},{pw},{ph}) committed=({cx},{cy},{cw},{ch})",
                         flush=True,
