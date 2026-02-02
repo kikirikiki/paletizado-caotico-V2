@@ -242,10 +242,36 @@ class PalletModel:
                 debug=debug,
             )
 
-        best = max(
-            candidates,
-            key=lambda c: (c.packing_gain - c.fragmentation + c.score_delta, -c.layer_id),
-        )
+        layer_best = self._best_by_maxrects_score(candidates)
+
+        def _inv_maxrects_score(cand: _LayerCandidate, objective: float) -> tuple[int, ...]:
+            score = getattr(cand.candidate, "score", None)
+            if score is None:
+                score_tuple = (
+                    -(objective),
+                    cand.candidate.x,
+                    cand.candidate.y,
+                    cand.candidate.w,
+                    cand.candidate.h,
+                )
+            else:
+                score_tuple = tuple(score)
+            return tuple(-int(v) for v in score_tuple)
+
+        def _final_key(cand: _LayerCandidate) -> tuple[float, int, tuple[int, ...], int, int, int, int]:
+            objective = cand.packing_gain - cand.fragmentation + cand.score_delta
+            inv_score = _inv_maxrects_score(cand, objective)
+            return (
+                objective,
+                -cand.layer_id,
+                inv_score,
+                -cand.candidate.x,
+                -cand.candidate.y,
+                -cand.candidate.w,
+                -cand.candidate.h,
+            )
+
+        best = max(layer_best, key=_final_key)
         placement = best.placement
         debug = dict(best.debug)
         debug["rejected_by_controls"] = rejected_by_controls
@@ -325,13 +351,32 @@ class PalletModel:
             next_height = max(layer.height_mm, height_mm)
             if layer.z_mm + next_height > self.spec.max_height_mm:
                 continue
-            for cand in self.controls.point.candidates(
-                layer=layer,
-                length_mm=l_mm,
-                width_mm=w_mm,
-                height_mm=height_mm,
-                is_new_layer=is_new_layer,
-            ):
+            base_candidates = list(
+                self.controls.point.candidates(
+                    layer=layer,
+                    length_mm=l_mm,
+                    width_mm=w_mm,
+                    height_mm=height_mm,
+                    is_new_layer=is_new_layer,
+                )
+            )
+            if is_new_layer:
+                seeded_points = self._seed_new_layer_points(layer.z_mm, l_mm, w_mm)
+                if seeded_points:
+                    seeded = [
+                        MaxRectsCandidate(x, y, int(l_mm), int(w_mm), score=(0,))
+                        for x, y in seeded_points
+                    ]
+                    seen: set[tuple[int, int, int, int]] = set()
+                    merged: list[MaxRectsCandidate] = []
+                    for cand in base_candidates + seeded:
+                        key = (int(cand.x), int(cand.y), int(cand.w), int(cand.h))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        merged.append(cand)
+                    base_candidates = merged
+            for cand in base_candidates:
                 if budget is not None and budget.should_stop():
                     return candidates, rejected_by_controls, True
                 if budget is not None:
@@ -399,11 +444,82 @@ class PalletModel:
                 )
         return candidates, rejected_by_controls, False
 
+    def _seed_new_layer_points(
+        self,
+        layer_z_mm: int,
+        length_mm: int,
+        width_mm: int,
+    ) -> list[tuple[int, int]]:
+        if not self.placements:
+            return []
+
+        l_mm = int(length_mm)
+        w_mm = int(width_mm)
+        if l_mm <= 0 or w_mm <= 0:
+            return []
+
+        bin_l = int(self.spec.bin_length_mm)
+        bin_w = int(self.spec.bin_width_mm)
+        max_x = bin_l - l_mm
+        max_y = bin_w - w_mm
+        if max_x < 0 or max_y < 0:
+            return []
+
+        offset = int(self.spec.offset_mm)
+        layer_z = int(layer_z_mm)
+        points: set[tuple[int, int]] = set()
+        for placement in self.placements:
+            top_z = int(placement.z_mm) + int(placement.height_mm)
+            if top_z != layer_z:
+                continue
+            x0 = int(placement.x_mm) - offset
+            y0 = int(placement.y_mm) - offset
+            x1 = x0 + int(placement.length_mm)
+            y1 = y0 + int(placement.width_mm)
+            for x, y in (
+                (x0, y0),
+                (x1 - l_mm, y0),
+                (x0, y1 - w_mm),
+                (x1 - l_mm, y1 - w_mm),
+            ):
+                clamped_x = min(max(int(x), 0), max_x)
+                clamped_y = min(max(int(y), 0), max_y)
+                if 0 <= clamped_x <= max_x and 0 <= clamped_y <= max_y:
+                    points.add((clamped_x, clamped_y))
+
+        return sorted(points, key=lambda pt: (pt[0], pt[1]))
+
     def _orientations(self, length_mm: int, width_mm: int) -> list[tuple[bool, tuple[int, int]]]:
         orientations = [(False, (length_mm, width_mm))]
         if self.spec.allow_rotate and length_mm != width_mm:
             orientations.append((True, (width_mm, length_mm)))
         return orientations
+
+    def _best_by_maxrects_score(self, candidates: list[_LayerCandidate]) -> list[_LayerCandidate]:
+        def _layer_key(cand: _LayerCandidate) -> tuple[float, ...]:
+            score = getattr(cand.candidate, "score", None)
+            if score is None:
+                objective = cand.packing_gain - cand.fragmentation + cand.score_delta
+                return (
+                    -(objective),
+                    cand.candidate.x,
+                    cand.candidate.y,
+                    cand.candidate.w,
+                    cand.candidate.h,
+                )
+            return tuple(score) + (
+                cand.candidate.x,
+                cand.candidate.y,
+                cand.candidate.w,
+                cand.candidate.h,
+            )
+
+        best_by_layer: dict[int, _LayerCandidate] = {}
+        for cand in candidates:
+            prev = best_by_layer.get(cand.layer_id)
+            if prev is None or _layer_key(cand) < _layer_key(prev):
+                best_by_layer[cand.layer_id] = cand
+        return list(best_by_layer.values())
 
     def support_surface_ratio(self, placement: Placement, *, eps_mm: float) -> tuple[float, float]:
         if placement.z_mm <= eps_mm:
