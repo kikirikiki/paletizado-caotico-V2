@@ -91,22 +91,36 @@ class MaxRects2D:
     # Scoring / candidate search
     # ---------------------------
 
-    def _score_rect(self, rect: Rect, w: int, h: int) -> tuple[int, int, int]:
+    def _score_rect(self, rect: Rect, w: int, h: int) -> tuple[int, ...]:
         """Score placing (w,h) inside a free rect; lower is better."""
         dw = rect.w - w
         dh = rect.h - h
         area_left = rect.w * rect.h - w * h
 
+        placed = Rect(rect.x, rect.y, w, h)
+        splits = self._split_free_rect(rect, placed)
+        best_free_area = 0
+        best_free_side = 0
+        for piece in splits:
+            area = piece.area
+            if area > best_free_area:
+                best_free_area = area
+            side = piece.w if piece.w > piece.h else piece.h
+            if side > best_free_side:
+                best_free_side = side
+
+        tie_break = (-best_free_area, -best_free_side, rect.x, rect.y, w, h)
+
         heur = self.heuristic
         if heur in ("baf", "best_area_fit", "area"):
-            return (area_left, min(dw, dh), max(dw, dh))
+            return (area_left, min(dw, dh), max(dw, dh), *tie_break)
         if heur in ("bssf", "best_short_side_fit", "short"):
-            return (min(dw, dh), max(dw, dh), area_left)
+            return (min(dw, dh), max(dw, dh), area_left, *tie_break)
         if heur in ("blsf", "best_long_side_fit", "long"):
-            return (max(dw, dh), min(dw, dh), area_left)
+            return (max(dw, dh), min(dw, dh), area_left, *tie_break)
 
         # default = BAF
-        return (area_left, min(dw, dh), max(dw, dh))
+        return (area_left, min(dw, dh), max(dw, dh), *tie_break)
 
     def find_candidate(self, w: int, h: int) -> Optional[MaxRectsCandidate]:
         w = int(w)
@@ -114,7 +128,7 @@ class MaxRects2D:
         if w <= 0 or h <= 0:
             return None
 
-        best_score: Optional[tuple[int, int, int]] = None
+        best_score: Optional[tuple[int, ...]] = None
         best_x = 0
         best_y = 0
 
