@@ -322,7 +322,8 @@ class PalletModel:
         layer.bin.place(cand)
         layer.height_mm = max(layer.height_mm, placement.height_mm)
         self.placements.append(placement)
-        if not self.corners_supported(placement, eps_mm=1e-6):
+        com_supported, _ = self.com_support_info(placement, eps_mm=1e-6)
+        if not com_supported:
             self.stats.floating_boxes_count += 1
         return placement
 
@@ -553,6 +554,43 @@ class PalletModel:
             if not _corner_supported(cx, cy, supports, eps_mm=eps_mm):
                 return False
         return True
+
+    def com_support_info(self, placement: Placement, *, eps_mm: float) -> tuple[bool, int]:
+        if placement.z_mm <= eps_mm:
+            return True, 0
+
+        cx = float(placement.x_mm) + float(placement.length_mm) / 2.0
+        cy = float(placement.y_mm) + float(placement.width_mm) / 2.0
+
+        ax0 = float(placement.x_mm)
+        ay0 = float(placement.y_mm)
+        ax1 = float(placement.x_mm + placement.length_mm)
+        ay1 = float(placement.y_mm + placement.width_mm)
+
+        eps = float(eps_mm)
+        com_supported = False
+        overlaps_count = 0
+        for below in self._supporting_placements(placement, eps_mm=eps_mm):
+            bx0 = float(below.x_mm)
+            by0 = float(below.y_mm)
+            bx1 = float(below.x_mm + below.length_mm)
+            by1 = float(below.y_mm + below.width_mm)
+
+            x0 = max(ax0, bx0)
+            y0 = max(ay0, by0)
+            x1 = min(ax1, bx1)
+            y1 = min(ay1, by1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+
+            overlaps_count += 1
+            if (x0 - eps) <= cx <= (x1 + eps) and (y0 - eps) <= cy <= (y1 + eps):
+                com_supported = True
+
+        return com_supported, int(overlaps_count)
+
+    def com_supported(self, placement: Placement, *, eps_mm: float) -> bool:
+        return self.com_support_info(placement, eps_mm=eps_mm)[0]
 
     def settle_placement(
         self,

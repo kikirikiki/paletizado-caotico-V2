@@ -175,9 +175,12 @@ class StabilityPlacementControl:
         # 2) CORNERS SUPPORT (después del ratio)
         if cfg.enable_corners():
             pallet.stats.corner_checks += 1
+            com_supported, overlaps = pallet.com_support_info(adjusted, eps_mm=eps)
             corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
+            debug["com_supported"] = bool(com_supported)
+            debug["supported_overlaps_count"] = int(overlaps)
             debug["corners_supported"] = bool(corners_ok)
-            if not corners_ok:
+            if not com_supported:
                 pallet.stats.corner_rejects += 1
                 corners_failed = True
 
