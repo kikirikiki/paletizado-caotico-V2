@@ -175,75 +175,7 @@ class PalletModel:
                 debug={"reason": "manifest_control", "candidates_evaluated": 0},
             )
 
-        candidates: list[_LayerCandidate] = []
         rejected_by_controls = 0
-        budget_hit = False
-
-        active_layer = self.layers[-1] if self.layers else None
-        if active_layer is not None:
-            layer_candidates, layer_rejected, layer_budget_hit = self._preview_in_layer(
-                active_layer,
-                box,
-                length_mm,
-                width_mm,
-                height_mm,
-                is_new_layer=False,
-                budget=budget,
-            )
-            candidates.extend(layer_candidates)
-            rejected_by_controls += layer_rejected
-            budget_hit = budget_hit or layer_budget_hit
-
-        if self._can_open_new_layer(height_mm):
-            new_layer_id = len(self.layers)
-            z_mm = self.current_height_mm()
-            new_layer = LayerState(
-                layer_id=new_layer_id,
-                z_mm=z_mm,
-                bin=MaxRects2D(bin_l, bin_w, heuristic=self.heuristic),
-            )
-            layer_candidates, layer_rejected, layer_budget_hit = self._preview_in_layer(
-                new_layer,
-                box,
-                length_mm,
-                width_mm,
-                height_mm,
-                is_new_layer=True,
-                budget=budget,
-            )
-            candidates.extend(layer_candidates)
-            rejected_by_controls += layer_rejected
-            budget_hit = budget_hit or layer_budget_hit
-
-        if not candidates:
-            reason = "NO_SPACE"
-            if not self._can_open_new_layer(height_mm):
-                reason = "HEIGHT_LIMIT"
-            if rejected_by_controls > 0:
-                reason = "STABILITY"
-            if budget is not None:
-                if budget.timeout_hit:
-                    reason = "TIMEOUT"
-                elif budget.limit_hit:
-                    reason = "CANDIDATE_LIMIT"
-            debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
-            if budget is not None:
-                debug["candidates_evaluated"] = int(budget.candidates_checked)
-                if budget.limit_hit:
-                    debug["candidate_limit_hit"] = True
-                if budget.timeout_hit:
-                    debug["timeout_hit"] = True
-            return PlacementPreview(
-                feasible=False,
-                placement=None,
-                packing_gain=0.0,
-                fragmentation=0.0,
-                infeasible_reason=reason,
-                debug=debug,
-            )
-
-        layer_best = self._best_by_maxrects_score(candidates)
-
         def _inv_maxrects_score(cand: _LayerCandidate, objective: float) -> tuple[int, ...]:
             score = getattr(cand.candidate, "score", None)
             if score is None:
@@ -258,23 +190,111 @@ class PalletModel:
                 score_tuple = tuple(score)
             return tuple(-int(v) for v in score_tuple)
 
-        def _final_key(cand: _LayerCandidate) -> tuple[float, int, tuple[int, ...], int, int, int, int]:
-            objective = cand.packing_gain - cand.fragmentation + cand.score_delta
+        objective_eps = 2e-3
+
+        def _objective(cand: _LayerCandidate) -> float:
+            return cand.packing_gain - cand.fragmentation + cand.score_delta
+
+        def _tie_key(cand: _LayerCandidate, objective: float) -> tuple[tuple[int, ...], int, int, int, int, int]:
             inv_score = _inv_maxrects_score(cand, objective)
             return (
-                objective,
-                -cand.layer_id,
                 inv_score,
+                -cand.layer_id,
                 -cand.candidate.x,
                 -cand.candidate.y,
                 -cand.candidate.w,
                 -cand.candidate.h,
             )
 
-        best = max(layer_best, key=_final_key)
-        placement = best.placement
-        debug = dict(best.debug)
-        debug["rejected_by_controls"] = rejected_by_controls
+        def _select_best(candidates: list[_LayerCandidate]) -> _LayerCandidate:
+            best = candidates[0]
+            best_objective = _objective(best)
+            best_tie = _tie_key(best, best_objective)
+            for cand in candidates[1:]:
+                obj = _objective(cand)
+                if obj > best_objective + objective_eps:
+                    best = cand
+                    best_objective = obj
+                    best_tie = _tie_key(cand, obj)
+                    continue
+                if best_objective > obj + objective_eps:
+                    continue
+                tie = _tie_key(cand, obj)
+                if tie > best_tie:
+                    best = cand
+                    best_objective = obj
+                    best_tie = tie
+            return best
+
+        def _build_preview(best: _LayerCandidate) -> PlacementPreview:
+            placement = best.placement
+            debug = dict(best.debug)
+            debug["rejected_by_controls"] = rejected_by_controls
+            if budget is not None:
+                debug["candidates_evaluated"] = int(budget.candidates_checked)
+                if budget.limit_hit:
+                    debug["candidate_limit_hit"] = True
+                if budget.timeout_hit:
+                    debug["timeout_hit"] = True
+            return PlacementPreview(
+                feasible=True,
+                placement=placement,
+                packing_gain=best.packing_gain,
+                fragmentation=best.fragmentation,
+                score_adjustment=best.score_delta,
+                infeasible_reason=None,
+                debug=debug,
+            )
+
+        active_layer = self.layers[-1] if self.layers else None
+        if active_layer is not None:
+            layer_candidates, layer_rejected, _ = self._preview_in_layer(
+                active_layer,
+                box,
+                length_mm,
+                width_mm,
+                height_mm,
+                is_new_layer=False,
+                budget=budget,
+            )
+            rejected_by_controls += layer_rejected
+            if layer_candidates:
+                best = _select_best(layer_candidates)
+                return _build_preview(best)
+
+        if self._can_open_new_layer(height_mm):
+            new_layer_id = len(self.layers)
+            z_mm = self.current_height_mm()
+            new_layer = LayerState(
+                layer_id=new_layer_id,
+                z_mm=z_mm,
+                bin=MaxRects2D(bin_l, bin_w, heuristic=self.heuristic),
+            )
+            layer_candidates, layer_rejected, _ = self._preview_in_layer(
+                new_layer,
+                box,
+                length_mm,
+                width_mm,
+                height_mm,
+                is_new_layer=True,
+                budget=budget,
+            )
+            rejected_by_controls += layer_rejected
+            if layer_candidates:
+                best = _select_best(layer_candidates)
+                return _build_preview(best)
+
+        reason = "NO_SPACE"
+        if not self._can_open_new_layer(height_mm):
+            reason = "HEIGHT_LIMIT"
+        if rejected_by_controls > 0:
+            reason = "STABILITY"
+        if budget is not None:
+            if budget.timeout_hit:
+                reason = "TIMEOUT"
+            elif budget.limit_hit:
+                reason = "CANDIDATE_LIMIT"
+        debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
         if budget is not None:
             debug["candidates_evaluated"] = int(budget.candidates_checked)
             if budget.limit_hit:
@@ -282,12 +302,11 @@ class PalletModel:
             if budget.timeout_hit:
                 debug["timeout_hit"] = True
         return PlacementPreview(
-            feasible=True,
-            placement=placement,
-            packing_gain=best.packing_gain,
-            fragmentation=best.fragmentation,
-            score_adjustment=best.score_delta,
-            infeasible_reason=None,
+            feasible=False,
+            placement=None,
+            packing_gain=0.0,
+            fragmentation=0.0,
+            infeasible_reason=reason,
             debug=debug,
         )
 

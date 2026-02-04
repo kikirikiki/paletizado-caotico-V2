@@ -122,29 +122,39 @@ class MaxRects2D:
         # default = BAF
         return (area_left, min(dw, dh), max(dw, dh), *tie_break)
 
-    def find_candidate(self, w: int, h: int) -> Optional[MaxRectsCandidate]:
+    def find_candidates(self, w: int, h: int, *, k: int = 25) -> list[MaxRectsCandidate]:
         w = int(w)
         h = int(h)
-        if w <= 0 or h <= 0:
-            return None
+        k = int(k)
+        if w <= 0 or h <= 0 or k <= 0:
+            return []
 
-        best_score: Optional[tuple[int, ...]] = None
-        best_x = 0
-        best_y = 0
+        candidates: list[MaxRectsCandidate] = []
+        seen: set[tuple[int, int, int, int]] = set()
 
         # localize for speed
         score_fn = self._score_rect
         for r in self.free_rects:
             if w <= r.w and h <= r.h:
                 sc = score_fn(r, w, h)
-                if best_score is None or sc < best_score:
-                    best_score = sc
-                    best_x = r.x
-                    best_y = r.y
+                cand = MaxRectsCandidate(r.x, r.y, w, h, sc)
+                key = (int(cand.x), int(cand.y), int(cand.w), int(cand.h))
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(cand)
 
-        if best_score is None:
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda c: c.score)
+        return candidates[:k]
+
+    def find_candidate(self, w: int, h: int) -> Optional[MaxRectsCandidate]:
+        candidates = self.find_candidates(w, h, k=1)
+        if not candidates:
             return None
-        return MaxRectsCandidate(best_x, best_y, w, h, best_score)
+        return candidates[0]
 
     # ---------------------------
     # Free-rect maintenance

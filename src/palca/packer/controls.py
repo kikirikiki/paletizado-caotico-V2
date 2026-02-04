@@ -8,6 +8,8 @@ from ..domain.placement import Placement
 from .layer import LayerState
 from .maxrects2d import MaxRectsCandidate
 
+DEFAULT_K = 25
+
 if TYPE_CHECKING:
     from .pallet_model import PalletModel
 
@@ -114,10 +116,7 @@ class DefaultPointControl:
         height_mm: int,
         is_new_layer: bool,
     ) -> Iterable[MaxRectsCandidate]:
-        cand = layer.bin.find_candidate(length_mm, width_mm)
-        if cand is None:
-            return []
-        return [cand]
+        return layer.bin.find_candidates(length_mm, width_mm, k=DEFAULT_K)
 
 
 @dataclass(frozen=True)
