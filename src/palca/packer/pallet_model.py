@@ -9,7 +9,7 @@ from ..domain.pallet_spec import PalletSpec
 from ..domain.placement import Placement, PlacementPreview
 from .controls import ControlConfig, ControlStack, build_control_stack
 from .layer import LayerState
-from .maxrects2d import MaxRects2D, MaxRectsCandidate
+from .maxrects2d import MaxRects2D, MaxRectsCandidate, Rect
 from .scoring import ScoringWeights, packing_gain, fragmentation
 
 
@@ -176,6 +176,7 @@ class PalletModel:
             )
 
         rejected_by_controls = 0
+        evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         def _inv_maxrects_score(cand: _LayerCandidate, objective: float) -> tuple[int, ...]:
             score = getattr(cand.candidate, "score", None)
             if score is None:
@@ -248,7 +249,7 @@ class PalletModel:
 
         active_layer = self.layers[-1] if self.layers else None
         if active_layer is not None:
-            layer_candidates, layer_rejected, _ = self._preview_in_layer(
+            layer_candidates, layer_rejected, layer_evaluated, _ = self._preview_in_layer(
                 active_layer,
                 box,
                 length_mm,
@@ -258,6 +259,7 @@ class PalletModel:
                 budget=budget,
             )
             rejected_by_controls += layer_rejected
+            evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
                 return _build_preview(best)
@@ -270,7 +272,7 @@ class PalletModel:
                 z_mm=z_mm,
                 bin=MaxRects2D(bin_l, bin_w, heuristic=self.heuristic),
             )
-            layer_candidates, layer_rejected, _ = self._preview_in_layer(
+            layer_candidates, layer_rejected, layer_evaluated, _ = self._preview_in_layer(
                 new_layer,
                 box,
                 length_mm,
@@ -280,6 +282,7 @@ class PalletModel:
                 budget=budget,
             )
             rejected_by_controls += layer_rejected
+            evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
                 return _build_preview(best)
@@ -301,6 +304,17 @@ class PalletModel:
                 debug["candidate_limit_hit"] = True
             if budget.timeout_hit:
                 debug["timeout_hit"] = True
+        if reason == "STABILITY" and evaluated_candidates:
+            evaluated_candidates.sort(
+                key=lambda item: (
+                    -float(item[0]),
+                    int(item[1].get("x", 0)),
+                    int(item[1].get("y", 0)),
+                    int(item[1].get("w", 0)),
+                    int(item[1].get("h", 0)),
+                )
+            )
+            debug["stability_candidates"] = [entry for _, entry in evaluated_candidates[:10]]
         return PlacementPreview(
             feasible=False,
             placement=None,
@@ -352,6 +366,21 @@ class PalletModel:
     def _fits_in_bin(self, length_mm: int, width_mm: int, bin_l: int, bin_w: int) -> bool:
         return length_mm <= bin_l and width_mm <= bin_w
 
+    def _tower_penalty(self, placement: Placement, packing_gain: float) -> float:
+        if packing_gain <= 0:
+            return 0.0
+        for prev in self.placements:
+            if prev.z_mm == placement.z_mm:
+                continue
+            if (
+                prev.x_mm == placement.x_mm
+                and prev.y_mm == placement.y_mm
+                and prev.length_mm == placement.length_mm
+                and prev.width_mm == placement.width_mm
+            ):
+                return -float(self.scoring_weights.tower_penalty_ratio) * float(packing_gain)
+        return 0.0
+
     def _preview_in_layer(
         self,
         layer: LayerState,
@@ -362,11 +391,12 @@ class PalletModel:
         *,
         is_new_layer: bool,
         budget: _PreviewBudget | None = None,
-    ) -> tuple[list[_LayerCandidate], int, bool]:
+    ) -> tuple[list[_LayerCandidate], int, list[tuple[float, dict[str, Any]]], bool]:
         candidates: list[_LayerCandidate] = []
         rejected_by_controls = 0
+        evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         if budget is not None and budget.should_stop():
-            return candidates, rejected_by_controls, True
+            return candidates, rejected_by_controls, evaluated_candidates, True
         for rot90, (l_mm, w_mm) in self._orientations(length_mm, width_mm):
             next_height = max(layer.height_mm, height_mm)
             if layer.z_mm + next_height > self.spec.max_height_mm:
@@ -381,7 +411,12 @@ class PalletModel:
                 )
             )
             if is_new_layer:
-                seeded_points = self._seed_new_layer_points(layer.z_mm, l_mm, w_mm)
+                seeded_points = self._seed_new_layer_points(
+                    layer.z_mm,
+                    l_mm,
+                    w_mm,
+                    free_rects=layer.bin.free_rects,
+                )
                 if seeded_points:
                     seeded = [
                         MaxRectsCandidate(x, y, int(l_mm), int(w_mm), score=(0,))
@@ -398,12 +433,14 @@ class PalletModel:
                     base_candidates = merged
             for cand in base_candidates:
                 if budget is not None and budget.should_stop():
-                    return candidates, rejected_by_controls, True
+                    return candidates, rejected_by_controls, evaluated_candidates, True
                 if budget is not None:
                     budget.candidates_checked += 1
                 free_after = layer.bin.simulate_place(cand)
                 gain = packing_gain(l_mm * w_mm, self.bin_area_mm2)
                 frag = fragmentation(free_after)
+                weighted_gain = self.scoring_weights.packing_gain_weight * gain
+                weighted_frag = self.scoring_weights.fragmentation_weight * frag
                 debug = {
                     "layer_id": layer.layer_id,
                     "is_new_layer": is_new_layer,
@@ -442,6 +479,26 @@ class PalletModel:
                         feasible = False
                         break
 
+                objective = weighted_gain - weighted_frag + score_delta
+                if feasible:
+                    tower_penalty = self._tower_penalty(adjusted, weighted_gain)
+                    if tower_penalty:
+                        score_delta += tower_penalty
+                        objective += tower_penalty
+                        debug["tower_penalty"] = float(tower_penalty)
+
+                candidate_info: dict[str, Any] = {
+                    "x": int(adjusted.x_mm),
+                    "y": int(adjusted.y_mm),
+                    "w": int(adjusted.length_mm),
+                    "h": int(adjusted.width_mm),
+                }
+                if "support_ratio" in debug:
+                    candidate_info["support_ratio"] = float(debug["support_ratio"])
+                if "com_supported" in debug:
+                    candidate_info["com_supported"] = bool(debug["com_supported"])
+                evaluated_candidates.append((float(objective), candidate_info))
+
                 if not feasible:
                     continue
 
@@ -455,20 +512,22 @@ class PalletModel:
                         width_mm=w_mm,
                         z_mm=adjusted.z_mm,
                         next_height_mm=next_height,
-                        packing_gain=self.scoring_weights.packing_gain_weight * gain,
-                        fragmentation=self.scoring_weights.fragmentation_weight * frag,
+                        packing_gain=weighted_gain,
+                        fragmentation=weighted_frag,
                         score_delta=score_delta,
                         placement=adjusted,
                         debug=debug,
                     )
                 )
-        return candidates, rejected_by_controls, False
+        return candidates, rejected_by_controls, evaluated_candidates, False
 
     def _seed_new_layer_points(
         self,
         layer_z_mm: int,
         length_mm: int,
         width_mm: int,
+        *,
+        free_rects: Iterable[Rect] | None = None,
     ) -> list[tuple[int, int]]:
         if not self.placements:
             return []
@@ -485,6 +544,7 @@ class PalletModel:
         if max_x < 0 or max_y < 0:
             return []
 
+        free_rects_list = list(free_rects) if free_rects is not None else None
         offset = int(self.spec.offset_mm)
         layer_z = int(layer_z_mm)
         points: set[tuple[int, int]] = set()
@@ -504,8 +564,13 @@ class PalletModel:
             ):
                 clamped_x = min(max(int(x), 0), max_x)
                 clamped_y = min(max(int(y), 0), max_y)
-                if 0 <= clamped_x <= max_x and 0 <= clamped_y <= max_y:
-                    points.add((clamped_x, clamped_y))
+                if not (0 <= clamped_x <= max_x and 0 <= clamped_y <= max_y):
+                    continue
+                if free_rects_list is not None:
+                    candidate_rect = Rect(clamped_x, clamped_y, l_mm, w_mm)
+                    if not any(rect.contains(candidate_rect) for rect in free_rects_list):
+                        continue
+                points.add((clamped_x, clamped_y))
 
         return sorted(points, key=lambda pt: (pt[0], pt[1]))
 
