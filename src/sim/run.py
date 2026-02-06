@@ -32,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
     parser.add_argument("--k", type=int, default=1, help="Lookahead K (1,3,5,10,15) para palca")
+    parser.add_argument(
+        "--pick-window",
+        type=int,
+        default=None,
+        help="Ventana de selección en la rampa/cinta: None/0=igual que --k; 1=solo primera caja; N=primeras N",
+    )
 
     # palca knobs (packer + scheduler)
     parser.add_argument("--overhang_mm", type=int, default=0, help="Overhang permitido (0/20/40...)")
@@ -51,21 +57,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-support", type=float, default=0.75, help="Ratio mínimo de soporte")
     parser.add_argument("--stability-eps-mm", type=float, default=1.0, help="Epsilon de estabilidad (mm)")
     parser.add_argument("--settle-snap-grid", action="store_true", help="Snap de settle a grid")
+    parser.add_argument(
+        "--settle-max-iter",
+        type=int,
+        default=0,
+        help="Max iteraciones para settle (0 = sin limite)",
+    )
+    parser.add_argument(
+        "--settle-timeout-ms",
+        type=int,
+        default=0,
+        help="Timeout de settle (ms, 0 = sin limite)",
+    )
     parser.add_argument("--grid-mm", type=int, default=None, help="Tamaño de grid (mm)")
     parser.add_argument("--heavy-bottom", action="store_true", help="Penaliza pesado sobre débil")
     parser.add_argument("--max-overweight-ratio", type=float, default=1.5, help="Ratio máximo peso/soporte")
     parser.add_argument("--loadbear-penalty-weight", type=float, default=1.0, help="Peso de penalización loadbear")
     parser.add_argument("--loadbear-factor", type=float, default=1.0, help="Factor para capacidad loadbear")
-    parser.add_argument(
-        "--priority-mode",
-        type=str,
-        default="none",
-        help="none | weight | excel[:colname]",
-    )
+    parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
     parser.add_argument("--weight-col", type=str, default=None, help="Columna peso (opcional)")
+    parser.add_argument(
+        "--max-tries-per-item",
+        type=int,
+        default=0,
+        help="Limite de intentos/candidatos por item (0 = sin limite)",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=0,
+        help="Limite de candidatos evaluados por decision (0 = sin limite)",
+    )
+    parser.add_argument(
+        "--max-seconds-per-item",
+        type=float,
+        default=0.0,
+        help="Timeout por item (segundos, 0 = sin limite)",
+    )
+    parser.add_argument(
+        "--watchdog-heartbeat-sec",
+        type=float,
+        default=1.0,
+        help="Intervalo de heartbeat watchdog (segundos, 0 = deshabilitar)",
+    )
 
     # Output
     parser.add_argument("--out", type=str, default=None, help="Ruta de salida .json o .csv (opcional)")
@@ -78,6 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--viz-labels", action="store_true", help="Muestra box_id/orientacion en cada rect")
     parser.add_argument("--viz-block", action="store_true", help="Mantiene la ventana abierta al final")
     parser.add_argument(
+        "--viz-dest",
+        type=int,
+        default=0,
+        help="Si >0, visualiza solo ese destino/palet (1..6). 0 = todos los detectados.",
+    )
+    parser.add_argument(
         "--viz-debug",
         action="store_true",
         help="Debug del visor (imprime destinos detectados y confirma attach)",
@@ -87,16 +130,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _detect_destinations(arrivals: list[Arrival]) -> list[int]:
-    """
-    Intenta detectar destinos reales del excel para configurar el viewer con pallet_ids correctos.
-    Normalmente serán 1..6 o 0..5.
-    """
     dests: set[int] = set()
     for a in arrivals:
         try:
             dests.add(int(a.destination))
         except Exception:
-            # Si algún destino no es int, lo ignoramos aquí; en tu proyecto deberían ser 0..5 o 1..6.
             continue
     return sorted(dests)
 
@@ -110,10 +148,6 @@ def _create_viewer_if_enabled(
     viz_debug: bool,
     pallet_ids: list[int] | None,
 ) -> tuple[Any | None, Any | None]:
-    """
-    Crea el viewer de forma perezosa. Si matplotlib no está instalado, falla solo si enabled=True.
-    Devuelve (viewer, Rect2DClass).
-    """
     if not enabled:
         return None, None
 
@@ -127,16 +161,14 @@ def _create_viewer_if_enabled(
     except ImportError as exc:
         raise SystemExit("ERROR: matplotlib es requerido para --viz. Instala con `pip install matplotlib`.") from exc
 
-    # Si no detectamos destinos o no son 6, por defecto usamos 1..6
-    if not pallet_ids or len(pallet_ids) != 6:
-        pallet_ids = [1, 2, 3, 4, 5, 6]
+    # si no hay destinos detectables, al menos crea 1
+    if not pallet_ids:
+        pallet_ids = [1]
 
     if viz_debug:
         print(f"[VIZ] pallet_ids for viewer: {pallet_ids}", flush=True)
 
-    # IMPORTANTE: para depurar, NO limpiar por capa.
-    # Esto evita el efecto “solo veo una caja que cambia” si layer_idx está mal.
-    show_current_layer_only = False
+    show_current_layer_only = False  # más fácil depurar
 
     if viz_mode == "3d":
         viewer = PalletViewer3D(
@@ -144,6 +176,7 @@ def _create_viewer_if_enabled(
             pallet_ids=tuple(pallet_ids),
             update_every=viz_every,
             show_current_layer_only=show_current_layer_only,
+            debug=viz_debug,
         )
     else:
         viewer = PalletViewer(
@@ -172,6 +205,7 @@ def run_simulation(
     ramp_cap: int = 15,
     policy: str = "legacy",
     lookahead_k: int = 1,
+    pick_window: int | None = None,
     time_scale: float = 1.0,
     # palca
     overhang_mm: int = 0,
@@ -184,6 +218,8 @@ def run_simulation(
     min_support: float = 0.75,
     stability_eps_mm: float = 1.0,
     settle_snap_grid: bool = False,
+    settle_max_iter: int = 0,
+    settle_timeout_ms: int = 0,
     grid_mm: int | None = None,
     heavy_bottom: bool = False,
     max_overweight_ratio: float = 1.5,
@@ -194,6 +230,10 @@ def run_simulation(
     balance_weight: float = 0.0,
     time_budget_ms: int = 120,
     weight_col: str | None = None,
+    max_tries_per_item: int = 0,
+    max_candidates: int = 0,
+    max_seconds_per_item: float = 0.0,
+    watchdog_heartbeat_sec: float = 1.0,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -201,20 +241,22 @@ def run_simulation(
     viz_labels: bool = False,
     viz_block: bool = False,
     viz_debug: bool = False,
+    viz_dest: int = 0,
 ) -> dict[str, Any]:
     if out_path is None and out_json is not None:
         out_path = out_json
+
     priority_col = None
     if isinstance(priority_mode, str) and priority_mode.lower().startswith("excel"):
         parts = priority_mode.split(":", 1)
         if len(parts) == 2 and parts[1].strip():
             priority_col = parts[1].strip()
+
     arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
 
-    # time_scale afecta a la llegada (más picos)
     if time_scale != 1.0:
         arrivals = [
             Arrival(
@@ -228,8 +270,17 @@ def run_simulation(
             for a in arrivals
         ]
 
-    # Crear viewer *después* de cargar arrivals, para detectar destinos reales
     pallet_ids = _detect_destinations(arrivals) if viz else None
+
+    # aplicar filtro de un solo destino para ver 1 palet
+    if viz and viz_dest and viz_dest > 0:
+        if pallet_ids and viz_dest in pallet_ids:
+            pallet_ids = [viz_dest]
+        else:
+            pallet_ids = [viz_dest]
+        if viz_debug:
+            print(f"[VIZ] viz_dest={viz_dest} => pallet_ids={pallet_ids}", flush=True)
+
     viewer, rect_cls = _create_viewer_if_enabled(
         enabled=viz,
         viz_mode=viz_mode,
@@ -241,7 +292,6 @@ def run_simulation(
 
     if viz_debug and viz:
         print(f"[VIZ] detected destinations from excel: {pallet_ids}", flush=True)
-        # Esto ayuda a policies que lean env var
         os.environ["PALCA_VIZ_DEBUG"] = "1"
 
     config = SimConfig(
@@ -264,6 +314,7 @@ def run_simulation(
 
         decision_policy = PolicyPackerScheduler.from_defaults(
             lookahead_k=lookahead_k,
+            pick_window=pick_window,
             overhang_mm=overhang_mm,
             heuristic=heuristic,
             t_select_base=t_select_base,
@@ -276,6 +327,8 @@ def run_simulation(
             min_support_ratio=min_support,
             stability_eps_mm=stability_eps_mm,
             settle_snap_grid=settle_snap_grid,
+            settle_max_iter=settle_max_iter,
+            settle_timeout_ms=settle_timeout_ms,
             grid_mm=grid_mm,
             heavy_bottom=heavy_bottom,
             max_overweight_ratio=max_overweight_ratio,
@@ -283,17 +336,18 @@ def run_simulation(
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             priority_mode=priority_mode,
+            max_tries_per_item=max_tries_per_item,
+            max_candidates=max_candidates,
+            max_seconds_per_item=max_seconds_per_item,
+            heartbeat_sec=watchdog_heartbeat_sec,
         )
 
-        # Attach viewer de forma robusta:
         if viewer is not None and rect_cls is not None:
             if hasattr(decision_policy, "attach_viewer"):
-                # preferido (si lo implementaste)
                 decision_policy.attach_viewer(viewer, rect_cls, debug=viz_debug)  # type: ignore[attr-defined]
                 if viz_debug:
                     print("[VIZ] attached via decision_policy.attach_viewer()", flush=True)
             else:
-                # fallback a tu método actual (privado)
                 decision_policy._viewer = viewer  # type: ignore[attr-defined]
                 decision_policy._viewer_rect_cls = rect_cls  # type: ignore[attr-defined]
                 if viz_debug:
@@ -303,7 +357,15 @@ def run_simulation(
         result = simulate(arrivals, config, decision_policy=decision_policy)
     finally:
         if viewer is not None:
-            viewer.finalize(block=bool(viz_block))
+            if viz_block:
+                print("[VIZ] Press Enter to continue...", flush=True)
+                viewer.finalize(block=False)
+                try:
+                    input()
+                except EOFError:
+                    pass
+            else:
+                viewer.finalize(block=False)
 
     payload: dict[str, Any] = {
         "model": model,
@@ -317,8 +379,8 @@ def run_simulation(
             "staging_cap": staging_cap,
             "policy": policy,
             "lookahead_k": lookahead_k,
+            "pick_window": pick_window,
             "time_scale": time_scale,
-            # palca
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
             "t_select_base": t_select_base,
@@ -329,6 +391,8 @@ def run_simulation(
             "min_support": min_support,
             "stability_eps_mm": stability_eps_mm,
             "settle_snap_grid": settle_snap_grid,
+            "settle_max_iter": settle_max_iter,
+            "settle_timeout_ms": settle_timeout_ms,
             "grid_mm": grid_mm,
             "heavy_bottom": heavy_bottom,
             "max_overweight_ratio": max_overweight_ratio,
@@ -339,9 +403,22 @@ def run_simulation(
             "balance_weight": balance_weight,
             "time_budget_ms": time_budget_ms,
             "weight_col": weight_col,
+            "max_tries_per_item": max_tries_per_item,
+            "max_candidates": max_candidates,
+            "max_seconds_per_item": max_seconds_per_item,
+            "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
+            "viz_dest": viz_dest,
         },
         "metrics": result.to_dict(),
     }
+
+    if policy == "palca" and decision_policy is not None:
+        stop_reason = getattr(decision_policy, "stop_reason", None)
+        stop_details = getattr(decision_policy, "stop_details", None)
+        if stop_reason is not None:
+            payload["metrics"]["policy_stop_reason"] = stop_reason
+        if stop_details:
+            payload["metrics"]["policy_stop_details"] = stop_details
 
     if out_path:
         resolved = resolve_repo_path(out_path)
@@ -370,6 +447,7 @@ def main() -> None:
         ramp_cap=args.ramp_cap,
         policy=args.policy,
         lookahead_k=args.k,
+        pick_window=args.pick_window,
         time_scale=args.time_scale,
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
@@ -381,6 +459,8 @@ def main() -> None:
         min_support=args.min_support,
         stability_eps_mm=args.stability_eps_mm,
         settle_snap_grid=bool(args.settle_snap_grid),
+        settle_max_iter=int(args.settle_max_iter),
+        settle_timeout_ms=int(args.settle_timeout_ms),
         grid_mm=args.grid_mm,
         heavy_bottom=bool(args.heavy_bottom),
         max_overweight_ratio=args.max_overweight_ratio,
@@ -391,12 +471,17 @@ def main() -> None:
         balance_weight=args.balance_weight,
         time_budget_ms=args.time_budget_ms,
         weight_col=args.weight_col,
+        max_tries_per_item=int(args.max_tries_per_item),
+        max_candidates=int(args.max_candidates),
+        max_seconds_per_item=float(args.max_seconds_per_item),
+        watchdog_heartbeat_sec=float(args.watchdog_heartbeat_sec),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
         viz_labels=bool(args.viz_labels),
         viz_block=bool(args.viz_block),
         viz_debug=bool(args.viz_debug),
+        viz_dest=int(args.viz_dest),
     )
 
     if (not args.out) or args.print:
