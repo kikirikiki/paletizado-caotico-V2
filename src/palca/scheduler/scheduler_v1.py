@@ -15,6 +15,7 @@ from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalt
 @dataclass(frozen=True)
 class SchedulerConfig:
     lookahead_k: int = 1
+    pick_window: int | None = None
     t_select_base: float = 0.0
     t_select_step: float = 0.0
     time_penalty_weight: float = 1.0
@@ -63,7 +64,9 @@ class SchedulerV1:
         self.last_deadlock = False
         self.last_deadlock_item = None
         self.last_eval_stats = {}
-        k = max(1, int(self.config.lookahead_k))
+        lookahead_k = max(1, int(self.config.lookahead_k))
+        pw = self.config.pick_window
+        window = lookahead_k if (pw is None or int(pw) <= 0) else int(pw)
 
         deadline = None
         if self.config.time_budget_ms and self.config.time_budget_ms > 0:
@@ -84,7 +87,7 @@ class SchedulerV1:
         deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
-            ramp_items = list(ramp)[:k]
+            ramp_items = list(ramp)[:window]
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
                 cutoff_reason = "time_budget"

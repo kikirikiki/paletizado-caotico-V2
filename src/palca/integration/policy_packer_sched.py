@@ -83,6 +83,7 @@ class PolicyPackerScheduler:
         cls,
         *,
         lookahead_k: int = 1,
+        pick_window: int | None = None,
         overhang_mm: int = 0,
         heuristic: str = "baf",
         t_select_base: float = 0.0,
@@ -114,6 +115,7 @@ class PolicyPackerScheduler:
         pallet_spec = PalletSpec(overhang_mm=overhang_mm)
         scheduler = SchedulerConfig(
             lookahead_k=lookahead_k,
+            pick_window=pick_window,
             t_select_base=t_select_base,
             t_select_step=t_select_step,
             time_penalty_weight=time_penalty_weight,

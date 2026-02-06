@@ -32,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
     parser.add_argument("--k", type=int, default=1, help="Lookahead K (1,3,5,10,15) para palca")
+    parser.add_argument(
+        "--pick-window",
+        type=int,
+        default=None,
+        help="Ventana de selección en la rampa/cinta: None/0=igual que --k; 1=solo primera caja; N=primeras N",
+    )
 
     # palca knobs (packer + scheduler)
     parser.add_argument("--overhang_mm", type=int, default=0, help="Overhang permitido (0/20/40...)")
@@ -199,6 +205,7 @@ def run_simulation(
     ramp_cap: int = 15,
     policy: str = "legacy",
     lookahead_k: int = 1,
+    pick_window: int | None = None,
     time_scale: float = 1.0,
     # palca
     overhang_mm: int = 0,
@@ -307,6 +314,7 @@ def run_simulation(
 
         decision_policy = PolicyPackerScheduler.from_defaults(
             lookahead_k=lookahead_k,
+            pick_window=pick_window,
             overhang_mm=overhang_mm,
             heuristic=heuristic,
             t_select_base=t_select_base,
@@ -371,6 +379,7 @@ def run_simulation(
             "staging_cap": staging_cap,
             "policy": policy,
             "lookahead_k": lookahead_k,
+            "pick_window": pick_window,
             "time_scale": time_scale,
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
@@ -430,6 +439,7 @@ def main() -> None:
         ramp_cap=args.ramp_cap,
         policy=args.policy,
         lookahead_k=args.k,
+        pick_window=args.pick_window,
         time_scale=args.time_scale,
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
