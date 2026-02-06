@@ -412,6 +412,14 @@ def run_simulation(
         "metrics": result.to_dict(),
     }
 
+    if policy == "palca" and decision_policy is not None:
+        stop_reason = getattr(decision_policy, "stop_reason", None)
+        stop_details = getattr(decision_policy, "stop_details", None)
+        if stop_reason is not None:
+            payload["metrics"]["policy_stop_reason"] = stop_reason
+        if stop_details:
+            payload["metrics"]["policy_stop_details"] = stop_details
+
     if out_path:
         resolved = resolve_repo_path(out_path)
         if resolved.suffix.lower() == ".csv":

@@ -174,7 +174,27 @@ class SchedulerV1:
                     if preview.infeasible_reason in ("NO_SPACE", "HEIGHT_LIMIT"):
                         self.last_blocked_pallets[pallet_id] = preview.infeasible_reason
                     else:
+                        preview_debug = {}
+                        if preview.debug:
+                            for key in (
+                                "rejected_by_controls",
+                                "candidates_evaluated",
+                                "height_used",
+                                "stability_candidates",
+                            ):
+                                if key in preview.debug:
+                                    preview_debug[key] = preview.debug[key]
+
+                        should_replace = False
                         if deadlock_item is None:
+                            should_replace = True
+                        elif (
+                            deadlock_item.get("reason") != "STABILITY"
+                            and preview.infeasible_reason == "STABILITY"
+                        ):
+                            should_replace = True
+
+                        if should_replace:
                             deadlock_item = {
                                 "box_id": getattr(box, "box_id", None),
                                 "pallet_id": pallet_id,
@@ -185,6 +205,8 @@ class SchedulerV1:
                                     getattr(box, "height_mm", None),
                                 ),
                             }
+                            if preview_debug:
+                                deadlock_item["preview_debug"] = preview_debug
                     continue
                 items_feasible += 1
 

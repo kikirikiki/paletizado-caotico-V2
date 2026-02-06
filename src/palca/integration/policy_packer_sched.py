@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 import os
 from typing import Any, Iterable, Mapping
@@ -205,6 +206,35 @@ class PolicyPackerScheduler:
                 details.get("dims"),
                 details.get("reason"),
             )
+            preview_debug = details.get("preview_debug") if isinstance(details, dict) else None
+            summary: dict[str, Any] = {}
+            if isinstance(preview_debug, dict):
+                for key in ("rejected_by_controls", "candidates_evaluated"):
+                    if key in preview_debug:
+                        summary[key] = preview_debug[key]
+                stability_candidates = preview_debug.get("stability_candidates")
+                if isinstance(stability_candidates, list):
+                    top_candidates: list[dict[str, Any]] = []
+                    for cand in stability_candidates[:5]:
+                        if not isinstance(cand, dict):
+                            continue
+                        filtered = {
+                            key: cand.get(key)
+                            for key in (
+                                "x",
+                                "y",
+                                "w",
+                                "h",
+                                "support_ratio",
+                                "com_supported",
+                                "reject_reason",
+                            )
+                            if key in cand
+                        }
+                        top_candidates.append(filtered)
+                    summary["stability_candidates"] = top_candidates
+            if summary:
+                self._logger.error("DEADLOCK details: %s", json.dumps(summary, ensure_ascii=True))
             return None
 
         # KPI: medir non-head picks + dt_extra

@@ -465,6 +465,7 @@ class PalletModel:
                 adjusted = base_placement
                 score_delta = 0.0
                 feasible = True
+                reject_reason: str | None = None
                 for control in self.controls.placement_controls:
                     result = control.evaluate(
                         pallet=self,
@@ -477,6 +478,7 @@ class PalletModel:
                     if not result.feasible:
                         rejected_by_controls += 1
                         feasible = False
+                        reject_reason = result.reason
                         break
 
                 objective = weighted_gain - weighted_frag + score_delta
@@ -492,11 +494,20 @@ class PalletModel:
                     "y": int(adjusted.y_mm),
                     "w": int(adjusted.length_mm),
                     "h": int(adjusted.width_mm),
+                    "reject_reason": reject_reason,
                 }
                 if "support_ratio" in debug:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "corners_supported" in debug:
+                    candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "supported_overlaps_count" in debug:
+                    candidate_info["supported_overlaps_count"] = int(
+                        debug["supported_overlaps_count"]
+                    )
+                if "support_area_mm2" in debug:
+                    candidate_info["support_area_mm2"] = float(debug["support_area_mm2"])
                 evaluated_candidates.append((float(objective), candidate_info))
 
                 if not feasible:
