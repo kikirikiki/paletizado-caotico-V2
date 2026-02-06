@@ -10,6 +10,7 @@ from .maxrects2d import Rect
 class ScoringWeights:
     packing_gain_weight: float = 1.0
     fragmentation_weight: float = 1.0
+    tower_penalty_ratio: float = 0.1
 
 
 def packing_gain(box_area: int, bin_area: int) -> float:
