@@ -21,6 +21,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Base DES params
     parser.add_argument("--n_per_pallet", type=int, default=24)
+
+    parser.add_argument(
+        "--stop-after-first-pallet",
+        action="store_true",
+        default=False,
+        help="Detiene la simulación cuando se cierra el primer palet (primer changeover).",
+    )
     parser.add_argument("--t_pick_place", type=float, default=14.0)
     parser.add_argument("--t_changeover", type=float, default=60.0)
     parser.add_argument("--t_stage", type=float, default=6.0)
@@ -31,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
+    parser.add_argument(
+        "--planner",
+        choices=["palca", "beam_pick"],
+        default="palca",
+        help="Planner interno de policy=palca (palca=scheduler actual, beam_pick=beam search sobre pick-window)",
+    )
     parser.add_argument("--k", type=int, default=1, help="Lookahead K (1,3,5,10,15) para palca")
     parser.add_argument(
         "--pick-window",
@@ -40,7 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # palca knobs (packer + scheduler)
-    parser.add_argument("--overhang_mm", type=int, default=0, help="Overhang permitido (0/20/40...)")
+    parser.add_argument(
+        "--overhang-mm",
+        "--overhang_mm",
+        dest="overhang_mm",
+        type=int,
+        default=0,
+        help="Overhang permitido (0/20/40...)",
+    )
+    parser.add_argument(
+        "--max-height-mm",
+        type=int,
+        default=None,
+        help="Altura maxima del pallet en mm (None = default por planner)",
+    )
     parser.add_argument("--heuristic", choices=["baf", "bssf"], default="baf", help="Heurística MaxRects")
 
     parser.add_argument("--t_select_base", type=float, default=0.0, help="Coste base por selección (s)")
@@ -103,6 +129,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Intervalo de heartbeat watchdog (segundos, 0 = deshabilitar)",
     )
+    parser.add_argument("--beam-width", type=int, default=12, help="Ancho de beam para planner=beam_pick")
+    parser.add_argument("--beam-depth", type=int, default=6, help="Profundidad de beam para planner=beam_pick")
+    parser.add_argument(
+        "--beam-max-expansions",
+        type=int,
+        default=2500,
+        help="Maximo de expansiones por decision para planner=beam_pick",
+    )
+    parser.add_argument(
+        "--beam-time-budget-ms",
+        type=int,
+        default=200,
+        help="Presupuesto de tiempo por decision (ms) para planner=beam_pick",
+    )
+    parser.add_argument(
+        "--beam-objective",
+        type=str,
+        default="max_placed_then_min_height_gain",
+        help="Objetivo del beam planner",
+    )
+    parser.add_argument("--beam-debug", action="store_true", help="Activa trazas del planner beam_pick")
 
     # Output
     parser.add_argument("--out", type=str, default=None, help="Ruta de salida .json o .csv (opcional)")
@@ -204,11 +251,13 @@ def run_simulation(
     t_unstage: float = 10.0,
     ramp_cap: int = 15,
     policy: str = "legacy",
+    planner: str = "palca",
     lookahead_k: int = 1,
     pick_window: int | None = None,
     time_scale: float = 1.0,
     # palca
     overhang_mm: int = 0,
+    max_height_mm: int | None = None,
     heuristic: str = "baf",
     t_select_base: float = 0.0,
     t_select_step: float = 0.0,
@@ -234,6 +283,12 @@ def run_simulation(
     max_candidates: int = 0,
     max_seconds_per_item: float = 0.0,
     watchdog_heartbeat_sec: float = 1.0,
+    beam_width: int = 12,
+    beam_depth: int = 6,
+    beam_max_expansions: int = 2500,
+    beam_time_budget_ms: int = 200,
+    beam_objective: str = "max_placed_then_min_height_gain",
+    beam_debug: bool = False,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -242,6 +297,7 @@ def run_simulation(
     viz_block: bool = False,
     viz_debug: bool = False,
     viz_dest: int = 0,
+    stop_after_first_pallet: bool = False,
 ) -> dict[str, Any]:
     if out_path is None and out_json is not None:
         out_path = out_json
@@ -303,6 +359,7 @@ def run_simulation(
         t_pick_place=t_pick_place,
         t_stage=t_stage,
         t_unstage=t_unstage,
+        stop_after_first_pallet=stop_after_first_pallet,
     )
 
     decision_policy = None
@@ -316,7 +373,9 @@ def run_simulation(
             lookahead_k=lookahead_k,
             pick_window=pick_window,
             overhang_mm=overhang_mm,
+            max_height_mm=max_height_mm,
             heuristic=heuristic,
+            planner=planner,
             t_select_base=t_select_base,
             t_select_step=t_select_step,
             time_penalty_weight=time_penalty_weight,
@@ -340,6 +399,12 @@ def run_simulation(
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
             heartbeat_sec=watchdog_heartbeat_sec,
+            beam_width=beam_width,
+            beam_depth=beam_depth,
+            beam_max_expansions=beam_max_expansions,
+            beam_time_budget_ms=beam_time_budget_ms,
+            beam_objective=beam_objective,
+            beam_debug=beam_debug,
         )
 
         if viewer is not None and rect_cls is not None:
@@ -371,6 +436,7 @@ def run_simulation(
         "model": model,
         "params": {
             "n_per_pallet": n_per_pallet,
+            "stop_after_first_pallet": bool(stop_after_first_pallet),
             "t_pick_place": t_pick_place,
             "t_changeover": t_changeover,
             "t_stage": t_stage,
@@ -378,10 +444,12 @@ def run_simulation(
             "ramp_cap": ramp_cap,
             "staging_cap": staging_cap,
             "policy": policy,
+            "planner": planner,
             "lookahead_k": lookahead_k,
             "pick_window": pick_window,
             "time_scale": time_scale,
             "overhang_mm": overhang_mm,
+            "max_height_mm": max_height_mm,
             "heuristic": heuristic,
             "t_select_base": t_select_base,
             "t_select_step": t_select_step,
@@ -407,6 +475,12 @@ def run_simulation(
             "max_candidates": max_candidates,
             "max_seconds_per_item": max_seconds_per_item,
             "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
+            "beam_width": beam_width,
+            "beam_depth": beam_depth,
+            "beam_max_expansions": beam_max_expansions,
+            "beam_time_budget_ms": beam_time_budget_ms,
+            "beam_objective": beam_objective,
+            "beam_debug": bool(beam_debug),
             "viz_dest": viz_dest,
         },
         "metrics": result.to_dict(),
@@ -434,6 +508,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+
     payload = run_simulation(
         excel_path=args.excel,
         model=args.model,
@@ -446,10 +521,12 @@ def main() -> None:
         t_unstage=args.t_unstage,
         ramp_cap=args.ramp_cap,
         policy=args.policy,
+        planner=args.planner,
         lookahead_k=args.k,
         pick_window=args.pick_window,
         time_scale=args.time_scale,
         overhang_mm=args.overhang_mm,
+        max_height_mm=args.max_height_mm,
         heuristic=args.heuristic,
         t_select_base=args.t_select_base,
         t_select_step=args.t_select_step,
@@ -475,6 +552,12 @@ def main() -> None:
         max_candidates=int(args.max_candidates),
         max_seconds_per_item=float(args.max_seconds_per_item),
         watchdog_heartbeat_sec=float(args.watchdog_heartbeat_sec),
+        beam_width=int(args.beam_width),
+        beam_depth=int(args.beam_depth),
+        beam_max_expansions=int(args.beam_max_expansions),
+        beam_time_budget_ms=int(args.beam_time_budget_ms),
+        beam_objective=str(args.beam_objective),
+        beam_debug=bool(args.beam_debug),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
@@ -482,6 +565,7 @@ def main() -> None:
         viz_block=bool(args.viz_block),
         viz_debug=bool(args.viz_debug),
         viz_dest=int(args.viz_dest),
+        stop_after_first_pallet=bool(args.stop_after_first_pallet),
     )
 
     if (not args.out) or args.print:

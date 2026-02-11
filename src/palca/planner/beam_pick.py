@@ -26,6 +26,7 @@ class BeamPickResult:
     box_id: int | str | None
     preview: PlacementPreview | None
     best_sequence: tuple[tuple[int, int | str], ...] = field(default_factory=tuple)
+    objective_key: tuple[Any, ...] = field(default_factory=tuple)
     debug: dict[str, Any] = field(default_factory=dict)
 
 
@@ -43,6 +44,8 @@ class _BeamNode:
     first_pick_index: int | None
     first_pick_box_id: int | str | None
     first_pick_preview: PlacementPreview | None
+    first_pick_height_gain_mm: int
+    first_pick_opened_layer: int
     sequence: tuple[tuple[int, int | str], ...]
 
 
@@ -67,6 +70,7 @@ class BeamPickPlanner:
         if not root_window:
             return BeamPickResult(buffer_index=None, box_id=None, preview=None, debug={"reason": "empty_window"})
 
+        started = time.perf_counter()
         beam_width = max(1, int(config.beam_width))
         beam_depth = max(1, int(config.beam_depth))
         max_expansions = max(1, int(config.beam_max_expansions))
@@ -93,6 +97,8 @@ class BeamPickPlanner:
             first_pick_index=None,
             first_pick_box_id=None,
             first_pick_preview=None,
+            first_pick_height_gain_mm=0,
+            first_pick_opened_layer=0,
             sequence=tuple(),
         )
         frontier: list[_BeamNode] = [root]
@@ -154,6 +160,11 @@ class BeamPickPlanner:
                     first_pick_preview = (
                         node.first_pick_preview if node.first_pick_preview is not None else preview
                     )
+                    first_pick_height_gain = int(node.first_pick_height_gain_mm)
+                    first_pick_opened_layer = int(node.first_pick_opened_layer)
+                    if node.first_pick_index is None:
+                        first_pick_height_gain = int(height_gain)
+                        first_pick_opened_layer = 1 if opens_new_layer else 0
                     next_sequence = node.sequence + ((int(idx), box.box_id),)
 
                     tower_penalty = max(0.0, -float(preview_debug.get("tower_penalty", 0.0) or 0.0))
@@ -172,6 +183,8 @@ class BeamPickPlanner:
                         first_pick_index=first_pick_index,
                         first_pick_box_id=first_pick_box_id,
                         first_pick_preview=first_pick_preview,
+                        first_pick_height_gain_mm=first_pick_height_gain,
+                        first_pick_opened_layer=first_pick_opened_layer,
                         sequence=next_sequence,
                     )
                     local_key = (
@@ -202,6 +215,37 @@ class BeamPickPlanner:
             if exhausted:
                 break
 
+        projected_best = int(best.placed_count)
+        if deadline is not None and time.perf_counter() < deadline:
+            candidates = [node for node in frontier if node.placed_count > 0] if frontier else []
+            if best.placed_count > 0 and best not in candidates:
+                candidates.append(best)
+            selected = best
+            selected_key = (
+                -int(best.placed_count),
+                cls._objective_key(best),
+            )
+            for node in candidates:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    exhausted = True
+                    break
+                extra = cls._rollout_count(
+                    node=node,
+                    pick_window=k,
+                    max_steps=max(beam_depth, 8),
+                    deadline=deadline,
+                )
+                projected = int(node.placed_count) + int(extra)
+                candidate_key = (
+                    -projected,
+                    cls._objective_key(node),
+                )
+                if candidate_key < selected_key:
+                    selected = node
+                    selected_key = candidate_key
+                    projected_best = projected
+            best = selected
+
         if best.placed_count <= 0 or best.first_pick_index is None:
             debug = cls._build_debug(
                 config=config,
@@ -211,8 +255,16 @@ class BeamPickPlanner:
                 best=best,
                 frontier_sizes=frontier_sizes,
                 best_key_by_depth=best_key_by_depth,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                projected_best=projected_best,
             )
-            return BeamPickResult(buffer_index=None, box_id=None, preview=None, debug=debug)
+            return BeamPickResult(
+                buffer_index=None,
+                box_id=None,
+                preview=None,
+                objective_key=cls._objective_key(best),
+                debug=debug,
+            )
 
         debug = cls._build_debug(
             config=config,
@@ -222,12 +274,15 @@ class BeamPickPlanner:
             best=best,
             frontier_sizes=frontier_sizes,
             best_key_by_depth=best_key_by_depth,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            projected_best=projected_best,
         )
         return BeamPickResult(
             buffer_index=int(best.first_pick_index),
             box_id=best.first_pick_box_id,
             preview=best.first_pick_preview,
             best_sequence=best.sequence,
+            objective_key=cls._objective_key(best),
             debug=debug,
         )
 
@@ -253,6 +308,8 @@ class BeamPickPlanner:
         return (
             -int(node.placed_count),
             int(node.height_used_mm),
+            int(node.first_pick_height_gain_mm),
+            int(node.first_pick_opened_layer),
             int(node.cumulative_height_gain_mm),
             int(node.layer_opened_count),
             float(node.tower_penalty_total),
@@ -260,6 +317,62 @@ class BeamPickPlanner:
             first_idx,
             seq_key,
         )
+
+    @classmethod
+    def _rollout_count(
+        cls,
+        *,
+        node: _BeamNode,
+        pick_window: int,
+        max_steps: int,
+        deadline: float | None,
+    ) -> int:
+        pallet = node.pallet.fork()
+        window = list(node.window)
+        upstream = list(node.upstream)
+        steps = 0
+        placed = 0
+        while window and steps < max(1, int(max_steps)):
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            best_idx: int | None = None
+            best_preview: PlacementPreview | None = None
+            best_local_key: tuple[Any, ...] | None = None
+            limit = min(len(window), max(1, int(pick_window)))
+            current_height = int(pallet.current_height_mm())
+            current_layers = len(pallet.layers)
+            for idx in range(limit):
+                preview = pallet.preview_place(window[idx])
+                if not preview.feasible or preview.placement is None:
+                    continue
+                dbg = preview.debug or {}
+                is_new_layer = bool(dbg.get("is_new_layer")) or (int(preview.placement.layer_id) >= current_layers)
+                gain = int(dbg.get("height_increase_mm") or 0)
+                if is_new_layer:
+                    gain = int(preview.placement.height_mm)
+                local_key = (
+                    1 if is_new_layer else 0,
+                    int(gain),
+                    int(preview.placement.height_mm),
+                    int(current_height + gain),
+                    int(idx),
+                )
+                if best_local_key is None or local_key < best_local_key:
+                    best_local_key = local_key
+                    best_idx = int(idx)
+                    best_preview = preview
+            if best_idx is None or best_preview is None:
+                break
+            try:
+                pallet.commit_place(best_preview)
+            except Exception:
+                break
+            window.pop(best_idx)
+            while len(window) < int(pick_window) and upstream:
+                window.append(upstream.pop(0))
+            placed += 1
+            steps += 1
+        return int(placed)
 
     @classmethod
     def _build_debug(
@@ -272,6 +385,8 @@ class BeamPickPlanner:
         best: _BeamNode,
         frontier_sizes: dict[int, int],
         best_key_by_depth: dict[int, tuple[Any, ...]],
+        elapsed_ms: float,
+        projected_best: int,
     ) -> dict[str, Any]:
         top_reasons = sorted(infeasible_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]
         debug = {
@@ -282,12 +397,14 @@ class BeamPickPlanner:
             "beam_time_budget_ms": int(config.beam_time_budget_ms),
             "expansions_used": int(expansions),
             "budget_exhausted": bool(exhausted),
+            "elapsed_ms": float(elapsed_ms),
             "frontier_size_by_depth": {int(k): int(v) for k, v in frontier_sizes.items()},
             "best_score_by_depth": {int(k): list(v) for k, v in best_key_by_depth.items()},
             "best_sequence_first10": list(best.sequence[:10]),
             "best_placed_count": int(best.placed_count),
             "best_height_used_mm": int(best.height_used_mm),
             "best_layers": len(best.pallet.layers),
+            "projected_best_placed_count": int(projected_best),
             "top_infeasible_reasons": [[str(reason), int(count)] for reason, count in top_reasons],
             "best_objective_key": list(cls._objective_key(best)),
         }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import json
 import logging
@@ -11,6 +12,8 @@ from ..domain.pallet_spec import PalletSpec
 from ..packer.controls import BalanceConfig, ControlConfig, LoadBearConfig, StabilityConfig
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring import ScoringWeights
+from ..planner.beam_pick import BeamPickConfig, BeamPickPlanner
+from ..scheduler.costs import selection_dt
 from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerSimState, SchedulerV1
 from .kpi_hooks import aggregate_pallet_kpis
 
@@ -44,6 +47,13 @@ class PolicyConfig:
     heartbeat_sec: float = 1.0
     settle_max_iter: int = 0
     settle_timeout_ms: int = 0
+    planner: str = "palca"
+    beam_width: int = 12
+    beam_depth: int = 6
+    beam_max_expansions: int = 2500
+    beam_time_budget_ms: int = 200
+    beam_objective: str = "max_placed_then_min_height_gain"
+    beam_debug: bool = False
 
 
 class PolicyPackerScheduler:
@@ -78,6 +88,7 @@ class PolicyPackerScheduler:
         self.sum_pick_index = 0
         self.dt_extra_total = 0.0
         self.dt_extra_non_head_total = 0.0
+        self._last_beam_debug: dict[str, Any] = {}
 
     @classmethod
     def from_defaults(
@@ -86,6 +97,7 @@ class PolicyPackerScheduler:
         lookahead_k: int = 1,
         pick_window: int | None = None,
         overhang_mm: int = 0,
+        max_height_mm: int | None = None,
         heuristic: str = "baf",
         t_select_base: float = 0.0,
         t_select_step: float = 0.0,
@@ -110,10 +122,22 @@ class PolicyPackerScheduler:
         heartbeat_sec: float = 1.0,
         settle_max_iter: int = 0,
         settle_timeout_ms: int = 0,
+        planner: str = "palca",
+        beam_width: int = 12,
+        beam_depth: int = 6,
+        beam_max_expansions: int = 2500,
+        beam_time_budget_ms: int = 200,
+        beam_objective: str = "max_placed_then_min_height_gain",
+        beam_debug: bool = False,
     ) -> "PolicyPackerScheduler":
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
             raise ValueError(f"K no soportado: {lookahead_k}")
-        pallet_spec = PalletSpec(overhang_mm=overhang_mm)
+        resolved_max_height_mm = (
+            int(max_height_mm)
+            if max_height_mm is not None
+            else (2600 if str(planner).strip().lower() == "beam_pick" else 2400)
+        )
+        pallet_spec = PalletSpec(overhang_mm=overhang_mm, max_height_mm=resolved_max_height_mm)
         scheduler = SchedulerConfig(
             lookahead_k=lookahead_k,
             pick_window=pick_window,
@@ -149,6 +173,13 @@ class PolicyPackerScheduler:
             heartbeat_sec=heartbeat_sec,
             settle_max_iter=settle_max_iter,
             settle_timeout_ms=settle_timeout_ms,
+            planner=str(planner),
+            beam_width=int(beam_width),
+            beam_depth=int(beam_depth),
+            beam_max_expansions=int(beam_max_expansions),
+            beam_time_budget_ms=int(beam_time_budget_ms),
+            beam_objective=str(beam_objective),
+            beam_debug=bool(beam_debug),
         )
         return cls(config=config)
 
@@ -158,6 +189,7 @@ class PolicyPackerScheduler:
         ramps: Mapping[int, Any],
         destinations: Mapping[int, Any],
         now: float,
+        has_future_events: bool = False,
     ) -> PickPlan | None:
         self.stop_reason = None
         self.stop_details = {}
@@ -188,15 +220,29 @@ class PolicyPackerScheduler:
             remaining_total=int(remaining_total),
         )
 
-        plan = self._scheduler.choose_action(sim_state)
+        plan: PickPlan | None = None
+        planner_mode = str(self.config.planner or "palca").strip().lower()
+        used_scheduler = False
+        if planner_mode == "beam_pick":
+            plan, should_fallback = self._choose_action_beam(
+                ramps=ramps,
+                blocked=blocked,
+                has_future_events=bool(has_future_events),
+            )
+            if plan is None and should_fallback:
+                used_scheduler = True
+                plan = self._scheduler.choose_action(sim_state)
+        else:
+            used_scheduler = True
+            plan = self._scheduler.choose_action(sim_state)
 
         # reset pending closures (se rellenará si plan es None)
         self._pending_closures = {}
-        if plan is None and self._scheduler.last_blocked_pallets:
+        if used_scheduler and plan is None and self._scheduler.last_blocked_pallets:
             self._pending_closures = dict(self._scheduler.last_blocked_pallets)
             return None
 
-        if plan is None and self._scheduler.last_deadlock:
+        if used_scheduler and plan is None and self._scheduler.last_deadlock:
             self.stop_reason = "DEADLOCK"
             details = self._scheduler.last_deadlock_item or {}
             self.stop_details = dict(details)
@@ -372,10 +418,23 @@ class PolicyPackerScheduler:
             pallets_by_dest.setdefault(dest_id, []).append(pallet)
 
         kpis = aggregate_pallet_kpis({int(k): v for k, v in pallets_by_dest.items() if str(k).isdigit()})
+        current_height_by_dest: dict[int, int] = {}
+        current_layers_by_dest: dict[int, int] = {}
+        for dest_id, pallet_list in pallets_by_dest.items():
+            if not str(dest_id).isdigit():
+                continue
+            pallets_seq = list(pallet_list)
+            if not pallets_seq:
+                continue
+            last = pallets_seq[-1]
+            current_height_by_dest[int(dest_id)] = int(last.current_height_mm())
+            current_layers_by_dest[int(dest_id)] = int(len(last.layers))
 
         kpis["closures_by_reason"] = dict(self._closures_by_reason)
         kpis["pallets_closed_early"] = dict(self._closed_early)
         kpis["pallets_closed_early_by_reason"] = dict(self._closed_early_by_reason)
+        kpis["current_height_mm_by_dest"] = current_height_by_dest
+        kpis["current_layers_by_dest"] = current_layers_by_dest
 
         total = max(1, int(self.total_picks))
         non_head = int(self.non_head_picks)
@@ -392,6 +451,8 @@ class PolicyPackerScheduler:
             "dt_extra_avg_non_head": float(self.dt_extra_non_head_total / max(1, non_head)),
             "deadline_cutoffs_count": deadline_cutoffs,
         }
+        if self._last_beam_debug:
+            kpis["beam_pick_last_debug"] = dict(self._last_beam_debug)
         return kpis
 
     def _collect_pallets(self, ramps: Mapping[int, Any]) -> dict[int | str, PalletModel]:
@@ -409,12 +470,173 @@ class PolicyPackerScheduler:
 
     def _collect_ramp_boxes(self, ramps: Mapping[int, Any]) -> dict[int, list[Box]]:
         ramp_boxes: dict[int, list[Box]] = {}
-        k = max(1, int(self.config.scheduler.lookahead_k))
+        k = max(int(self.config.scheduler.lookahead_k), self._effective_pick_window())
         for ramp_id, ramp in ramps.items():
             queue = getattr(ramp, "queue", [])
             items = list(queue)[:k]
             ramp_boxes[int(ramp_id)] = [self._to_box(item) for item in items]
         return ramp_boxes
+
+    def _effective_pick_window(self) -> int:
+        pick_window = getattr(self.config.scheduler, "pick_window", None)
+        if pick_window is None:
+            pick_window = getattr(self.config.scheduler, "lookahead_k", 1)
+        try:
+            return max(1, int(pick_window))
+        except Exception:
+            return 1
+
+    def _beam_config(self) -> BeamPickConfig:
+        return BeamPickConfig(
+            beam_width=max(1, int(self.config.beam_width)),
+            beam_depth=max(1, int(self.config.beam_depth)),
+            beam_max_expansions=max(1, int(self.config.beam_max_expansions)),
+            beam_time_budget_ms=max(1, int(self.config.beam_time_budget_ms)),
+            beam_objective=str(self.config.beam_objective),
+            beam_debug=bool(self.config.beam_debug),
+        )
+
+    def _choose_action_beam(
+        self,
+        *,
+        ramps: Mapping[int, Any],
+        blocked: set[int | str],
+        has_future_events: bool,
+    ) -> tuple[PickPlan | None, bool]:
+        best_plan: PickPlan | None = None
+        best_key: tuple[Any, ...] | None = None
+        best_debug: dict[str, Any] = {}
+        all_infeasible: Counter[str] = Counter()
+
+        pick_window = self._effective_pick_window()
+        beam_cfg = self._beam_config()
+        planner_debug = bool(self.config.beam_debug)
+
+        max_visible = 0
+        for ramp in ramps.values():
+            queue_items = list(getattr(ramp, "queue", []))
+            max_visible = max(max_visible, min(pick_window, len(queue_items)))
+
+        # En beam_pick permitimos diferir picks para acumular ventana real
+        # siempre que aún queden eventos futuros (arribos pendientes).
+        if has_future_events and 0 < max_visible < pick_window:
+            self._last_beam_debug = {
+                "deferred_pick": True,
+                "reason": "wait_for_pick_window_fill",
+                "max_visible": int(max_visible),
+                "target_pick_window": int(pick_window),
+            }
+            if planner_debug:
+                print(
+                    "[BEAM] defer pick max_visible=%s target=%s"
+                    % (
+                        max_visible,
+                        pick_window,
+                    ),
+                    flush=True,
+                )
+            return None, False
+        for ramp_id, ramp in ramps.items():
+            queue_items = list(getattr(ramp, "queue", []))
+            if not queue_items:
+                continue
+            visible = queue_items[:pick_window]
+            if not visible:
+                continue
+            trailing = queue_items[pick_window:] + list(getattr(ramp, "upstream", []))
+
+            by_destination: dict[int | str, list[tuple[int, Any]]] = {}
+            for idx, item in enumerate(visible):
+                destination = getattr(item, "destination", None)
+                if destination is None or destination in blocked:
+                    continue
+                by_destination.setdefault(destination, []).append((int(idx), item))
+
+            for pallet_id, slots in by_destination.items():
+                pallet = self._pallets.get(pallet_id)
+                if pallet is None:
+                    continue
+                if not slots:
+                    continue
+
+                window_boxes = [self._to_box(item) for _, item in slots]
+                upstream_boxes = [self._to_box(item) for item in trailing if getattr(item, "destination", None) == pallet_id]
+                beam_result = BeamPickPlanner.plan(
+                    pallet=pallet.fork(),
+                    window=window_boxes,
+                    pick_window=pick_window,
+                    cfg=beam_cfg,
+                    upstream=upstream_boxes,
+                )
+                debug = dict(beam_result.debug or {})
+                for reason, count in debug.get("top_infeasible_reasons", []) or []:
+                    all_infeasible[str(reason)] += int(count)
+                if beam_result.buffer_index is None:
+                    continue
+                if beam_result.buffer_index < 0 or beam_result.buffer_index >= len(slots):
+                    continue
+
+                actual_idx, selected_item = slots[int(beam_result.buffer_index)]
+                selected_box = self._to_box(selected_item)
+                preview = self._scheduler._preview_place(pallet, selected_box)
+                if not preview.feasible:
+                    reason = str(preview.infeasible_reason or "UNKNOWN")
+                    all_infeasible[reason] += 1
+                    continue
+
+                dt_extra = selection_dt(
+                    int(actual_idx),
+                    self.config.scheduler.t_select_base,
+                    self.config.scheduler.t_select_step,
+                )
+                objective_key = (
+                    tuple(beam_result.objective_key),
+                    float(dt_extra),
+                    float(selected_box.timestamp),
+                    int(ramp_id),
+                    int(actual_idx),
+                )
+                if best_key is None or objective_key < best_key:
+                    best_key = objective_key
+                    best_debug = debug
+                    best_plan = PickPlan(
+                        ramp_id=int(ramp_id),
+                        buffer_index=int(actual_idx),
+                        box_id=selected_box.box_id,
+                        pallet_id=pallet_id,
+                        preview=preview,
+                        score=float(-beam_result.objective_key[0]) if beam_result.objective_key else 0.0,
+                        dt_extra=float(dt_extra),
+                    )
+
+        if best_plan is not None:
+            self._last_beam_debug = dict(best_debug)
+            if planner_debug:
+                print(
+                    "[BEAM] selected ramp=%s idx=%s box=%s expansions=%s elapsed_ms=%.2f frontier=%s best_score_by_depth=%s"
+                    % (
+                        best_plan.ramp_id,
+                        best_plan.buffer_index,
+                        best_plan.box_id,
+                        self._last_beam_debug.get("expansions_used"),
+                        float(self._last_beam_debug.get("elapsed_ms", 0.0) or 0.0),
+                        self._last_beam_debug.get("frontier_size_by_depth"),
+                        self._last_beam_debug.get("best_score_by_depth"),
+                    ),
+                    flush=True,
+                )
+            return best_plan, False
+
+        self._last_beam_debug = {
+            "top_infeasible_reasons": [[str(reason), int(count)] for reason, count in all_infeasible.most_common(10)],
+        }
+        if planner_debug:
+            print(
+                "[BEAM] no feasible pick. fallback scheduler. top_infeasible=%s"
+                % (self._last_beam_debug.get("top_infeasible_reasons"),),
+                flush=True,
+            )
+        return None, True
 
     def _to_box(self, item: Any) -> Box:
         length_mm = getattr(item, "length_mm", None) or self.config.default_box_length_mm

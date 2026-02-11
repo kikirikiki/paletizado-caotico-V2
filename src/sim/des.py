@@ -89,6 +89,7 @@ class SimConfig:
     t_pick_place: float = 14.0
     t_stage: float = 6.0
     t_unstage: float = 10.0
+    stop_after_first_pallet: bool = False
     logger: logging.Logger | None = None
     decision_policy: Any | None = None
 
@@ -349,6 +350,8 @@ def simulate(
         heapq.heappush(events, (event.time, event.seq, event))
 
     def start_changeover(destination: int, time: float, reason: str = "COUNT") -> None:
+        nonlocal stop_reason
+        
         dest_state = destinations[destination]
         if dest_state.state == "CHANGEOVER":
             return
@@ -370,6 +373,10 @@ def simulate(
             )
         )
 
+        if getattr(config, "stop_after_first_pallet", False):
+            stop_reason = f"PALLET_DONE dest={destination} reason={reason}"
+            return
+            
     def next_seq() -> int:
         nonlocal seq
         seq += 1
@@ -541,7 +548,19 @@ def simulate(
                             )
                             robot_busy = True
             else:
-                plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time)
+                try:
+                    plan = policy.choose_action(
+                        ramps=ramps,
+                        destinations=destinations,
+                        now=current_time,
+                        has_future_events=bool(events),
+                    )
+                except TypeError as exc:
+                    msg = str(exc)
+                    if "has_future_events" in msg and "unexpected keyword" in msg:
+                        plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time)
+                    else:
+                        raise
                 if plan is None:
                     pending = getattr(policy, "drain_pending_closures", None)
                     if callable(pending):
