@@ -54,6 +54,7 @@ class PolicyConfig:
     beam_time_budget_ms: int = 200
     beam_objective: str = "max_placed_then_min_height_gain"
     beam_debug: bool = False
+    beam_defer_until_visible: int = 0
 
 
 class PolicyPackerScheduler:
@@ -129,14 +130,12 @@ class PolicyPackerScheduler:
         beam_time_budget_ms: int = 200,
         beam_objective: str = "max_placed_then_min_height_gain",
         beam_debug: bool = False,
+        beam_defer_until_visible: int = 0,
     ) -> "PolicyPackerScheduler":
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
             raise ValueError(f"K no soportado: {lookahead_k}")
-        resolved_max_height_mm = (
-            int(max_height_mm)
-            if max_height_mm is not None
-            else (2600 if str(planner).strip().lower() == "beam_pick" else 2400)
-        )
+        default_max_height_mm = int(PalletSpec().max_height_mm)
+        resolved_max_height_mm = int(max_height_mm) if max_height_mm is not None else default_max_height_mm
         pallet_spec = PalletSpec(overhang_mm=overhang_mm, max_height_mm=resolved_max_height_mm)
         scheduler = SchedulerConfig(
             lookahead_k=lookahead_k,
@@ -180,6 +179,7 @@ class PolicyPackerScheduler:
             beam_time_budget_ms=int(beam_time_budget_ms),
             beam_objective=str(beam_objective),
             beam_debug=bool(beam_debug),
+            beam_defer_until_visible=max(0, int(beam_defer_until_visible)),
         )
         return cls(config=config)
 
@@ -420,6 +420,7 @@ class PolicyPackerScheduler:
         kpis = aggregate_pallet_kpis({int(k): v for k, v in pallets_by_dest.items() if str(k).isdigit()})
         current_height_by_dest: dict[int, int] = {}
         current_layers_by_dest: dict[int, int] = {}
+        placed_by_dest: dict[int, int] = {}
         for dest_id, pallet_list in pallets_by_dest.items():
             if not str(dest_id).isdigit():
                 continue
@@ -427,12 +428,15 @@ class PolicyPackerScheduler:
             if not pallets_seq:
                 continue
             last = pallets_seq[-1]
+            dest_int = int(dest_id)
+            placed_by_dest[dest_int] = int(sum(len(getattr(pallet, "placements", []) or []) for pallet in pallets_seq))
             current_height_by_dest[int(dest_id)] = int(last.current_height_mm())
             current_layers_by_dest[int(dest_id)] = int(len(last.layers))
 
         kpis["closures_by_reason"] = dict(self._closures_by_reason)
         kpis["pallets_closed_early"] = dict(self._closed_early)
         kpis["pallets_closed_early_by_reason"] = dict(self._closed_early_by_reason)
+        kpis["placed_by_dest"] = placed_by_dest
         kpis["current_height_mm_by_dest"] = current_height_by_dest
         kpis["current_layers_by_dest"] = current_layers_by_dest
 
@@ -511,29 +515,25 @@ class PolicyPackerScheduler:
         pick_window = self._effective_pick_window()
         beam_cfg = self._beam_config()
         planner_debug = bool(self.config.beam_debug)
+        defer_until_visible = max(0, int(getattr(self.config, "beam_defer_until_visible", 0) or 0))
 
         max_visible = 0
         for ramp in ramps.values():
             queue_items = list(getattr(ramp, "queue", []))
             max_visible = max(max_visible, min(pick_window, len(queue_items)))
 
-        # En beam_pick permitimos diferir picks para acumular ventana real
-        # siempre que aún queden eventos futuros (arribos pendientes).
-        if has_future_events and 0 < max_visible < pick_window:
+        if has_future_events and defer_until_visible > 0 and 0 < max_visible < defer_until_visible:
             self._last_beam_debug = {
                 "deferred_pick": True,
-                "reason": "wait_for_pick_window_fill",
+                "reason": "wait_for_visible_boxes",
                 "max_visible": int(max_visible),
-                "target_pick_window": int(pick_window),
+                "target_visible": int(defer_until_visible),
             }
             if planner_debug:
-                print(
-                    "[BEAM] defer pick max_visible=%s target=%s"
-                    % (
-                        max_visible,
-                        pick_window,
-                    ),
-                    flush=True,
+                self._logger.info(
+                    "[BEAM] defer pick max_visible=%s target=%s",
+                    max_visible,
+                    defer_until_visible,
                 )
             return None, False
         for ramp_id, ramp in ramps.items():
@@ -612,18 +612,15 @@ class PolicyPackerScheduler:
         if best_plan is not None:
             self._last_beam_debug = dict(best_debug)
             if planner_debug:
-                print(
-                    "[BEAM] selected ramp=%s idx=%s box=%s expansions=%s elapsed_ms=%.2f frontier=%s best_score_by_depth=%s"
-                    % (
-                        best_plan.ramp_id,
-                        best_plan.buffer_index,
-                        best_plan.box_id,
-                        self._last_beam_debug.get("expansions_used"),
-                        float(self._last_beam_debug.get("elapsed_ms", 0.0) or 0.0),
-                        self._last_beam_debug.get("frontier_size_by_depth"),
-                        self._last_beam_debug.get("best_score_by_depth"),
-                    ),
-                    flush=True,
+                self._logger.info(
+                    "[BEAM] selected ramp=%s idx=%s box=%s expansions=%s elapsed_ms=%.2f frontier=%s best_score_by_depth=%s",
+                    best_plan.ramp_id,
+                    best_plan.buffer_index,
+                    best_plan.box_id,
+                    self._last_beam_debug.get("expansions_used"),
+                    float(self._last_beam_debug.get("elapsed_ms", 0.0) or 0.0),
+                    self._last_beam_debug.get("frontier_size_by_depth"),
+                    self._last_beam_debug.get("best_score_by_depth"),
                 )
             return best_plan, False
 
@@ -631,10 +628,9 @@ class PolicyPackerScheduler:
             "top_infeasible_reasons": [[str(reason), int(count)] for reason, count in all_infeasible.most_common(10)],
         }
         if planner_debug:
-            print(
-                "[BEAM] no feasible pick. fallback scheduler. top_infeasible=%s"
-                % (self._last_beam_debug.get("top_infeasible_reasons"),),
-                flush=True,
+            self._logger.info(
+                "[BEAM] no feasible pick. fallback scheduler. top_infeasible=%s",
+                self._last_beam_debug.get("top_infeasible_reasons"),
             )
         return None, True
 

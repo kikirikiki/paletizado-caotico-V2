@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-height-mm",
         type=int,
         default=None,
-        help="Altura maxima del pallet en mm (None = default por planner)",
+        help="Altura maxima del pallet en mm (None = default del sistema: 2400)",
     )
     parser.add_argument("--heuristic", choices=["baf", "bssf"], default="baf", help="Heurística MaxRects")
 
@@ -150,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Objetivo del beam planner",
     )
     parser.add_argument("--beam-debug", action="store_true", help="Activa trazas del planner beam_pick")
+    parser.add_argument(
+        "--beam-defer-until-visible",
+        type=int,
+        default=0,
+        help="Si >0, beam_pick espera hasta tener al menos N visibles; 0 = no diferir picks",
+    )
 
     # Output
     parser.add_argument("--out", type=str, default=None, help="Ruta de salida .json o .csv (opcional)")
@@ -289,6 +295,7 @@ def run_simulation(
     beam_time_budget_ms: int = 200,
     beam_objective: str = "max_placed_then_min_height_gain",
     beam_debug: bool = False,
+    beam_defer_until_visible: int = 0,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -405,6 +412,7 @@ def run_simulation(
             beam_time_budget_ms=beam_time_budget_ms,
             beam_objective=beam_objective,
             beam_debug=beam_debug,
+            beam_defer_until_visible=int(beam_defer_until_visible),
         )
 
         if viewer is not None and rect_cls is not None:
@@ -481,6 +489,7 @@ def run_simulation(
             "beam_time_budget_ms": beam_time_budget_ms,
             "beam_objective": beam_objective,
             "beam_debug": bool(beam_debug),
+            "beam_defer_until_visible": int(beam_defer_until_visible),
             "viz_dest": viz_dest,
         },
         "metrics": result.to_dict(),
@@ -558,6 +567,7 @@ def main() -> None:
         beam_time_budget_ms=int(args.beam_time_budget_ms),
         beam_objective=str(args.beam_objective),
         beam_debug=bool(args.beam_debug),
+        beam_defer_until_visible=int(args.beam_defer_until_visible),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
