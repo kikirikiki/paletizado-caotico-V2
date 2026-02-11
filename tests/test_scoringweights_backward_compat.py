@@ -32,3 +32,13 @@ def test_pallet_model_accepts_legacy_scoring_weights_without_new_layer_penalty_r
     assert preview.feasible
     assert preview.placement is not None
     model.commit_place(preview)
+
+
+def test_scoringweights_height_increase_is_preserved() -> None:
+    model = PalletModel(scoring_weights=ScoringWeights(height_increase_penalty_ratio=0.33))
+    assert model.scoring_weights.height_increase_penalty_ratio == 0.33
+
+
+def test_legacy_scoringweights_without_height_increase_uses_default() -> None:
+    model = PalletModel(scoring_weights=_LegacyScoringWeights())
+    assert model.scoring_weights.height_increase_penalty_ratio == 0.0

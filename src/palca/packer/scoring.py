@@ -13,6 +13,8 @@ class ScoringWeights:
     tower_penalty_ratio: float = 0.1
     # Penalty applied when opening a new layer instead of placing on an existing one.
     new_layer_penalty_ratio: float = 0.0
+    # Penalty applied for height increase (opening/tall growth).
+    height_increase_penalty_ratio: float = 0.0
 
 
 def packing_gain(box_area: int, bin_area: int) -> float:
