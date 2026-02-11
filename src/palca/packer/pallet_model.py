@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import time
 from typing import Any, Iterable
 
@@ -87,7 +87,7 @@ class PalletModel:
     ) -> None:
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
-        self.scoring_weights = scoring_weights or ScoringWeights()
+        self.scoring_weights = _normalize_scoring_weights(scoring_weights)
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -869,6 +869,30 @@ class PalletModel:
             if _overlaps_z(placement, other, eps_mm=eps_mm):
                 return True
         return False
+
+
+def _coerce_weight(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _normalize_scoring_weights(scoring_weights: Any) -> ScoringWeights:
+    if scoring_weights is None:
+        return ScoringWeights()
+    if isinstance(scoring_weights, ScoringWeights):
+        return scoring_weights
+
+    kwargs: dict[str, Any] = {}
+    for f in fields(ScoringWeights):
+        default = getattr(ScoringWeights, f.name)
+        value = getattr(scoring_weights, f.name, default)
+        if isinstance(default, (int, float)):
+            kwargs[f.name] = _coerce_weight(value, default=float(default))
+        else:
+            kwargs[f.name] = value
+    return ScoringWeights(**kwargs)
 
 
 def _overlaps_xy(a: Placement, b: Placement) -> bool:
