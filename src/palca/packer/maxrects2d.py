@@ -73,11 +73,14 @@ class MaxRects2D:
         self.free_rects: list[Rect] = [Rect(0, 0, self.width, self.height)]
         self.used_area: int = 0
 
-    def copy(self) -> "MaxRects2D":
+    def clone(self) -> "MaxRects2D":
         clone = MaxRects2D(self.width, self.height, self.heuristic)
         clone.free_rects = list(self.free_rects)
         clone.used_area = int(self.used_area)
         return clone
+
+    def copy(self) -> "MaxRects2D":
+        return self.clone()
 
     @property
     def area(self) -> int:

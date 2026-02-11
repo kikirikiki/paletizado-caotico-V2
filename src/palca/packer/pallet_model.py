@@ -106,6 +106,36 @@ class PalletModel:
         last = self.layers[-1]
         return last.z_mm + last.height_mm
 
+    def fork(self) -> "PalletModel":
+        clone = PalletModel(
+            spec=self.spec,
+            heuristic=self.heuristic,
+            scoring_weights=self.scoring_weights,
+            controls=self.controls,
+        )
+        clone.layers = [
+            LayerState(
+                layer_id=int(layer.layer_id),
+                z_mm=int(layer.z_mm),
+                bin=layer.bin.clone(),
+                height_mm=int(layer.height_mm),
+            )
+            for layer in self.layers
+        ]
+        clone.placements = list(self.placements)
+        clone.stats = PalletStats(
+            support_ratio_checks=int(self.stats.support_ratio_checks),
+            support_ratio_rejects=int(self.stats.support_ratio_rejects),
+            corner_checks=int(self.stats.corner_checks),
+            corner_rejects=int(self.stats.corner_rejects),
+            settle_checks=int(self.stats.settle_checks),
+            settle_adjustments_count=int(self.stats.settle_adjustments_count),
+            settle_total_mm=float(self.stats.settle_total_mm),
+            settle_max_mm=float(self.stats.settle_max_mm),
+            floating_boxes_count=int(self.stats.floating_boxes_count),
+        )
+        return clone
+
     def preview_place(
         self,
         box: Box,
@@ -175,6 +205,8 @@ class PalletModel:
                 debug={"reason": "manifest_control", "candidates_evaluated": 0},
             )
 
+        rejected_by_controls_active = 0
+        rejected_by_controls_new = 0
         rejected_by_controls = 0
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         def _inv_maxrects_score(cand: _LayerCandidate, objective: float) -> tuple[int, ...]:
@@ -258,11 +290,23 @@ class PalletModel:
                 is_new_layer=False,
                 budget=budget,
             )
+            rejected_by_controls_active += layer_rejected
             rejected_by_controls += layer_rejected
             evaluated_candidates.extend(layer_evaluated)
+            all_candidates: list[_LayerCandidate] = []
+
+            # ... cuando evalúas capa activa:
             if layer_candidates:
-                best = _select_best(layer_candidates)
+                all_candidates.extend(layer_candidates)
+
+            # ... cuando evalúas capa nueva:
+            if layer_candidates:
+                all_candidates.extend(layer_candidates)
+
+            if all_candidates:
+                best = _select_best(all_candidates)
                 return _build_preview(best)
+
 
         if self._can_open_new_layer(height_mm):
             new_layer_id = len(self.layers)
@@ -281,30 +325,44 @@ class PalletModel:
                 is_new_layer=True,
                 budget=budget,
             )
+            rejected_by_controls_new += layer_rejected
             rejected_by_controls += layer_rejected
             evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
                 return _build_preview(best)
 
+        can_open_new_layer = self._can_open_new_layer(height_mm)
         reason = "NO_SPACE"
-        if not self._can_open_new_layer(height_mm):
+        if not can_open_new_layer:
             reason = "HEIGHT_LIMIT"
-        if rejected_by_controls > 0:
-            reason = "STABILITY"
+        elif rejected_by_controls > 0:
+            # Si SOLO falla estabilidad al intentar abrir capa nueva,
+            # tratamos como NO_SPACE (pallet no admite seguir creciendo establemente ahora).
+            if rejected_by_controls_active == 0 and rejected_by_controls_new > 0:
+                reason = "NO_SPACE"
+            else:
+                reason = "STABILITY"
         if budget is not None:
             if budget.timeout_hit:
                 reason = "TIMEOUT"
             elif budget.limit_hit:
                 reason = "CANDIDATE_LIMIT"
-        debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
+        debug = {
+            "height_used": self.current_height_mm(),
+            "rejected_by_controls": rejected_by_controls,
+            "rejected_by_controls_active": rejected_by_controls_active,
+            "rejected_by_controls_new": rejected_by_controls_new,
+        }
+        if can_open_new_layer and rejected_by_controls_active == 0 and rejected_by_controls_new > 0:
+            debug["new_layer_blocked_by_stability"] = True
         if budget is not None:
             debug["candidates_evaluated"] = int(budget.candidates_checked)
             if budget.limit_hit:
                 debug["candidate_limit_hit"] = True
             if budget.timeout_hit:
                 debug["timeout_hit"] = True
-        if reason == "STABILITY" and evaluated_candidates:
+        if rejected_by_controls > 0 and evaluated_candidates:
             evaluated_candidates.sort(
                 key=lambda item: (
                     -float(item[0]),
@@ -488,12 +546,34 @@ class PalletModel:
                         score_delta += tower_penalty
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
+                        # Penaliza abrir capa nueva
+                    if is_new_layer:
+                        p = -float(self.scoring_weights.new_layer_penalty_ratio) * float(weighted_gain)
+                        score_delta += p
+                        objective += p
+                        debug["new_layer_penalty"] = float(p)
+
+                    # Penaliza aumentar la altura de la capa activa (mezclar alturas)
+                    if (not is_new_layer) and next_height > layer.height_mm:
+                        dh = int(next_height - layer.height_mm)
+                        p = (
+                            -float(self.scoring_weights.height_increase_penalty_ratio)
+                            * float(weighted_gain)
+                            * (float(dh) / float(self.spec.max_height_mm))
+                        )
+                        score_delta += p
+                        objective += p
+                        debug["height_increase_mm"] = dh
+                        debug["height_increase_penalty"] = float(p)
+
 
                 candidate_info: dict[str, Any] = {
                     "x": int(adjusted.x_mm),
                     "y": int(adjusted.y_mm),
                     "w": int(adjusted.length_mm),
                     "h": int(adjusted.width_mm),
+                    "layer_id": int(layer.layer_id),
+                    "is_new_layer": bool(is_new_layer),
                     "reject_reason": reject_reason,
                 }
                 if "support_ratio" in debug:
