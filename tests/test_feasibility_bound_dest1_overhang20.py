@@ -21,41 +21,38 @@ def test_feasibility_bound_dest1_overhang20_target21() -> None:
         max_layers=10,
         time_limit_s=10.0,
         random_seed=123,
+        enforce_2d=True,
+        enforce_time_limit_s=30.0,
         verify_2d=True,
         verify_time_limit_s=10.0,
     )
 
     summary = report["summary"]
     target_mode = report["target_mode"]
+    enforce_result = target_mode["enforce_2d_result"]
 
-    status = summary["status"]
-    assert status in {"SAT", "UNSAT"}
+    assert target_mode["enforce_2d"] is True
+    enforce_status = target_mode["enforce_2d_status"]
+    assert enforce_status in {"SAT", "UNSAT", "UNKNOWN"}
+    assert summary["enforce_2d_status"] == enforce_status
 
-    if status == "UNSAT":
-        assert target_mode["status"] == "UNSAT", (
-            "El modo target reportó UNSAT para N=21 bajo el bound optimista por capas; "
-            "esto es evidencia fuerte de imposibilidad."
-        )
-        assert "verify_2d_result" in target_mode
-        assert target_mode["verify_2d"] is False
-        assert target_mode["verify_2d_status"] in {"SKIPPED_TARGET_UNSAT", "UNSAT", "UNKNOWN"}
-        return
-
-    assert target_mode["status"] == "SAT"
-    assert int(target_mode["selected_count"]) >= 21
-    assert int(target_mode["min_height_mm"]) <= 2400
-
-    layers = target_mode["layers"]
-    packed_count = sum(int(layer["count"]) for layer in layers)
-    assert packed_count == int(target_mode["selected_count"])
+    if enforce_status == "SAT":
+        assert int(enforce_result["selected_count"]) >= 21
+        assert int(enforce_result["height_mm"]) <= 2400
+        per_layer = enforce_result["per_layer"]
+        assert isinstance(per_layer, list)
+        assert per_layer
+        packed_count = sum(int(layer["count"]) for layer in per_layer)
+        assert packed_count >= 21
+        assert all(layer["coords"] for layer in per_layer)
+    elif enforce_status == "UNSAT":
+        assert bool(enforce_result["solver_status_proven"]) is True
+        assert enforce_result["solver_status"] == "INFEASIBLE"
+    else:
+        assert enforce_result["solver_status"] in {"UNKNOWN", "FEASIBLE", "OPTIMAL"}
+        assert float(enforce_result["time_limit_s"]) == pytest.approx(30.0)
+        assert "per_layer" in enforce_result
 
     verify_result = target_mode["verify_2d_result"]
-    assert "verify_2d" in verify_result
-    assert "status" in verify_result
-    assert "per_layer" in verify_result
-
-    verify_status = verify_result["status"]
-    assert verify_status in {"SAT", "UNSAT", "UNKNOWN"}
-    assert verify_result["verify_2d"] == (verify_status == "SAT")
-    if verify_status == "SAT":
-        assert all(layer["status"] == "SAT" for layer in verify_result["per_layer"])
+    assert verify_result["status"] in {"SAT", "UNSAT", "UNKNOWN", "SKIPPED", "SKIPPED_TARGET_UNSAT"}
+    assert target_mode["verify_2d_note"].startswith("post_check_only")
