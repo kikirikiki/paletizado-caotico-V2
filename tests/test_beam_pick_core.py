@@ -3,7 +3,13 @@ from __future__ import annotations
 from palca.domain.box import Box
 from palca.domain.pallet_spec import PalletSpec
 from palca.packer.pallet_model import PalletModel
-from palca.planner.beam_pick import BeamPickConfig, BeamPickPlanner
+from palca.planner.beam_pick import (
+    OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN,
+    OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE,
+    BeamPickConfig,
+    BeamPickPlanner,
+    _BeamNode,
+)
 
 
 def _box(box_id: int, length_mm: int, width_mm: int, height_mm: int) -> Box:
@@ -84,3 +90,74 @@ def test_beam_pick_returns_best_so_far_when_budget_hits() -> None:
     assert result.buffer_index is not None
     assert result.preview is not None
     assert int(result.debug.get("expansions_used", 0)) >= 1
+
+
+def test_beam_objective_height_waste_changes_tie_break_order() -> None:
+    pallet = PalletModel(
+        spec=PalletSpec(length_mm=4, width_mm=4, max_height_mm=4000, overhang_mm=0),
+        heuristic="baf",
+    )
+    low_waste_more_layers = _BeamNode(
+        pallet=pallet,
+        window=tuple(),
+        upstream=tuple(),
+        placed_count=4,
+        height_used_mm=1200,
+        cumulative_height_gain_mm=1200,
+        cumulative_height_waste_mm=20,
+        layer_opened_count=3,
+        cumulative_preview_objective=0.0,
+        cumulative_score_adjustment=0.0,
+        tower_penalty_total=0.0,
+        fragmentation_total=0.0,
+        first_pick_index=0,
+        first_pick_box_id=101,
+        first_pick_preview=None,
+        first_pick_height_gain_mm=200,
+        first_pick_height_waste_mm=0,
+        first_pick_opened_layer=0,
+        first_pick_score_adjustment=0.0,
+        sequence=((0, 101),),
+    )
+    high_waste_fewer_layers = _BeamNode(
+        pallet=pallet,
+        window=tuple(),
+        upstream=tuple(),
+        placed_count=4,
+        height_used_mm=1200,
+        cumulative_height_gain_mm=1200,
+        cumulative_height_waste_mm=120,
+        layer_opened_count=1,
+        cumulative_preview_objective=0.0,
+        cumulative_score_adjustment=0.0,
+        tower_penalty_total=0.0,
+        fragmentation_total=0.0,
+        first_pick_index=0,
+        first_pick_box_id=202,
+        first_pick_preview=None,
+        first_pick_height_gain_mm=200,
+        first_pick_height_waste_mm=0,
+        first_pick_opened_layer=0,
+        first_pick_score_adjustment=0.0,
+        sequence=((0, 202),),
+    )
+
+    legacy_key_low_waste = BeamPickPlanner._objective_key(
+        low_waste_more_layers,
+        OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN,
+    )
+    legacy_key_high_waste = BeamPickPlanner._objective_key(
+        high_waste_fewer_layers,
+        OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN,
+    )
+    assert legacy_key_high_waste < legacy_key_low_waste
+
+    waste_key_low_waste = BeamPickPlanner._objective_key(
+        low_waste_more_layers,
+        OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE,
+    )
+    waste_key_high_waste = BeamPickPlanner._objective_key(
+        high_waste_fewer_layers,
+        OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE,
+    )
+    assert waste_key_low_waste < waste_key_high_waste

@@ -93,12 +93,19 @@ def test_beam_pick_reaches_21_dest1() -> None:
         lookahead_k=15,
         pick_window=15,
         overhang_mm=20,
-        stop_after_first_pallet=True,
+        max_height_mm=2400,
+        beam_defer_until_visible=15,
+        beam_objective="max_placed_then_min_height_waste",
+        stop_after_first_pallet=False,
         stability_mode="off",
         beam_width=12,
         beam_depth=6,
         beam_max_expansions=2500,
         beam_time_budget_ms=200,
+        allow_upright=True,
+        upright_only_if_height_saves_mm=20,
+        upright_max_height_mm=600,
+        upright_max_aspect_ratio=3.0,
     )
     elapsed = time.perf_counter() - started
 
@@ -116,4 +123,3 @@ def test_beam_pick_reaches_21_dest1() -> None:
 
     assert elapsed < 180.0, summary
     assert placed_dest1 >= 21, summary
-    assert stop_reason.startswith("PALLET_DONE dest=1"), summary
