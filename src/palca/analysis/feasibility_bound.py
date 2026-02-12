@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,6 +126,116 @@ def _load_bound_items(excel_path: str | Path, dest: int) -> list[BoundItem]:
             )
         )
     return items
+
+
+def _orientation_is_viable_for_enforce(
+    *,
+    orient: OrientedDims,
+    base_length_mm: int,
+    base_width_mm: int,
+    hmax_mm: int,
+) -> bool:
+    return (
+        int(orient.a_mm) > 0
+        and int(orient.b_mm) > 0
+        and int(orient.h_mm) > 0
+        and int(orient.a_mm) <= int(base_length_mm)
+        and int(orient.b_mm) <= int(base_width_mm)
+        and int(orient.h_mm) <= int(hmax_mm)
+    )
+
+
+def _parse_seed_list(seeds_raw: str, fallback_seed: int) -> list[int]:
+    parsed: list[int] = []
+    seen: set[int] = set()
+    for raw in str(seeds_raw).split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            seed = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Semilla invalida en --enforce-seeds: {token!r}") from exc
+        if seed in seen:
+            continue
+        seen.add(seed)
+        parsed.append(seed)
+    if parsed:
+        return parsed
+    return [int(fallback_seed)]
+
+
+def _prepare_enforce_items(
+    *,
+    items: list[BoundItem],
+    target: int,
+    base_length_mm: int,
+    base_width_mm: int,
+    hmax_mm: int,
+    enforce_cap_items: int,
+    enforce_cap_slack: int,
+    enforce_max_orients_per_item: int,
+) -> tuple[list[BoundItem], int, int]:
+    n_items = len(items)
+    cap_items = int(enforce_cap_items)
+    cap_slack = max(0, int(enforce_cap_slack))
+    orients_cap = max(1, int(enforce_max_orients_per_item))
+
+    if cap_items > 0:
+        k_limit = min(n_items, cap_items)
+    else:
+        k_limit = min(n_items, max(0, int(target) + cap_slack))
+
+    scored: list[tuple[tuple[int, int, int, int, int], BoundItem, list[OrientedDims]]] = []
+    for stable_idx, item in enumerate(items):
+        viable = [
+            orient
+            for orient in item.orientations
+            if _orientation_is_viable_for_enforce(
+                orient=orient,
+                base_length_mm=base_length_mm,
+                base_width_mm=base_width_mm,
+                hmax_mm=hmax_mm,
+            )
+        ]
+        viable.sort(key=lambda orient: (int(orient.area_mm2), int(orient.h_mm), int(orient.orient_id)))
+        if viable:
+            best = viable[0]
+            score = (
+                int(best.area_mm2),
+                int(best.h_mm),
+                int(item.item_idx),
+                int(item.row_idx),
+                stable_idx,
+            )
+        else:
+            score = (
+                10**15,
+                10**15,
+                int(item.item_idx),
+                int(item.row_idx),
+                stable_idx,
+            )
+        scored.append((score, item, viable))
+
+    scored.sort(key=lambda row: row[0])
+
+    capped_items: list[BoundItem] = []
+    for _score, item, viable in scored[:k_limit]:
+        if not viable:
+            continue
+        capped_items.append(
+            BoundItem(
+                item_idx=int(item.item_idx),
+                row_idx=int(item.row_idx),
+                length_mm=int(item.length_mm),
+                width_mm=int(item.width_mm),
+                height_mm=int(item.height_mm),
+                orientations=tuple(viable[:orients_cap]),
+            )
+        )
+
+    return capped_items, len(capped_items), orients_cap
 
 
 def _solve_layer_model(
@@ -276,7 +388,13 @@ def _solve_target_enforce_2d(
     target: int,
     time_limit_s: float,
     random_seed: int,
+    enforce_mode: str = "sat",
+    num_workers: int = 0,
+    log_search: bool = False,
 ) -> dict[str, object]:
+    if enforce_mode not in {"sat", "opt"}:
+        raise ValueError(f"enforce_mode invalido: {enforce_mode}")
+
     n_items = len(items)
     if target <= 0:
         return {
@@ -288,9 +406,10 @@ def _solve_target_enforce_2d(
             "used_layers": 0,
             "time_limit_s": float(time_limit_s),
             "used_no_overlap_2d": True,
+            "enforce_mode": str(enforce_mode),
             "per_layer": [],
         }
-    if n_items == 0 or max_layers <= 0:
+    if n_items == 0 or max_layers <= 0 or int(target) > int(n_items):
         return {
             "status": "UNSAT",
             "solver_status": "INFEASIBLE",
@@ -300,6 +419,7 @@ def _solve_target_enforce_2d(
             "used_layers": None,
             "time_limit_s": float(time_limit_s),
             "used_no_overlap_2d": True,
+            "enforce_mode": str(enforce_mode),
             "per_layer": [],
         }
 
@@ -387,14 +507,22 @@ def _solve_target_enforce_2d(
     model.Add(total_height == sum(layer_height))
     model.Add(total_height <= hmax_mm)
     model.Add(used_layers == sum(layer_used))
-    model.Add(selected_count >= int(target))
-
-    model.Minimize(total_height * (max_layers + 1) + used_layers)
+    if enforce_mode == "sat":
+        model.Add(selected_count == int(target))
+    else:
+        model.Add(selected_count >= int(target))
+        model.Minimize(total_height * (max_layers + 1) + used_layers)
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit_s)
-    solver.parameters.num_search_workers = 1
+    if int(num_workers) <= 0:
+        workers = int(os.cpu_count() or 1)
+    else:
+        workers = int(num_workers)
+    solver.parameters.num_search_workers = max(1, workers)
     solver.parameters.random_seed = int(random_seed)
+    if log_search:
+        solver.parameters.log_search_progress = True
 
     status = solver.Solve(model)
     sat_status = _sat_label(status)
@@ -410,6 +538,7 @@ def _solve_target_enforce_2d(
         "used_layers": None,
         "time_limit_s": float(time_limit_s),
         "used_no_overlap_2d": bool(supports_no_overlap_2d),
+        "enforce_mode": str(enforce_mode),
         "per_layer": [],
     }
     if not is_sat:
@@ -453,6 +582,99 @@ def _solve_target_enforce_2d(
     result["used_layers"] = int(solver.Value(used_layers))
     result["per_layer"] = per_layer
     return result
+
+
+def _solve_target_enforce_2d_multishot(
+    *,
+    items: list[BoundItem],
+    base_length_mm: int,
+    base_width_mm: int,
+    base_area_mm2: int,
+    hmax_mm: int,
+    max_layers: int,
+    target: int,
+    time_limit_s: float,
+    seeds: list[int],
+    shot_time_limit_s: float,
+    enforce_mode: str,
+    num_workers: int,
+    log_search: bool,
+) -> dict[str, object]:
+    if not seeds:
+        raise ValueError("seeds no puede ser vacio")
+
+    total_budget = max(0.0, float(time_limit_s))
+    max_shot = float(shot_time_limit_s)
+    started_at = time.monotonic()
+    attempts: list[dict[str, object]] = []
+    last_unknown: dict[str, object] | None = None
+
+    for seed in seeds:
+        elapsed = time.monotonic() - started_at
+        remaining = total_budget - elapsed
+        if remaining <= 1e-6:
+            break
+        if max_shot > 0.0:
+            shot_limit = min(max_shot, remaining)
+        else:
+            shot_limit = remaining
+
+        shot_result = _solve_target_enforce_2d(
+            items=items,
+            base_length_mm=base_length_mm,
+            base_width_mm=base_width_mm,
+            base_area_mm2=base_area_mm2,
+            hmax_mm=hmax_mm,
+            max_layers=max_layers,
+            target=target,
+            time_limit_s=shot_limit,
+            random_seed=int(seed),
+            enforce_mode=enforce_mode,
+            num_workers=num_workers,
+            log_search=log_search,
+        )
+        attempts.append(
+            {
+                "seed": int(seed),
+                "time_limit_s": float(shot_limit),
+                "status": str(shot_result["status"]),
+                "solver_status": str(shot_result["solver_status"]),
+                "solver_status_proven": bool(shot_result["solver_status_proven"]),
+            }
+        )
+
+        if shot_result["status"] == "SAT":
+            shot_result["time_limit_s"] = float(time_limit_s)
+            shot_result["attempts"] = attempts
+            return shot_result
+
+        if shot_result["status"] == "UNSAT" and bool(shot_result["solver_status_proven"]):
+            shot_result["time_limit_s"] = float(time_limit_s)
+            shot_result["attempts"] = attempts
+            return shot_result
+
+        last_unknown = shot_result
+
+    if last_unknown is None:
+        return {
+            "status": "UNKNOWN",
+            "solver_status": "UNKNOWN",
+            "solver_status_proven": False,
+            "selected_count": None,
+            "height_mm": None,
+            "used_layers": None,
+            "time_limit_s": float(time_limit_s),
+            "used_no_overlap_2d": True,
+            "enforce_mode": str(enforce_mode),
+            "per_layer": [],
+            "attempts": attempts,
+        }
+
+    last_unknown["status"] = "UNKNOWN"
+    last_unknown["solver_status_proven"] = False
+    last_unknown["time_limit_s"] = float(time_limit_s)
+    last_unknown["attempts"] = attempts
+    return last_unknown
 
 
 def _solve_layer_2d_packing(
@@ -645,6 +867,14 @@ def run_feasibility_bound(
     verify_time_limit_s: float = 10.0,
     enforce_2d: bool = False,
     enforce_time_limit_s: float = 30.0,
+    enforce_mode: str = "sat",
+    enforce_cap_items: int = 0,
+    enforce_cap_slack: int = 8,
+    enforce_max_orients_per_item: int = 2,
+    enforce_seeds: str = "123,7,99",
+    enforce_shot_s: float = 25.0,
+    enforce_num_workers: int = 0,
+    enforce_log_search: bool = False,
 ) -> dict[str, object]:
     resolved_excel = resolve_repo_path(str(excel_path))
     items = _load_bound_items(resolved_excel, dest=dest)
@@ -652,6 +882,17 @@ def run_feasibility_bound(
     base_length_mm = BASE_LENGTH_MM + 2 * int(overhang_mm)
     base_width_mm = BASE_WIDTH_MM + 2 * int(overhang_mm)
     base_area_mm2 = base_length_mm * base_width_mm
+    parsed_enforce_seeds = _parse_seed_list(enforce_seeds, fallback_seed=random_seed)
+    enforce_items, enforce_effective_count, orients_capped = _prepare_enforce_items(
+        items=items,
+        target=target,
+        base_length_mm=base_length_mm,
+        base_width_mm=base_width_mm,
+        hmax_mm=hmax_mm,
+        enforce_cap_items=enforce_cap_items,
+        enforce_cap_slack=enforce_cap_slack,
+        enforce_max_orients_per_item=enforce_max_orients_per_item,
+    )
 
     target_summary = _solve_layer_model(
         items=items,
@@ -691,8 +932,8 @@ def run_feasibility_bound(
         }
 
     if enforce_2d:
-        enforce_2d_result = _solve_target_enforce_2d(
-            items=items,
+        enforce_2d_result = _solve_target_enforce_2d_multishot(
+            items=enforce_items,
             base_length_mm=base_length_mm,
             base_width_mm=base_width_mm,
             base_area_mm2=base_area_mm2,
@@ -700,7 +941,11 @@ def run_feasibility_bound(
             max_layers=max_layers,
             target=target,
             time_limit_s=enforce_time_limit_s,
-            random_seed=random_seed,
+            seeds=parsed_enforce_seeds,
+            shot_time_limit_s=enforce_shot_s,
+            enforce_mode=enforce_mode,
+            num_workers=enforce_num_workers,
+            log_search=enforce_log_search,
         )
     else:
         enforce_2d_result = {
@@ -712,7 +957,9 @@ def run_feasibility_bound(
             "used_layers": None,
             "time_limit_s": float(enforce_time_limit_s),
             "used_no_overlap_2d": True,
+            "enforce_mode": str(enforce_mode),
             "per_layer": [],
+            "attempts": [],
         }
 
     summary: dict[str, object] = {
@@ -726,6 +973,14 @@ def run_feasibility_bound(
             "verify_time_limit_s": float(verify_time_limit_s),
             "enforce_2d_enabled": bool(enforce_2d),
             "enforce_time_limit_s": float(enforce_time_limit_s),
+            "enforce_mode": str(enforce_mode),
+            "enforce_cap_items": int(enforce_cap_items),
+            "enforce_cap_slack": int(enforce_cap_slack),
+            "enforce_max_orients_per_item": int(enforce_max_orients_per_item),
+            "enforce_seeds": parsed_enforce_seeds,
+            "enforce_shot_s": float(enforce_shot_s),
+            "enforce_num_workers": int(enforce_num_workers),
+            "enforce_log_search": bool(enforce_log_search),
             "random_seed": int(random_seed),
             "base_length_mm": int(base_length_mm),
             "base_width_mm": int(base_width_mm),
@@ -733,6 +988,8 @@ def run_feasibility_bound(
             "hmax_mm": int(hmax_mm),
             "overhang_mm": int(overhang_mm),
             "items_considered": len(items),
+            "items_considered_effective_for_enforce_2d": int(enforce_effective_count),
+            "orients_capped": int(orients_capped),
         },
         "target_mode": {
             "status": "SAT" if target_summary.is_sat else "UNSAT",
@@ -785,6 +1042,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verify-time-limit-s", type=float, default=10.0, help="Time limit por capa para verify_2d")
     parser.add_argument("--enforce-2d", action="store_true", help="Resuelve target con modelo 2D real integrado por capas")
     parser.add_argument("--enforce-time-limit-s", type=float, default=30.0, help="Time limit total para enforce_2d")
+    parser.add_argument("--enforce-mode", choices=["sat", "opt"], default="sat", help="sat: factibilidad pura, opt: minimiza altura/capas")
+    parser.add_argument("--enforce-cap-items", type=int, default=0, help="Cap fijo de items para enforce_2d (0 => target + slack)")
+    parser.add_argument("--enforce-cap-slack", type=int, default=8, help="Slack para cap dinamico cuando enforce-cap-items=0")
+    parser.add_argument(
+        "--enforce-max-orients-per-item",
+        type=int,
+        default=2,
+        help="Max orientaciones viables por item en enforce_2d",
+    )
+    parser.add_argument("--enforce-seeds", default="123,7,99", help="Lista CSV de seeds para multi-shot enforce_2d")
+    parser.add_argument("--enforce-shot-s", type=float, default=25.0, help="Time limit max por shot/seed en enforce_2d")
+    parser.add_argument("--enforce-num-workers", type=int, default=0, help="Workers CP-SAT (0 => os.cpu_count())")
+    parser.add_argument("--enforce-log-search", action="store_true", help="Activa log de busqueda CP-SAT para enforce_2d")
     parser.add_argument("--compact", action="store_true", help="Imprime resumen compacto antes del JSON")
     return parser
 
@@ -806,6 +1076,14 @@ def main() -> None:
         verify_time_limit_s=args.verify_time_limit_s,
         enforce_2d=args.enforce_2d,
         enforce_time_limit_s=args.enforce_time_limit_s,
+        enforce_mode=args.enforce_mode,
+        enforce_cap_items=args.enforce_cap_items,
+        enforce_cap_slack=args.enforce_cap_slack,
+        enforce_max_orients_per_item=args.enforce_max_orients_per_item,
+        enforce_seeds=args.enforce_seeds,
+        enforce_shot_s=args.enforce_shot_s,
+        enforce_num_workers=args.enforce_num_workers,
+        enforce_log_search=args.enforce_log_search,
     )
 
     if args.compact:
