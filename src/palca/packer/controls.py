@@ -5,8 +5,10 @@ from typing import Any, Iterable, Protocol, Sequence, TYPE_CHECKING
 
 from ..domain.box import Box
 from ..domain.placement import Placement
-from .maxrects2d import MaxRectsCandidate
 from .layer import LayerState
+from .maxrects2d import MaxRectsCandidate
+
+DEFAULT_K = 25
 
 if TYPE_CHECKING:
     from .pallet_model import PalletModel
@@ -57,6 +59,8 @@ class StabilityConfig:
     eps_mm: float = 1.0
     settle_snap_grid: bool = False
     grid_mm: int | None = None
+    settle_max_iter: int = 0
+    settle_timeout_ms: int = 0
 
     def enable_ratio(self) -> bool:
         return self.mode in ("ratio", "ratio+corners", "ratio+corners+settle")
@@ -112,10 +116,7 @@ class DefaultPointControl:
         height_mm: int,
         is_new_layer: bool,
     ) -> Iterable[MaxRectsCandidate]:
-        cand = layer.bin.find_candidate(length_mm, width_mm)
-        if cand is None:
-            return []
-        return [cand]
+        return layer.bin.find_candidates(length_mm, width_mm, k=DEFAULT_K)
 
 
 @dataclass(frozen=True)
@@ -131,32 +132,36 @@ class StabilityPlacementControl:
     ) -> PlacementControlResult:
         cfg = self.config
         eps = float(cfg.eps_mm)
-        adjusted = placement
+        adjusted: Placement = placement
         debug: dict[str, Any] = {}
 
+        # 0) SETTLE (si está habilitado)
+        # settle_placement devuelve (Placement, settle_mm)
         if cfg.enable_settle():
-            adjusted, settle_mm = pallet.settle_placement(
-                placement,
+            z_before = float(getattr(adjusted, "z_mm", 0.0) or 0.0)
+            settled, settle_mm = pallet.settle_placement(
+                adjusted,
                 eps_mm=eps,
-                snap_grid=cfg.settle_snap_grid,
+                snap_grid=bool(cfg.settle_snap_grid),
                 grid_mm=cfg.grid_mm,
+                max_iter=cfg.settle_max_iter,
+                timeout_ms=cfg.settle_timeout_ms,
             )
+            adjusted = settled
+            z_after = float(getattr(adjusted, "z_mm", 0.0) or 0.0)
+
             debug["settle_mm"] = float(settle_mm)
+            debug["settled_z_before_mm"] = float(z_before)
+            debug["settled_z_after_mm"] = float(z_after)
 
-        if cfg.enable_corners():
-            pallet.stats.corner_checks += 1
-            corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
-            debug["corners_supported"] = bool(corners_ok)
-            if not corners_ok:
-                pallet.stats.corner_rejects += 1
-                return PlacementControlResult(
-                    feasible=False,
-                    placement=adjusted,
-                    score_delta=0.0,
-                    reason="CORNER_SUPPORT",
-                    debug=debug,
-                )
+            # Stats: usa lo que existe en PalletStats
+            if float(settle_mm) > 0.0:
+                pallet.stats.record_settle(float(settle_mm))
 
+        ratio_failed = False
+        corners_failed = False
+
+        # 1) SUPPORT RATIO (primero)
         if cfg.enable_ratio():
             pallet.stats.support_ratio_checks += 1
             ratio, support_area = pallet.support_surface_ratio(adjusted, eps_mm=eps)
@@ -164,14 +169,37 @@ class StabilityPlacementControl:
             debug["support_area_mm2"] = float(support_area)
             if ratio + 1e-9 < float(cfg.min_support_ratio):
                 pallet.stats.support_ratio_rejects += 1
-                return PlacementControlResult(
-                    feasible=False,
-                    placement=adjusted,
-                    score_delta=0.0,
-                    reason="SUPPORT_RATIO",
-                    debug=debug,
-                )
+                ratio_failed = True
 
+        # 2) CORNERS SUPPORT (después del ratio)
+        if cfg.enable_corners():
+            pallet.stats.corner_checks += 1
+            com_supported, overlaps = pallet.com_support_info(adjusted, eps_mm=eps)
+            corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
+            debug["com_supported"] = bool(com_supported)
+            debug["supported_overlaps_count"] = int(overlaps)
+            debug["corners_supported"] = bool(corners_ok)
+            if not com_supported:
+                pallet.stats.corner_rejects += 1
+                corners_failed = True
+
+        if corners_failed:
+            return PlacementControlResult(
+                feasible=False,
+                placement=adjusted,
+                score_delta=0.0,
+                reason="CORNER_SUPPORT",
+                debug=debug,
+            )
+
+        if ratio_failed:
+            return PlacementControlResult(
+                feasible=False,
+                placement=adjusted,
+                score_delta=0.0,
+                reason="SUPPORT_RATIO",
+                debug=debug,
+            )
 
         return PlacementControlResult(
             feasible=True,

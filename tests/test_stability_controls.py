@@ -7,22 +7,33 @@ from palca.packer.controls import StabilityConfig, StabilityPlacementControl
 from palca.packer.pallet_model import PalletModel
 
 
-def _support_box(x: int, y: int, size: int = 5, height: int = 5, box_id: int = 1) -> Placement:
+def _support_box(
+    x: int,
+    y: int,
+    size: int = 5,
+    *,
+    length_mm: int | None = None,
+    width_mm: int | None = None,
+    height: int = 5,
+    box_id: int = 1,
+) -> Placement:
+    length = size if length_mm is None else length_mm
+    width = size if width_mm is None else width_mm
     return Placement(
         x_mm=x,
         y_mm=y,
         z_mm=0,
         rot90=False,
         layer_id=0,
-        length_mm=size,
-        width_mm=size,
+        length_mm=length,
+        width_mm=width,
         height_mm=height,
         box_id=box_id,
         weight_kg=1.0,
     )
 
 
-def test_corner_support_rule() -> None:
+def test_com_support_rule() -> None:
     spec = PalletSpec(length_mm=10, width_mm=10, max_height_mm=50)
     pallet = PalletModel(spec=spec)
     control = StabilityPlacementControl(
@@ -30,30 +41,34 @@ def test_corner_support_rule() -> None:
     )
     box = Box(box_id=99, length_mm=10, width_mm=10, height_mm=5, timestamp=0.0)
 
-    positions = [(0, 0), (5, 0), (0, 5), (5, 5)]
-    for count in range(4, -1, -1):
-        pallet.placements = []
-        for i in range(count):
-            pallet.placements.append(_support_box(*positions[i], box_id=i + 1))
+    candidate = Placement(
+        x_mm=0,
+        y_mm=0,
+        z_mm=5,
+        rot90=False,
+        layer_id=1,
+        length_mm=10,
+        width_mm=10,
+        height_mm=5,
+        box_id=box.box_id,
+        weight_kg=1.0,
+    )
 
-        candidate = Placement(
-            x_mm=0,
-            y_mm=0,
-            z_mm=5,
-            rot90=False,
-            layer_id=1,
-            length_mm=10,
-            width_mm=10,
-            height_mm=5,
-            box_id=box.box_id,
-            weight_kg=1.0,
-        )
-        result = control.evaluate(pallet=pallet, box=box, placement=candidate)
-        if count == 4:
-            assert result.feasible
-        else:
-            assert not result.feasible
-            assert result.reason == "CORNER_SUPPORT"
+    # Ratio passes but COM is unsupported.
+    pallet.placements = [
+        _support_box(0, 0, length_mm=10, width_mm=4, height=5, box_id=1),
+        _support_box(0, 6, length_mm=10, width_mm=4, height=5, box_id=2),
+    ]
+    result = control.evaluate(pallet=pallet, box=box, placement=candidate)
+    assert not result.feasible
+    assert result.reason == "CORNER_SUPPORT"
+    assert result.debug["com_supported"] is False
+
+    # COM supported -> feasible.
+    pallet.placements = [_support_box(0, 4, length_mm=10, width_mm=2, height=5, box_id=3)]
+    result_ok = control.evaluate(pallet=pallet, box=box, placement=candidate)
+    assert result_ok.feasible
+    assert result_ok.debug["com_supported"] is True
 
 
 def test_support_ratio_rule() -> None:
