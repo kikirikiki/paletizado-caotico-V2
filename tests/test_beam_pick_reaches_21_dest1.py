@@ -96,7 +96,7 @@ def test_beam_pick_reaches_21_dest1() -> None:
         max_height_mm=2400,
         beam_defer_until_visible=15,
         beam_objective="max_placed_then_min_height_waste",
-        stop_after_first_pallet=False,
+        stop_after_first_pallet=True,
         stability_mode="off",
         beam_width=12,
         beam_depth=6,
