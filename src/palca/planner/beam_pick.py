@@ -46,6 +46,8 @@ class _BeamNode:
     upstream: tuple[Box, ...]
     placed_count: int
     height_used_mm: int
+    current_layer_height_mm: int
+    n_items_in_current_layer: int
     cumulative_height_gain_mm: int
     cumulative_height_waste_mm: int
     layer_opened_count: int
@@ -84,6 +86,7 @@ class BeamPickPlanner:
 
         if not root_window:
             return BeamPickResult(buffer_index=None, box_id=None, preview=None, debug={"reason": "empty_window"})
+        root_layer_height_mm, root_layer_items = cls._active_layer_state(pallet)
 
         started = time.perf_counter()
         beam_width = max(1, int(config.beam_width))
@@ -105,6 +108,8 @@ class BeamPickPlanner:
             upstream=root_upstream,
             placed_count=0,
             height_used_mm=int(pallet.current_height_mm()),
+            current_layer_height_mm=int(root_layer_height_mm),
+            n_items_in_current_layer=int(root_layer_items),
             cumulative_height_gain_mm=0,
             cumulative_height_waste_mm=0,
             layer_opened_count=0,
@@ -167,6 +172,12 @@ class BeamPickPlanner:
                     opens_new_layer = bool(preview_debug.get("is_new_layer"))
                     if not opens_new_layer:
                         opens_new_layer = int(preview.placement.layer_id) >= len(node.pallet.layers)
+                    height_waste_mm, next_layer_height_mm, next_layer_items = cls._height_waste_step(
+                        is_new_layer=opens_new_layer,
+                        item_height_mm=int(preview.placement.height_mm),
+                        current_layer_height_mm=int(node.current_layer_height_mm),
+                        n_items_in_current_layer=int(node.n_items_in_current_layer),
+                    )
 
                     next_window, next_upstream = cls._advance_window(
                         node.window,
@@ -186,7 +197,7 @@ class BeamPickPlanner:
                     first_pick_score_adjustment = float(node.first_pick_score_adjustment)
                     if node.first_pick_index is None:
                         first_pick_height_gain = int(height_gain)
-                        first_pick_height_waste = int(preview_debug.get("height_waste_mm") or 0)
+                        first_pick_height_waste = int(height_waste_mm)
                         first_pick_opened_layer = 1 if opens_new_layer else 0
                         first_pick_score_adjustment = float(preview.score_adjustment or 0.0)
                     next_sequence = node.sequence + ((int(idx), box.box_id),)
@@ -195,7 +206,6 @@ class BeamPickPlanner:
                     fragmentation = max(0.0, float(preview.fragmentation))
                     score_adjustment = float(preview.score_adjustment or 0.0)
                     step_objective = cls._preview_objective(preview)
-                    height_waste_mm = int(preview_debug.get("height_waste_mm") or 0)
 
                     child = _BeamNode(
                         pallet=child_pallet,
@@ -203,6 +213,8 @@ class BeamPickPlanner:
                         upstream=next_upstream,
                         placed_count=int(node.placed_count) + 1,
                         height_used_mm=child_height,
+                        current_layer_height_mm=int(next_layer_height_mm),
+                        n_items_in_current_layer=int(next_layer_items),
                         cumulative_height_gain_mm=int(node.cumulative_height_gain_mm) + int(height_gain),
                         cumulative_height_waste_mm=int(node.cumulative_height_waste_mm) + int(height_waste_mm),
                         layer_opened_count=int(node.layer_opened_count) + (1 if opens_new_layer else 0),
@@ -344,6 +356,42 @@ class BeamPickPlanner:
         return tuple(next_window), tuple(next_upstream)
 
     @staticmethod
+    def _active_layer_state(pallet: PalletModel) -> tuple[int, int]:
+        if not pallet.layers:
+            return 0, 0
+        active_layer = pallet.layers[-1]
+        active_layer_id = int(active_layer.layer_id)
+        active_items = sum(1 for placement in pallet.placements if int(placement.layer_id) == active_layer_id)
+        return int(active_layer.height_mm), int(active_items)
+
+    @staticmethod
+    def _height_waste_step(
+        *,
+        is_new_layer: bool,
+        item_height_mm: int,
+        current_layer_height_mm: int,
+        n_items_in_current_layer: int,
+    ) -> tuple[int, int, int]:
+        item_height = max(0, int(item_height_mm))
+        if is_new_layer:
+            return 0, int(item_height), 1
+
+        layer_height = max(0, int(current_layer_height_mm))
+        n_items = max(0, int(n_items_in_current_layer))
+        if n_items <= 0:
+            next_height = max(int(layer_height), int(item_height))
+            waste_delta = max(0, int(layer_height - item_height))
+            return int(waste_delta), int(next_height), 1
+
+        if item_height <= layer_height:
+            waste_delta = int(layer_height - item_height)
+            return int(waste_delta), int(layer_height), int(n_items + 1)
+
+        dh = int(item_height - layer_height)
+        waste_delta = int(n_items * dh)
+        return int(waste_delta), int(item_height), int(n_items + 1)
+
+    @staticmethod
     def _objective_key(node: _BeamNode, objective: str) -> tuple[Any, ...]:
         if objective == OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE:
             return BeamPickPlanner._height_waste_objective_key(node)
@@ -474,6 +522,8 @@ class BeamPickPlanner:
         pallet = node.pallet.fork()
         window = list(node.window)
         upstream = list(node.upstream)
+        layer_height_mm = int(node.current_layer_height_mm)
+        n_items_in_layer = int(node.n_items_in_current_layer)
         steps = 0
         placed = 0
         while window and steps < max(1, int(max_steps)):
@@ -482,6 +532,8 @@ class BeamPickPlanner:
             best_idx: int | None = None
             best_preview: PlacementPreview | None = None
             best_local_key: tuple[Any, ...] | None = None
+            best_next_layer_height_mm: int | None = None
+            best_next_layer_items: int | None = None
             limit = min(len(window), max(1, int(pick_window)))
             current_height = int(pallet.current_height_mm())
             current_layers = len(pallet.layers)
@@ -494,7 +546,12 @@ class BeamPickPlanner:
                 gain = int(dbg.get("height_increase_mm") or 0)
                 if is_new_layer:
                     gain = int(preview.placement.height_mm)
-                height_waste_mm = int(dbg.get("height_waste_mm") or 0)
+                height_waste_mm, next_layer_height_mm, next_layer_items = cls._height_waste_step(
+                    is_new_layer=is_new_layer,
+                    item_height_mm=int(preview.placement.height_mm),
+                    current_layer_height_mm=int(layer_height_mm),
+                    n_items_in_current_layer=int(n_items_in_layer),
+                )
                 score_adjustment = float(preview.score_adjustment or 0.0)
                 preview_objective = cls._preview_objective(preview)
                 local_key = cls._rollout_local_key(
@@ -512,12 +569,17 @@ class BeamPickPlanner:
                     best_local_key = local_key
                     best_idx = int(idx)
                     best_preview = preview
+                    best_next_layer_height_mm = int(next_layer_height_mm)
+                    best_next_layer_items = int(next_layer_items)
             if best_idx is None or best_preview is None:
                 break
             try:
                 pallet.commit_place(best_preview)
             except Exception:
                 break
+            if best_next_layer_height_mm is not None and best_next_layer_items is not None:
+                layer_height_mm = int(best_next_layer_height_mm)
+                n_items_in_layer = int(best_next_layer_items)
             window.pop(best_idx)
             while len(window) < int(pick_window) and upstream:
                 window.append(upstream.pop(0))
@@ -559,6 +621,8 @@ class BeamPickPlanner:
             "best_cumulative_preview_objective": float(best.cumulative_preview_objective),
             "best_cumulative_score_adjustment": float(best.cumulative_score_adjustment),
             "best_cumulative_height_waste_mm": int(best.cumulative_height_waste_mm),
+            "best_current_layer_height_mm": int(best.current_layer_height_mm),
+            "best_n_items_in_current_layer": int(best.n_items_in_current_layer),
             "best_layers": len(best.pallet.layers),
             "projected_best_placed_count": int(projected_best),
             "top_infeasible_reasons": [[str(reason), int(count)] for reason, count in top_reasons],

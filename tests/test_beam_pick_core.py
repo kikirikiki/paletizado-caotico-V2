@@ -103,6 +103,8 @@ def test_beam_objective_height_waste_changes_tie_break_order() -> None:
         upstream=tuple(),
         placed_count=4,
         height_used_mm=1200,
+        current_layer_height_mm=400,
+        n_items_in_current_layer=3,
         cumulative_height_gain_mm=1200,
         cumulative_height_waste_mm=20,
         layer_opened_count=3,
@@ -125,6 +127,8 @@ def test_beam_objective_height_waste_changes_tie_break_order() -> None:
         upstream=tuple(),
         placed_count=4,
         height_used_mm=1200,
+        current_layer_height_mm=400,
+        n_items_in_current_layer=3,
         cumulative_height_gain_mm=1200,
         cumulative_height_waste_mm=120,
         layer_opened_count=1,
@@ -161,3 +165,25 @@ def test_beam_objective_height_waste_changes_tie_break_order() -> None:
         OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE,
     )
     assert waste_key_low_waste < waste_key_high_waste
+
+
+def test_height_waste_step_penalizes_retroactive_layer_growth() -> None:
+    waste0, layer_h, n_items = BeamPickPlanner._height_waste_step(
+        is_new_layer=True,
+        item_height_mm=200,
+        current_layer_height_mm=0,
+        n_items_in_current_layer=0,
+    )
+    assert waste0 == 0
+    assert layer_h == 200
+    assert n_items == 1
+
+    waste1, layer_h, n_items = BeamPickPlanner._height_waste_step(
+        is_new_layer=False,
+        item_height_mm=300,
+        current_layer_height_mm=layer_h,
+        n_items_in_current_layer=n_items,
+    )
+    assert waste1 == 100
+    assert layer_h == 300
+    assert n_items == 2
