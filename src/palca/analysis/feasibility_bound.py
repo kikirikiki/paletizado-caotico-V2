@@ -23,6 +23,8 @@ ORIENTATION_ORDERS: tuple[tuple[str, tuple[int, int, int]], ...] = (
     ("HLW", (2, 0, 1)),
     ("HWL", (2, 1, 0)),
 )
+ALLOW_LH_BASE = os.getenv("PALCA_ALLOW_LH_BASE", "0").lower() in ("1", "true", "yes", "y")
+FORBID_LH_BASE = not ALLOW_LH_BASE
 
 
 @dataclass(frozen=True)
@@ -80,12 +82,20 @@ def _sat_label(status: int) -> str:
     return "UNKNOWN"
 
 
+def _is_orientation_allowed(orient_name: str) -> bool:
+    if not FORBID_LH_BASE:
+        return True
+    return orient_name not in ("LHW", "HLW")
+
+
 def _deduplicated_orientations(length_mm: int, width_mm: int, height_mm: int) -> tuple[OrientedDims, ...]:
     raw = (int(length_mm), int(width_mm), int(height_mm))
     seen: set[tuple[int, int, int]] = set()
     output: list[OrientedDims] = []
     orient_id = 0
     for orient_name, perm in ORIENTATION_ORDERS:
+        if not _is_orientation_allowed(orient_name):
+            continue
         dims = (raw[perm[0]], raw[perm[1]], raw[perm[2]])
         if dims in seen:
             continue
@@ -191,7 +201,8 @@ def _prepare_enforce_items(
         viable = [
             orient
             for orient in item.orientations
-            if _orientation_is_viable_for_enforce(
+            if _is_orientation_allowed(orient.orient_name)
+            and _orientation_is_viable_for_enforce(
                 orient=orient,
                 base_length_mm=base_length_mm,
                 base_width_mm=base_width_mm,
@@ -238,6 +249,10 @@ def _prepare_enforce_items(
     return capped_items, len(capped_items), orients_cap
 
 
+def _allowed_orientations(orientations: tuple[OrientedDims, ...]) -> tuple[OrientedDims, ...]:
+    return tuple(orient for orient in orientations if _is_orientation_allowed(orient.orient_name))
+
+
 def _solve_layer_model(
     *,
     items: list[BoundItem],
@@ -252,7 +267,18 @@ def _solve_layer_model(
     if mode not in {"target", "maximize"}:
         raise ValueError(f"Modo desconocido: {mode}")
 
-    model = cp_model.CpModel()
+    filtered_items = [
+        BoundItem(
+            item_idx=int(item.item_idx),
+            row_idx=int(item.row_idx),
+            length_mm=int(item.length_mm),
+            width_mm=int(item.width_mm),
+            height_mm=int(item.height_mm),
+            orientations=_allowed_orientations(item.orientations),
+        )
+        for item in items
+    ]
+    items = [item for item in filtered_items if item.orientations]
     n_items = len(items)
     if n_items == 0:
         return SolveSummary(
@@ -266,6 +292,7 @@ def _solve_layer_model(
             layers=[],
         )
 
+    model = cp_model.CpModel()
     x: dict[tuple[int, int, int], cp_model.IntVar] = {}
     for i, item in enumerate(items):
         for k in range(max_layers):
@@ -395,6 +422,18 @@ def _solve_target_enforce_2d(
     if enforce_mode not in {"sat", "opt"}:
         raise ValueError(f"enforce_mode invalido: {enforce_mode}")
 
+    filtered_items = [
+        BoundItem(
+            item_idx=int(item.item_idx),
+            row_idx=int(item.row_idx),
+            length_mm=int(item.length_mm),
+            width_mm=int(item.width_mm),
+            height_mm=int(item.height_mm),
+            orientations=_allowed_orientations(item.orientations),
+        )
+        for item in items
+    ]
+    items = [item for item in filtered_items if item.orientations]
     n_items = len(items)
     if target <= 0:
         return {
@@ -698,6 +737,17 @@ def _solve_layer_2d_packing(
     y_intervals: list[cp_model.IntervalVar] = []
 
     for idx, item in enumerate(layer_items):
+        orient_name = item.get("orient_name")
+        if orient_name is not None and not _is_orientation_allowed(str(orient_name)):
+            return {
+                "layer_idx": int(layer_idx),
+                "status": "UNSAT",
+                "solver_status": "INFEASIBLE",
+                "solver_status_proven": True,
+                "coords": [],
+                "reason": "orient_name prohibido por regla de negocio",
+            }
+
         dims_raw = item.get("oriented_dims_mm")
         if not isinstance(dims_raw, list) or len(dims_raw) < 2:
             return {
@@ -982,6 +1032,8 @@ def run_feasibility_bound(
             "enforce_num_workers": int(enforce_num_workers),
             "enforce_log_search": bool(enforce_log_search),
             "random_seed": int(random_seed),
+            "allow_lh_base_override_env": bool(ALLOW_LH_BASE),
+            "forbid_lh_base": bool(FORBID_LH_BASE),
             "base_length_mm": int(base_length_mm),
             "base_width_mm": int(base_width_mm),
             "base_area_mm2": int(base_area_mm2),
