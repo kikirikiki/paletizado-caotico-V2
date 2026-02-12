@@ -11,6 +11,11 @@ from .des import Arrival, SimConfig, simulate
 from .io import load_arrivals
 from .paths import resolve_repo_path
 
+BEAM_OBJECTIVE_CHOICES = (
+    "max_placed_then_min_height_gain",
+    "max_placed_then_min_height_waste",
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Simulador DES de paletizado")
@@ -146,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--beam-objective",
         type=str,
+        choices=BEAM_OBJECTIVE_CHOICES,
         default="max_placed_then_min_height_gain",
         help="Objetivo del beam planner",
     )
@@ -155,6 +161,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Si >0, beam_pick espera hasta tener al menos N visibles; 0 = no diferir picks",
+    )
+    parser.add_argument(
+        "--allow-upright",
+        action="store_true",
+        help="Permite orientaciones 3D (up-right) para evaluar altura alternativa",
+    )
+    parser.add_argument(
+        "--upright-only-if-height-saves-mm",
+        type=int,
+        default=20,
+        help="Solo permite upright si reduce altura al menos este umbral (mm)",
+    )
+    parser.add_argument(
+        "--upright-max-height-mm",
+        type=int,
+        default=600,
+        help="Altura maxima permitida para orientaciones upright (mm).",
+    )
+    parser.add_argument(
+        "--upright-max-aspect-ratio",
+        type=float,
+        default=3.0,
+        help="Relacion maxima altura/min(base) para upright. <=0 desactiva el filtro.",
     )
 
     # Output
@@ -296,6 +325,10 @@ def run_simulation(
     beam_objective: str = "max_placed_then_min_height_gain",
     beam_debug: bool = False,
     beam_defer_until_visible: int = 0,
+    allow_upright: bool = False,
+    upright_only_if_height_saves_mm: int = 20,
+    upright_max_height_mm: int | None = 600,
+    upright_max_aspect_ratio: float | None = 3.0,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -413,6 +446,16 @@ def run_simulation(
             beam_objective=beam_objective,
             beam_debug=beam_debug,
             beam_defer_until_visible=int(beam_defer_until_visible),
+            allow_upright=bool(allow_upright),
+            upright_only_if_height_saves_mm=max(0, int(upright_only_if_height_saves_mm)),
+            upright_max_height_mm=(
+                None if upright_max_height_mm is None or int(upright_max_height_mm) <= 0 else int(upright_max_height_mm)
+            ),
+            upright_max_aspect_ratio=(
+                None
+                if upright_max_aspect_ratio is None or float(upright_max_aspect_ratio) <= 0
+                else float(upright_max_aspect_ratio)
+            ),
         )
 
         if viewer is not None and rect_cls is not None:
@@ -490,6 +533,16 @@ def run_simulation(
             "beam_objective": beam_objective,
             "beam_debug": bool(beam_debug),
             "beam_defer_until_visible": int(beam_defer_until_visible),
+            "allow_upright": bool(allow_upright),
+            "upright_only_if_height_saves_mm": int(upright_only_if_height_saves_mm),
+            "upright_max_height_mm": (
+                None if upright_max_height_mm is None or int(upright_max_height_mm) <= 0 else int(upright_max_height_mm)
+            ),
+            "upright_max_aspect_ratio": (
+                None
+                if upright_max_aspect_ratio is None or float(upright_max_aspect_ratio) <= 0
+                else float(upright_max_aspect_ratio)
+            ),
             "viz_dest": viz_dest,
         },
         "metrics": result.to_dict(),
@@ -568,6 +621,16 @@ def main() -> None:
         beam_objective=str(args.beam_objective),
         beam_debug=bool(args.beam_debug),
         beam_defer_until_visible=int(args.beam_defer_until_visible),
+        allow_upright=bool(args.allow_upright),
+        upright_only_if_height_saves_mm=int(args.upright_only_if_height_saves_mm),
+        upright_max_height_mm=(
+            None if args.upright_max_height_mm is None or int(args.upright_max_height_mm) <= 0 else int(args.upright_max_height_mm)
+        ),
+        upright_max_aspect_ratio=(
+            None
+            if args.upright_max_aspect_ratio is None or float(args.upright_max_aspect_ratio) <= 0
+            else float(args.upright_max_aspect_ratio)
+        ),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),

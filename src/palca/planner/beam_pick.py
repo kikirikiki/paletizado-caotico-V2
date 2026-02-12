@@ -9,6 +9,15 @@ from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 
+OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN = "max_placed_then_min_height_gain"
+OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE = "max_placed_then_min_height_waste"
+SUPPORTED_BEAM_OBJECTIVES = frozenset(
+    {
+        OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN,
+        OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class BeamPickConfig:
@@ -16,7 +25,7 @@ class BeamPickConfig:
     beam_depth: int = 6
     beam_max_expansions: int = 2500
     beam_time_budget_ms: int = 200
-    beam_objective: str = "max_placed_then_min_height_gain"
+    beam_objective: str = OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN
     beam_debug: bool = False
 
 
@@ -38,14 +47,19 @@ class _BeamNode:
     placed_count: int
     height_used_mm: int
     cumulative_height_gain_mm: int
+    cumulative_height_waste_mm: int
     layer_opened_count: int
+    cumulative_preview_objective: float
+    cumulative_score_adjustment: float
     tower_penalty_total: float
     fragmentation_total: float
     first_pick_index: int | None
     first_pick_box_id: int | str | None
     first_pick_preview: PlacementPreview | None
     first_pick_height_gain_mm: int
+    first_pick_height_waste_mm: int
     first_pick_opened_layer: int
+    first_pick_score_adjustment: float
     sequence: tuple[tuple[int, int | str], ...]
 
 
@@ -63,6 +77,7 @@ class BeamPickPlanner:
     ) -> BeamPickResult:
         del rng  # beam search is deterministic today.
         config = cfg or BeamPickConfig()
+        objective = cls._normalize_objective(config.beam_objective)
         k = max(1, int(pick_window))
         root_window = tuple(window[:k])
         root_upstream = tuple(upstream or ())
@@ -91,14 +106,19 @@ class BeamPickPlanner:
             placed_count=0,
             height_used_mm=int(pallet.current_height_mm()),
             cumulative_height_gain_mm=0,
+            cumulative_height_waste_mm=0,
             layer_opened_count=0,
+            cumulative_preview_objective=0.0,
+            cumulative_score_adjustment=0.0,
             tower_penalty_total=0.0,
             fragmentation_total=0.0,
             first_pick_index=None,
             first_pick_box_id=None,
             first_pick_preview=None,
             first_pick_height_gain_mm=0,
+            first_pick_height_waste_mm=0,
             first_pick_opened_layer=0,
+            first_pick_score_adjustment=0.0,
             sequence=tuple(),
         )
         frontier: list[_BeamNode] = [root]
@@ -161,14 +181,21 @@ class BeamPickPlanner:
                         node.first_pick_preview if node.first_pick_preview is not None else preview
                     )
                     first_pick_height_gain = int(node.first_pick_height_gain_mm)
+                    first_pick_height_waste = int(node.first_pick_height_waste_mm)
                     first_pick_opened_layer = int(node.first_pick_opened_layer)
+                    first_pick_score_adjustment = float(node.first_pick_score_adjustment)
                     if node.first_pick_index is None:
                         first_pick_height_gain = int(height_gain)
+                        first_pick_height_waste = int(preview_debug.get("height_waste_mm") or 0)
                         first_pick_opened_layer = 1 if opens_new_layer else 0
+                        first_pick_score_adjustment = float(preview.score_adjustment or 0.0)
                     next_sequence = node.sequence + ((int(idx), box.box_id),)
 
                     tower_penalty = max(0.0, -float(preview_debug.get("tower_penalty", 0.0) or 0.0))
                     fragmentation = max(0.0, float(preview.fragmentation))
+                    score_adjustment = float(preview.score_adjustment or 0.0)
+                    step_objective = cls._preview_objective(preview)
+                    height_waste_mm = int(preview_debug.get("height_waste_mm") or 0)
 
                     child = _BeamNode(
                         pallet=child_pallet,
@@ -177,20 +204,29 @@ class BeamPickPlanner:
                         placed_count=int(node.placed_count) + 1,
                         height_used_mm=child_height,
                         cumulative_height_gain_mm=int(node.cumulative_height_gain_mm) + int(height_gain),
+                        cumulative_height_waste_mm=int(node.cumulative_height_waste_mm) + int(height_waste_mm),
                         layer_opened_count=int(node.layer_opened_count) + (1 if opens_new_layer else 0),
+                        cumulative_preview_objective=float(node.cumulative_preview_objective) + float(step_objective),
+                        cumulative_score_adjustment=float(node.cumulative_score_adjustment) + float(score_adjustment),
                         tower_penalty_total=float(node.tower_penalty_total) + tower_penalty,
                         fragmentation_total=float(node.fragmentation_total) + fragmentation,
                         first_pick_index=first_pick_index,
                         first_pick_box_id=first_pick_box_id,
                         first_pick_preview=first_pick_preview,
                         first_pick_height_gain_mm=first_pick_height_gain,
+                        first_pick_height_waste_mm=first_pick_height_waste,
                         first_pick_opened_layer=first_pick_opened_layer,
+                        first_pick_score_adjustment=first_pick_score_adjustment,
                         sequence=next_sequence,
                     )
-                    local_key = (
-                        1 if opens_new_layer else 0,
-                        int(height_gain),
-                        cls._objective_key(child),
+                    local_key = cls._local_child_key(
+                        child=child,
+                        opens_new_layer=opens_new_layer,
+                        height_gain=height_gain,
+                        height_waste_mm=height_waste_mm,
+                        score_adjustment=score_adjustment,
+                        step_objective=step_objective,
+                        objective=objective,
                     )
                     node_children.append((local_key, child))
 
@@ -201,11 +237,11 @@ class BeamPickPlanner:
                     break
 
             if next_frontier:
-                next_frontier.sort(key=cls._objective_key)
+                next_frontier.sort(key=lambda node: cls._objective_key(node, objective))
                 pruned = next_frontier[:beam_width]
                 frontier_sizes[depth] = len(pruned)
-                best_key_by_depth[depth] = cls._objective_key(pruned[0])
-                if cls._objective_key(pruned[0]) < cls._objective_key(best):
+                best_key_by_depth[depth] = cls._objective_key(pruned[0], objective)
+                if cls._objective_key(pruned[0], objective) < cls._objective_key(best, objective):
                     best = pruned[0]
                 frontier = pruned
             else:
@@ -223,7 +259,7 @@ class BeamPickPlanner:
             selected = best
             selected_key = (
                 -int(best.placed_count),
-                cls._objective_key(best),
+                cls._objective_key(best, objective),
             )
             for node in candidates:
                 if deadline is not None and time.perf_counter() >= deadline:
@@ -232,13 +268,17 @@ class BeamPickPlanner:
                 extra = cls._rollout_count(
                     node=node,
                     pick_window=k,
-                    max_steps=max(beam_depth, 8),
+                    max_steps=max(
+                        beam_depth,
+                        min(48, int(k) + len(node.window) + len(node.upstream)),
+                    ),
                     deadline=deadline,
+                    objective=objective,
                 )
                 projected = int(node.placed_count) + int(extra)
                 candidate_key = (
                     -projected,
-                    cls._objective_key(node),
+                    cls._objective_key(node, objective),
                 )
                 if candidate_key < selected_key:
                     selected = node
@@ -257,12 +297,13 @@ class BeamPickPlanner:
                 best_key_by_depth=best_key_by_depth,
                 elapsed_ms=(time.perf_counter() - started) * 1000.0,
                 projected_best=projected_best,
+                objective=objective,
             )
             return BeamPickResult(
                 buffer_index=None,
                 box_id=None,
                 preview=None,
-                objective_key=cls._objective_key(best),
+                objective_key=cls._objective_key(best, objective),
                 debug=debug,
             )
 
@@ -276,13 +317,14 @@ class BeamPickPlanner:
             best_key_by_depth=best_key_by_depth,
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
             projected_best=projected_best,
+            objective=objective,
         )
         return BeamPickResult(
             buffer_index=int(best.first_pick_index),
             box_id=best.first_pick_box_id,
             preview=best.first_pick_preview,
             best_sequence=best.sequence,
-            objective_key=cls._objective_key(best),
+            objective_key=cls._objective_key(best, objective),
             debug=debug,
         )
 
@@ -302,7 +344,13 @@ class BeamPickPlanner:
         return tuple(next_window), tuple(next_upstream)
 
     @staticmethod
-    def _objective_key(node: _BeamNode) -> tuple[Any, ...]:
+    def _objective_key(node: _BeamNode, objective: str) -> tuple[Any, ...]:
+        if objective == OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE:
+            return BeamPickPlanner._height_waste_objective_key(node)
+        return BeamPickPlanner._legacy_objective_key(node)
+
+    @staticmethod
+    def _legacy_objective_key(node: _BeamNode) -> tuple[Any, ...]:
         seq_key = tuple((int(idx), str(box_id)) for idx, box_id in node.sequence[:10])
         first_idx = int(node.first_pick_index) if node.first_pick_index is not None else 10**9
         return (
@@ -312,10 +360,105 @@ class BeamPickPlanner:
             int(node.first_pick_opened_layer),
             int(node.cumulative_height_gain_mm),
             int(node.layer_opened_count),
+            int(node.first_pick_height_waste_mm),
+            int(node.cumulative_height_waste_mm),
+            -int(round(float(node.first_pick_score_adjustment) * 1_000_000.0)),
+            -int(round(float(node.cumulative_score_adjustment) * 1_000_000.0)),
+            -int(round(float(node.cumulative_preview_objective) * 1_000_000.0)),
             float(node.tower_penalty_total),
             float(node.fragmentation_total),
             first_idx,
             seq_key,
+        )
+
+    @staticmethod
+    def _height_waste_objective_key(node: _BeamNode) -> tuple[Any, ...]:
+        seq_key = tuple((int(idx), str(box_id)) for idx, box_id in node.sequence[:10])
+        first_idx = int(node.first_pick_index) if node.first_pick_index is not None else 10**9
+        return (
+            -int(node.placed_count),
+            int(node.height_used_mm),
+            int(node.cumulative_height_waste_mm),
+            int(node.layer_opened_count),
+            int(node.first_pick_height_gain_mm),
+            int(node.cumulative_height_gain_mm),
+            int(node.first_pick_opened_layer),
+            int(node.first_pick_height_waste_mm),
+            float(node.tower_penalty_total),
+            float(node.fragmentation_total),
+            first_idx,
+            seq_key,
+        )
+
+    @staticmethod
+    def _normalize_objective(objective: str | None) -> str:
+        if objective in SUPPORTED_BEAM_OBJECTIVES:
+            return str(objective)
+        return OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_GAIN
+
+    @classmethod
+    def _local_child_key(
+        cls,
+        *,
+        child: _BeamNode,
+        opens_new_layer: bool,
+        height_gain: int,
+        height_waste_mm: int,
+        score_adjustment: float,
+        step_objective: float,
+        objective: str,
+    ) -> tuple[Any, ...]:
+        if objective == OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE:
+            return cls._objective_key(child, objective)
+        return (
+            1 if opens_new_layer else 0,
+            int(height_gain),
+            int(height_waste_mm),
+            -int(round(score_adjustment * 1_000_000.0)),
+            -int(round(step_objective * 1_000_000.0)),
+            cls._objective_key(child, objective),
+        )
+
+    @classmethod
+    def _rollout_local_key(
+        cls,
+        *,
+        idx: int,
+        is_new_layer: bool,
+        gain: int,
+        height_waste_mm: int,
+        score_adjustment: float,
+        preview_objective: float,
+        placement_height_mm: int,
+        current_height_mm: int,
+        objective: str,
+    ) -> tuple[Any, ...]:
+        if objective == OBJECTIVE_MAX_PLACED_THEN_MIN_HEIGHT_WASTE:
+            return (
+                1 if is_new_layer else 0,
+                int(gain),
+                int(height_waste_mm),
+                int(placement_height_mm),
+                int(current_height_mm + gain),
+                int(idx),
+            )
+        return (
+            1 if is_new_layer else 0,
+            int(gain),
+            int(height_waste_mm),
+            -int(round(score_adjustment * 1_000_000.0)),
+            -int(round(preview_objective * 1_000_000.0)),
+            int(placement_height_mm),
+            int(current_height_mm + gain),
+            int(idx),
+        )
+
+    @staticmethod
+    def _preview_objective(preview: PlacementPreview) -> float:
+        return (
+            float(preview.packing_gain)
+            - float(preview.fragmentation)
+            + float(preview.score_adjustment or 0.0)
         )
 
     @classmethod
@@ -326,6 +469,7 @@ class BeamPickPlanner:
         pick_window: int,
         max_steps: int,
         deadline: float | None,
+        objective: str,
     ) -> int:
         pallet = node.pallet.fork()
         window = list(node.window)
@@ -350,12 +494,19 @@ class BeamPickPlanner:
                 gain = int(dbg.get("height_increase_mm") or 0)
                 if is_new_layer:
                     gain = int(preview.placement.height_mm)
-                local_key = (
-                    1 if is_new_layer else 0,
-                    int(gain),
-                    int(preview.placement.height_mm),
-                    int(current_height + gain),
-                    int(idx),
+                height_waste_mm = int(dbg.get("height_waste_mm") or 0)
+                score_adjustment = float(preview.score_adjustment or 0.0)
+                preview_objective = cls._preview_objective(preview)
+                local_key = cls._rollout_local_key(
+                    idx=int(idx),
+                    is_new_layer=is_new_layer,
+                    gain=int(gain),
+                    height_waste_mm=int(height_waste_mm),
+                    score_adjustment=float(score_adjustment),
+                    preview_objective=float(preview_objective),
+                    placement_height_mm=int(preview.placement.height_mm),
+                    current_height_mm=int(current_height),
+                    objective=objective,
                 )
                 if best_local_key is None or local_key < best_local_key:
                     best_local_key = local_key
@@ -387,10 +538,12 @@ class BeamPickPlanner:
         best_key_by_depth: dict[int, tuple[Any, ...]],
         elapsed_ms: float,
         projected_best: int,
+        objective: str,
     ) -> dict[str, Any]:
         top_reasons = sorted(infeasible_reasons.items(), key=lambda item: (-item[1], item[0]))[:10]
         debug = {
-            "beam_objective": str(config.beam_objective),
+            "beam_objective": str(objective),
+            "beam_objective_requested": str(config.beam_objective),
             "beam_width": int(config.beam_width),
             "beam_depth": int(config.beam_depth),
             "beam_max_expansions": int(config.beam_max_expansions),
@@ -403,9 +556,12 @@ class BeamPickPlanner:
             "best_sequence_first10": list(best.sequence[:10]),
             "best_placed_count": int(best.placed_count),
             "best_height_used_mm": int(best.height_used_mm),
+            "best_cumulative_preview_objective": float(best.cumulative_preview_objective),
+            "best_cumulative_score_adjustment": float(best.cumulative_score_adjustment),
+            "best_cumulative_height_waste_mm": int(best.cumulative_height_waste_mm),
             "best_layers": len(best.pallet.layers),
             "projected_best_placed_count": int(projected_best),
             "top_infeasible_reasons": [[str(reason), int(count)] for reason, count in top_reasons],
-            "best_objective_key": list(cls._objective_key(best)),
+            "best_objective_key": list(cls._objective_key(best, objective)),
         }
         return debug
