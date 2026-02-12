@@ -25,6 +25,7 @@ class SchedulerConfig:
     max_candidates: int = 0
     max_seconds_per_item: float = 0.0
     heartbeat_sec: float = 1.0
+    pick_window: int | None = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,12 @@ class SchedulerV1:
         self.last_deadlock = False
         self.last_deadlock_item = None
         self.last_eval_stats = {}
-        k = max(1, int(self.config.lookahead_k))
+        k_lookahead = max(1, int(self.config.lookahead_k))
+        k_window = self.config.pick_window
+        if k_window is not None and int(k_window) > 0:
+            k = max(1, int(k_window))
+        else:
+            k = k_lookahead
 
         deadline = None
         if self.config.time_budget_ms and self.config.time_budget_ms > 0:
