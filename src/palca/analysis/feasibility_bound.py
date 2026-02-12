@@ -265,6 +265,196 @@ def _solve_layer_model(
     )
 
 
+def _solve_target_enforce_2d(
+    *,
+    items: list[BoundItem],
+    base_length_mm: int,
+    base_width_mm: int,
+    base_area_mm2: int,
+    hmax_mm: int,
+    max_layers: int,
+    target: int,
+    time_limit_s: float,
+    random_seed: int,
+) -> dict[str, object]:
+    n_items = len(items)
+    if target <= 0:
+        return {
+            "status": "SAT",
+            "solver_status": "OPTIMAL",
+            "solver_status_proven": True,
+            "selected_count": 0,
+            "height_mm": 0,
+            "used_layers": 0,
+            "time_limit_s": float(time_limit_s),
+            "used_no_overlap_2d": True,
+            "per_layer": [],
+        }
+    if n_items == 0 or max_layers <= 0:
+        return {
+            "status": "UNSAT",
+            "solver_status": "INFEASIBLE",
+            "solver_status_proven": True,
+            "selected_count": None,
+            "height_mm": None,
+            "used_layers": None,
+            "time_limit_s": float(time_limit_s),
+            "used_no_overlap_2d": True,
+            "per_layer": [],
+        }
+
+    model = cp_model.CpModel()
+    supports_no_overlap_2d = hasattr(model, "AddNoOverlap2D")
+
+    present: dict[tuple[int, int, int], cp_model.IntVar] = {}
+    placement: dict[tuple[int, int, int], tuple[cp_model.IntVar, cp_model.IntVar, int, int]] = {}
+    layer_terms: list[list[cp_model.IntVar]] = [[] for _ in range(max_layers)]
+    area_terms: list[list[cp_model.LinearExpr]] = [[] for _ in range(max_layers)]
+    x_intervals_by_layer: list[list[cp_model.IntervalVar]] = [[] for _ in range(max_layers)]
+    y_intervals_by_layer: list[list[cp_model.IntervalVar]] = [[] for _ in range(max_layers)]
+    rects_by_layer: list[list[tuple[cp_model.IntVar, cp_model.IntVar, cp_model.IntVar, int, int]]] = [
+        [] for _ in range(max_layers)
+    ]
+
+    layer_used = [model.NewBoolVar(f"used_{k}") for k in range(max_layers)]
+    layer_height = [model.NewIntVar(0, hmax_mm, f"H_{k}") for k in range(max_layers)]
+    total_height = model.NewIntVar(0, hmax_mm, "height_total")
+    used_layers = model.NewIntVar(0, max_layers, "used_layers")
+    selected_count = model.NewIntVar(0, n_items, "selected_count")
+
+    for i, item in enumerate(items):
+        assign_terms: list[cp_model.IntVar] = []
+        for k in range(max_layers):
+            for o, orient in enumerate(item.orientations):
+                var = model.NewBoolVar(f"present_i{i}_k{k}_o{o}")
+                present[(i, k, o)] = var
+                assign_terms.append(var)
+                layer_terms[k].append(var)
+                area_terms[k].append(var * int(orient.area_mm2))
+                model.Add(layer_height[k] >= int(orient.h_mm) * var)
+                model.Add(var <= layer_used[k])
+
+                w_mm = int(orient.a_mm)
+                h_mm = int(orient.b_mm)
+                if w_mm > base_length_mm or h_mm > base_width_mm:
+                    model.Add(var == 0)
+                    continue
+
+                x_var = model.NewIntVar(0, base_length_mm - w_mm, f"x_i{i}_k{k}_o{o}")
+                y_var = model.NewIntVar(0, base_width_mm - h_mm, f"y_i{i}_k{k}_o{o}")
+                x_end = model.NewIntVar(w_mm, base_length_mm, f"x_end_i{i}_k{k}_o{o}")
+                y_end = model.NewIntVar(h_mm, base_width_mm, f"y_end_i{i}_k{k}_o{o}")
+                model.Add(x_end == x_var + w_mm)
+                model.Add(y_end == y_var + h_mm)
+                placement[(i, k, o)] = (x_var, y_var, w_mm, h_mm)
+
+                x_interval = model.NewOptionalIntervalVar(x_var, w_mm, x_end, var, f"x_int_i{i}_k{k}_o{o}")
+                y_interval = model.NewOptionalIntervalVar(y_var, h_mm, y_end, var, f"y_int_i{i}_k{k}_o{o}")
+                x_intervals_by_layer[k].append(x_interval)
+                y_intervals_by_layer[k].append(y_interval)
+                rects_by_layer[k].append((var, x_var, y_var, w_mm, h_mm))
+        model.Add(sum(assign_terms) <= 1)
+
+    for k in range(max_layers):
+        if supports_no_overlap_2d and x_intervals_by_layer[k]:
+            model.AddNoOverlap2D(x_intervals_by_layer[k], y_intervals_by_layer[k])
+        elif not supports_no_overlap_2d:
+            rects = rects_by_layer[k]
+            for i in range(len(rects)):
+                pi, xi, yi, wi, hi = rects[i]
+                for j in range(i + 1, len(rects)):
+                    pj, xj, yj, wj, hj = rects[j]
+                    left = model.NewBoolVar(f"left_k{k}_{i}_{j}")
+                    right = model.NewBoolVar(f"right_k{k}_{i}_{j}")
+                    below = model.NewBoolVar(f"below_k{k}_{i}_{j}")
+                    above = model.NewBoolVar(f"above_k{k}_{i}_{j}")
+                    model.AddBoolOr([left, right, below, above, pi.Not(), pj.Not()])
+                    model.Add(xi + wi <= xj).OnlyEnforceIf(left)
+                    model.Add(xj + wj <= xi).OnlyEnforceIf(right)
+                    model.Add(yi + hi <= yj).OnlyEnforceIf(below)
+                    model.Add(yj + hj <= yi).OnlyEnforceIf(above)
+
+        model.Add(sum(area_terms[k]) <= int(base_area_mm2))
+        model.Add(sum(layer_terms[k]) <= n_items * layer_used[k])
+        model.Add(sum(layer_terms[k]) >= layer_used[k])
+        model.Add(layer_height[k] <= hmax_mm * layer_used[k])
+
+    for k in range(max_layers - 1):
+        model.Add(layer_used[k] >= layer_used[k + 1])
+        model.Add(layer_height[k] >= layer_height[k + 1])
+
+    model.Add(selected_count == sum(present.values()))
+    model.Add(total_height == sum(layer_height))
+    model.Add(total_height <= hmax_mm)
+    model.Add(used_layers == sum(layer_used))
+    model.Add(selected_count >= int(target))
+
+    model.Minimize(total_height * (max_layers + 1) + used_layers)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = float(time_limit_s)
+    solver.parameters.num_search_workers = 1
+    solver.parameters.random_seed = int(random_seed)
+
+    status = solver.Solve(model)
+    sat_status = _sat_label(status)
+    is_sat = sat_status == "SAT"
+    is_proven = status in (cp_model.OPTIMAL, cp_model.INFEASIBLE)
+
+    result: dict[str, object] = {
+        "status": sat_status,
+        "solver_status": _solver_status_name(status),
+        "solver_status_proven": bool(is_proven),
+        "selected_count": None,
+        "height_mm": None,
+        "used_layers": None,
+        "time_limit_s": float(time_limit_s),
+        "used_no_overlap_2d": bool(supports_no_overlap_2d),
+        "per_layer": [],
+    }
+    if not is_sat:
+        return result
+
+    per_layer: list[dict[str, object]] = []
+    for k in range(max_layers):
+        if solver.Value(layer_used[k]) <= 0:
+            continue
+        coords: list[dict[str, object]] = []
+        for i, item in enumerate(items):
+            for o, orient in enumerate(item.orientations):
+                key = (i, k, o)
+                if solver.Value(present[key]) <= 0:
+                    continue
+                x_var, y_var, w_mm, h_mm = placement[key]
+                coords.append(
+                    {
+                        "item_idx": int(item.item_idx),
+                        "row_idx": int(item.row_idx),
+                        "orient_id": int(orient.orient_id),
+                        "orient_name": str(orient.orient_name),
+                        "x_mm": int(solver.Value(x_var)),
+                        "y_mm": int(solver.Value(y_var)),
+                        "w_mm": int(w_mm),
+                        "h_mm": int(h_mm),
+                        "z_mm": int(orient.h_mm),
+                    }
+                )
+        per_layer.append(
+            {
+                "layer_idx": int(k),
+                "height_mm": int(solver.Value(layer_height[k])),
+                "count": len(coords),
+                "coords": coords,
+            }
+        )
+
+    result["selected_count"] = int(solver.Value(selected_count))
+    result["height_mm"] = int(solver.Value(total_height))
+    result["used_layers"] = int(solver.Value(used_layers))
+    result["per_layer"] = per_layer
+    return result
+
+
 def _solve_layer_2d_packing(
     *,
     layer_idx: int,
@@ -453,6 +643,8 @@ def run_feasibility_bound(
     random_seed: int = 123,
     verify_2d: bool = False,
     verify_time_limit_s: float = 10.0,
+    enforce_2d: bool = False,
+    enforce_time_limit_s: float = 30.0,
 ) -> dict[str, object]:
     resolved_excel = resolve_repo_path(str(excel_path))
     items = _load_bound_items(resolved_excel, dest=dest)
@@ -498,6 +690,31 @@ def run_feasibility_bound(
             "per_layer": [],
         }
 
+    if enforce_2d:
+        enforce_2d_result = _solve_target_enforce_2d(
+            items=items,
+            base_length_mm=base_length_mm,
+            base_width_mm=base_width_mm,
+            base_area_mm2=base_area_mm2,
+            hmax_mm=hmax_mm,
+            max_layers=max_layers,
+            target=target,
+            time_limit_s=enforce_time_limit_s,
+            random_seed=random_seed,
+        )
+    else:
+        enforce_2d_result = {
+            "status": "SKIPPED",
+            "solver_status": "SKIPPED",
+            "solver_status_proven": False,
+            "selected_count": None,
+            "height_mm": None,
+            "used_layers": None,
+            "time_limit_s": float(enforce_time_limit_s),
+            "used_no_overlap_2d": True,
+            "per_layer": [],
+        }
+
     summary: dict[str, object] = {
         "input": {
             "excel": str(resolved_excel),
@@ -507,6 +724,8 @@ def run_feasibility_bound(
             "time_limit_s": float(time_limit_s),
             "verify_2d_enabled": bool(verify_2d),
             "verify_time_limit_s": float(verify_time_limit_s),
+            "enforce_2d_enabled": bool(enforce_2d),
+            "enforce_time_limit_s": float(enforce_time_limit_s),
             "random_seed": int(random_seed),
             "base_length_mm": int(base_length_mm),
             "base_width_mm": int(base_width_mm),
@@ -525,6 +744,10 @@ def run_feasibility_bound(
             "verify_2d": bool(verify_2d_result["verify_2d"]),
             "verify_2d_status": str(verify_2d_result["status"]),
             "verify_2d_result": verify_2d_result,
+            "verify_2d_note": "post_check_only; UNSAT here does not prove global impossibility",
+            "enforce_2d": bool(enforce_2d),
+            "enforce_2d_status": str(enforce_2d_result["status"]),
+            "enforce_2d_result": enforce_2d_result,
         },
         "maximize_mode": {
             "status": "SAT" if maximize_summary.is_sat else "UNSAT",
@@ -541,6 +764,8 @@ def run_feasibility_bound(
             "target": int(target),
             "verify_2d": bool(verify_2d_result["verify_2d"]),
             "verify_2d_status": str(verify_2d_result["status"]),
+            "enforce_2d": bool(enforce_2d),
+            "enforce_2d_status": str(enforce_2d_result["status"]),
         },
     }
     return summary
@@ -553,11 +778,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overhang", type=int, default=20, help="Overhang en mm")
     parser.add_argument("--hmax", type=int, default=2400, help="Altura maxima en mm")
     parser.add_argument("--target", type=int, default=21, help="Cantidad objetivo de cajas")
-    parser.add_argument("--layers", type=int, default=12, help="Maximo de capas del modelo")
+    parser.add_argument("--max-layers", "--layers", dest="max_layers", type=int, default=12, help="Maximo de capas del modelo")
     parser.add_argument("--time-limit-s", type=float, default=20.0, help="Time limit por solve en segundos")
     parser.add_argument("--random-seed", type=int, default=123, help="Semilla del solver")
     parser.add_argument("--verify-2d", action="store_true", help="Verifica packing 2D real por capa (target_mode)")
     parser.add_argument("--verify-time-limit-s", type=float, default=10.0, help="Time limit por capa para verify_2d")
+    parser.add_argument("--enforce-2d", action="store_true", help="Resuelve target con modelo 2D real integrado por capas")
+    parser.add_argument("--enforce-time-limit-s", type=float, default=30.0, help="Time limit total para enforce_2d")
     parser.add_argument("--compact", action="store_true", help="Imprime resumen compacto antes del JSON")
     return parser
 
@@ -572,11 +799,13 @@ def main() -> None:
         overhang_mm=args.overhang,
         hmax_mm=args.hmax,
         target=args.target,
-        max_layers=args.layers,
+        max_layers=args.max_layers,
         time_limit_s=args.time_limit_s,
         random_seed=args.random_seed,
         verify_2d=args.verify_2d,
         verify_time_limit_s=args.verify_time_limit_s,
+        enforce_2d=args.enforce_2d,
+        enforce_time_limit_s=args.enforce_time_limit_s,
     )
 
     if args.compact:
@@ -585,13 +814,15 @@ def main() -> None:
         maximize_mode = report["maximize_mode"]
         print(
             "status={status} nmax={nmax} min_height_for_target_mm={min_height} "
-            "target_solver={target_solver} maximize_solver={maximize_solver} verify_2d={verify_2d}".format(
+            "target_solver={target_solver} maximize_solver={maximize_solver} "
+            "verify_2d_postcheck={verify_2d} enforce_2d={enforce_2d}".format(
                 status=summary["status"],
                 nmax=summary["nmax"],
                 min_height=summary["min_height_for_target_mm"],
                 target_solver=target_mode["solver_status"],
                 maximize_solver=maximize_mode["solver_status"],
                 verify_2d=summary.get("verify_2d_status", "SKIPPED"),
+                enforce_2d=summary.get("enforce_2d_status", "SKIPPED"),
             )
         )
 
