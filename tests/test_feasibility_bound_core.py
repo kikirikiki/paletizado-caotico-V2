@@ -47,3 +47,51 @@ def test_enforce_2d_synthetic_two_rects_fit_single_layer() -> None:
         assert int(c["y_mm"]) >= 0
         assert int(c["x_mm"]) + int(c["w_mm"]) <= 10
         assert int(c["y_mm"]) + int(c["h_mm"]) <= 10
+
+
+def test_enforce_2d_sat_mode_returns_non_empty_coords() -> None:
+    items = [
+        BoundItem(
+            item_idx=0,
+            row_idx=200,
+            length_mm=6,
+            width_mm=4,
+            height_mm=3,
+            orientations=_deduplicated_orientations(6, 4, 3),
+        ),
+        BoundItem(
+            item_idx=1,
+            row_idx=201,
+            length_mm=4,
+            width_mm=4,
+            height_mm=3,
+            orientations=_deduplicated_orientations(4, 4, 3),
+        ),
+        BoundItem(
+            item_idx=2,
+            row_idx=202,
+            length_mm=5,
+            width_mm=3,
+            height_mm=3,
+            orientations=_deduplicated_orientations(5, 3, 3),
+        ),
+    ]
+
+    result = _solve_target_enforce_2d(
+        items=items,
+        base_length_mm=10,
+        base_width_mm=10,
+        base_area_mm2=100,
+        hmax_mm=20,
+        max_layers=2,
+        target=2,
+        time_limit_s=2.0,
+        random_seed=123,
+        enforce_mode="sat",
+    )
+
+    assert result["status"] == "SAT"
+    assert int(result["selected_count"]) == 2
+    per_layer = result["per_layer"]
+    assert per_layer
+    assert any(layer["coords"] for layer in per_layer)
