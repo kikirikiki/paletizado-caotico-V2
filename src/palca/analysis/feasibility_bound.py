@@ -25,6 +25,7 @@ ORIENTATION_ORDERS: tuple[tuple[str, tuple[int, int, int]], ...] = (
 )
 ALLOW_LH_BASE = os.getenv("PALCA_ALLOW_LH_BASE", "0").lower() in ("1", "true", "yes", "y")
 FORBID_LH_BASE = not ALLOW_LH_BASE
+STANDING_ORIENT_NAMES = {"WHL", "HWL"}
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,99 @@ def _allowed_orientations(orientations: tuple[OrientedDims, ...]) -> tuple[Orien
     return tuple(orient for orient in orientations if _is_orientation_allowed(orient.orient_name))
 
 
+def _coerce_int(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_json_with_prefix_tolerance(path: str | Path) -> object:
+    raw = Path(path).read_text(encoding="utf-8")
+    stripped = raw.strip()
+    if not stripped:
+        raise ValueError(f"JSON vacio en {path}")
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        first_obj = stripped.find("{")
+        first_arr = stripped.find("[")
+        starts = [idx for idx in (first_obj, first_arr) if idx >= 0]
+        if not starts:
+            raise
+        start = min(starts)
+        return json.loads(stripped[start:])
+
+
+def _extract_enforce_hint_entries(payload: object) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    seen: set[tuple[int, int]] = set()
+
+    def _add_per_layer(per_layer: object) -> None:
+        if not isinstance(per_layer, list):
+            return
+        for layer in per_layer:
+            if not isinstance(layer, dict):
+                continue
+            layer_idx = _coerce_int(layer.get("layer_idx"))
+            if layer_idx is None:
+                continue
+            coords = layer.get("coords")
+            if not isinstance(coords, list):
+                continue
+            for coord in coords:
+                if not isinstance(coord, dict):
+                    continue
+                item_idx = _coerce_int(coord.get("item_idx"))
+                row_idx = _coerce_int(coord.get("row_idx"))
+                if item_idx is None or row_idx is None:
+                    continue
+                key = (item_idx, row_idx)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append(
+                    {
+                        "item_idx": item_idx,
+                        "row_idx": row_idx,
+                        "layer_idx": int(layer_idx),
+                        "orient_id": _coerce_int(coord.get("orient_id")),
+                        "orient_name": str(coord["orient_name"]) if "orient_name" in coord else None,
+                        "x_mm": _coerce_int(coord.get("x_mm")),
+                        "y_mm": _coerce_int(coord.get("y_mm")),
+                    }
+                )
+
+    if isinstance(payload, dict):
+        _add_per_layer(payload.get("per_layer"))
+        enforce = payload.get("enforce_2d_result")
+        if isinstance(enforce, dict):
+            _add_per_layer(enforce.get("per_layer"))
+        target_mode = payload.get("target_mode")
+        if isinstance(target_mode, dict):
+            target_enforce = target_mode.get("enforce_2d_result")
+            if isinstance(target_enforce, dict):
+                _add_per_layer(target_enforce.get("per_layer"))
+    elif isinstance(payload, list):
+        _add_per_layer(payload)
+    return entries
+
+
+def _load_enforce_hint_entries(hint_json_path: str | Path) -> tuple[Path, list[dict[str, object]]]:
+    resolved = Path(resolve_repo_path(str(hint_json_path)))
+    payload = _load_json_with_prefix_tolerance(resolved)
+    return resolved, _extract_enforce_hint_entries(payload)
+
+
+def _enforce_max_score(result: dict[str, object]) -> tuple[int, int, int, int, int]:
+    volume_mm3_total = int(result.get("volume_mm3_total") or 0)
+    selected_count = int(result.get("selected_count") or 0)
+    standing_count = int(result.get("standing_count") or 0)
+    used_layers = int(result.get("used_layers") or 0)
+    is_optimal = 1 if str(result.get("solver_status")) == "OPTIMAL" else 0
+    return (volume_mm3_total, selected_count, -standing_count, -used_layers, is_optimal)
+
+
 def _solve_layer_model(
     *,
     items: list[BoundItem],
@@ -418,8 +512,11 @@ def _solve_target_enforce_2d(
     enforce_mode: str = "sat",
     num_workers: int = 0,
     log_search: bool = False,
+    enforce_min_target: int = 0,
+    enforce_standing_penalty: int = 10,
+    enforce_hint_entries: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    if enforce_mode not in {"sat", "opt"}:
+    if enforce_mode not in {"sat", "opt", "max"}:
         raise ValueError(f"enforce_mode invalido: {enforce_mode}")
 
     filtered_items = [
@@ -435,20 +532,41 @@ def _solve_target_enforce_2d(
     ]
     items = [item for item in filtered_items if item.orientations]
     n_items = len(items)
-    if target <= 0:
-        return {
-            "status": "SAT",
-            "solver_status": "OPTIMAL",
-            "solver_status_proven": True,
-            "selected_count": 0,
-            "height_mm": 0,
-            "used_layers": 0,
-            "time_limit_s": float(time_limit_s),
-            "used_no_overlap_2d": True,
-            "enforce_mode": str(enforce_mode),
-            "per_layer": [],
-        }
-    if n_items == 0 or max_layers <= 0 or int(target) > int(n_items):
+    min_target = max(0, int(enforce_min_target))
+    standing_penalty = max(0, int(enforce_standing_penalty))
+    hint_entries = list(enforce_hint_entries or [])
+    pallet_volume_mm3 = int(base_length_mm) * int(base_width_mm) * int(hmax_mm)
+
+    if enforce_mode == "sat":
+        required_min = int(target)
+        required_exact = int(target)
+    elif enforce_mode == "opt":
+        required_min = int(target)
+        required_exact = None
+    else:
+        required_min = int(min_target)
+        required_exact = None
+
+    sat_if_empty = (required_exact == 0) if required_exact is not None else (required_min <= 0)
+    if n_items == 0 or max_layers <= 0:
+        if sat_if_empty:
+            return {
+                "status": "SAT",
+                "solver_status": "OPTIMAL",
+                "solver_status_proven": True,
+                "selected_count": 0,
+                "height_mm": 0,
+                "used_layers": 0,
+                "time_limit_s": float(time_limit_s),
+                "used_no_overlap_2d": True,
+                "enforce_mode": str(enforce_mode),
+                "objective_value": 0,
+                "volume_mm3_total": 0,
+                "fill_ratio": 0.0 if pallet_volume_mm3 > 0 else 0.0,
+                "standing_count": 0,
+                "hint_items_applied": 0,
+                "per_layer": [],
+            }
         return {
             "status": "UNSAT",
             "solver_status": "INFEASIBLE",
@@ -459,6 +577,49 @@ def _solve_target_enforce_2d(
             "time_limit_s": float(time_limit_s),
             "used_no_overlap_2d": True,
             "enforce_mode": str(enforce_mode),
+            "objective_value": None,
+            "volume_mm3_total": None,
+            "fill_ratio": None,
+            "standing_count": None,
+            "hint_items_applied": 0,
+            "per_layer": [],
+        }
+
+    if required_exact is not None:
+        if required_exact < 0 or required_exact > n_items:
+            return {
+                "status": "UNSAT",
+                "solver_status": "INFEASIBLE",
+                "solver_status_proven": True,
+                "selected_count": None,
+                "height_mm": None,
+                "used_layers": None,
+                "time_limit_s": float(time_limit_s),
+                "used_no_overlap_2d": True,
+                "enforce_mode": str(enforce_mode),
+                "objective_value": None,
+                "volume_mm3_total": None,
+                "fill_ratio": None,
+                "standing_count": None,
+                "hint_items_applied": 0,
+                "per_layer": [],
+            }
+    elif required_min > n_items:
+        return {
+            "status": "UNSAT",
+            "solver_status": "INFEASIBLE",
+            "solver_status_proven": True,
+            "selected_count": None,
+            "height_mm": None,
+            "used_layers": None,
+            "time_limit_s": float(time_limit_s),
+            "used_no_overlap_2d": True,
+            "enforce_mode": str(enforce_mode),
+            "objective_value": None,
+            "volume_mm3_total": None,
+            "fill_ratio": None,
+            "standing_count": None,
+            "hint_items_applied": 0,
             "per_layer": [],
         }
 
@@ -480,6 +641,12 @@ def _solve_target_enforce_2d(
     total_height = model.NewIntVar(0, hmax_mm, "height_total")
     used_layers = model.NewIntVar(0, max_layers, "used_layers")
     selected_count = model.NewIntVar(0, n_items, "selected_count")
+    standing_count = model.NewIntVar(0, n_items, "standing_count")
+
+    item_vol_scaled = [max(0, (int(item.length_mm) * int(item.width_mm) * int(item.height_mm)) // 1000) for item in items]
+    volume_scaled_total = model.NewIntVar(0, max(0, sum(item_vol_scaled)), "volume_scaled_total")
+    volume_terms: list[cp_model.LinearExpr] = []
+    standing_terms: list[cp_model.LinearExpr] = []
 
     for i, item in enumerate(items):
         assign_terms: list[cp_model.IntVar] = []
@@ -492,6 +659,8 @@ def _solve_target_enforce_2d(
                 area_terms[k].append(var * int(orient.area_mm2))
                 model.Add(layer_height[k] >= int(orient.h_mm) * var)
                 model.Add(var <= layer_used[k])
+                volume_terms.append(var * int(item_vol_scaled[i]))
+                standing_terms.append(var * int(1 if orient.orient_name in STANDING_ORIENT_NAMES else 0))
 
                 w_mm = int(orient.a_mm)
                 h_mm = int(orient.b_mm)
@@ -546,11 +715,77 @@ def _solve_target_enforce_2d(
     model.Add(total_height == sum(layer_height))
     model.Add(total_height <= hmax_mm)
     model.Add(used_layers == sum(layer_used))
+    model.Add(standing_count == sum(standing_terms))
+    model.Add(volume_scaled_total == sum(volume_terms))
     if enforce_mode == "sat":
         model.Add(selected_count == int(target))
-    else:
+    elif enforce_mode == "opt":
         model.Add(selected_count >= int(target))
         model.Minimize(total_height * (max_layers + 1) + used_layers)
+    else:
+        model.Add(selected_count >= int(min_target))
+        max_tertiary = int(standing_penalty) * int(n_items) + int(max_layers)
+        w4 = 1
+        w3 = int(standing_penalty)
+        w2 = max_tertiary + 1
+        w1 = int(n_items) * w2 + max_tertiary + 1
+        model.Maximize(volume_scaled_total * w1 + selected_count * w2 - standing_count * w3 - used_layers * w4)
+
+    hinted_items: set[int] = set()
+    item_idx_by_key = {(int(item.item_idx), int(item.row_idx)): i for i, item in enumerate(items)}
+    hint_items_applied = 0
+    for hint in hint_entries:
+        item_idx = _coerce_int(hint.get("item_idx"))
+        row_idx = _coerce_int(hint.get("row_idx"))
+        layer_idx = _coerce_int(hint.get("layer_idx"))
+        if item_idx is None or row_idx is None or layer_idx is None:
+            continue
+        if layer_idx < 0 or layer_idx >= max_layers:
+            continue
+        key = (item_idx, row_idx)
+        if key not in item_idx_by_key:
+            continue
+        i = item_idx_by_key[key]
+        if i in hinted_items:
+            continue
+
+        item = items[i]
+        orient_internal_idx: int | None = None
+        orient_id_hint = _coerce_int(hint.get("orient_id"))
+        orient_name_hint = hint.get("orient_name")
+        if orient_id_hint is not None:
+            for o, orient in enumerate(item.orientations):
+                if int(orient.orient_id) == int(orient_id_hint):
+                    orient_internal_idx = o
+                    break
+        if orient_internal_idx is None and orient_name_hint is not None:
+            name = str(orient_name_hint)
+            for o, orient in enumerate(item.orientations):
+                if str(orient.orient_name) == name:
+                    orient_internal_idx = o
+                    break
+        if orient_internal_idx is None and len(item.orientations) == 1:
+            orient_internal_idx = 0
+        if orient_internal_idx is None:
+            continue
+
+        present_key = (i, int(layer_idx), int(orient_internal_idx))
+        if present_key not in placement:
+            continue
+
+        for k in range(max_layers):
+            for o in range(len(item.orientations)):
+                model.AddHint(present[(i, k, o)], 1 if (k == layer_idx and o == orient_internal_idx) else 0)
+        model.AddHint(layer_used[layer_idx], 1)
+        x_var, y_var, w_mm, h_mm = placement[present_key]
+        x_hint = _coerce_int(hint.get("x_mm"))
+        y_hint = _coerce_int(hint.get("y_mm"))
+        if x_hint is not None:
+            model.AddHint(x_var, max(0, min(int(x_hint), int(base_length_mm) - int(w_mm))))
+        if y_hint is not None:
+            model.AddHint(y_var, max(0, min(int(y_hint), int(base_width_mm) - int(h_mm))))
+        hinted_items.add(i)
+        hint_items_applied += 1
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit_s)
@@ -578,12 +813,19 @@ def _solve_target_enforce_2d(
         "time_limit_s": float(time_limit_s),
         "used_no_overlap_2d": bool(supports_no_overlap_2d),
         "enforce_mode": str(enforce_mode),
+        "objective_value": None,
+        "volume_mm3_total": None,
+        "fill_ratio": None,
+        "standing_count": None,
+        "hint_items_applied": int(hint_items_applied),
         "per_layer": [],
     }
     if not is_sat:
         return result
 
     per_layer: list[dict[str, object]] = []
+    volume_mm3_total = 0
+    standing_count_real = 0
     for k in range(max_layers):
         if solver.Value(layer_used[k]) <= 0:
             continue
@@ -594,6 +836,9 @@ def _solve_target_enforce_2d(
                 if solver.Value(present[key]) <= 0:
                     continue
                 x_var, y_var, w_mm, h_mm = placement[key]
+                volume_mm3_total += int(item.length_mm) * int(item.width_mm) * int(item.height_mm)
+                if str(orient.orient_name) in STANDING_ORIENT_NAMES:
+                    standing_count_real += 1
                 coords.append(
                     {
                         "item_idx": int(item.item_idx),
@@ -619,6 +864,12 @@ def _solve_target_enforce_2d(
     result["selected_count"] = int(solver.Value(selected_count))
     result["height_mm"] = int(solver.Value(total_height))
     result["used_layers"] = int(solver.Value(used_layers))
+    result["objective_value"] = int(round(float(solver.ObjectiveValue())))
+    result["volume_mm3_total"] = int(volume_mm3_total)
+    result["fill_ratio"] = (
+        float(volume_mm3_total) / float(pallet_volume_mm3) if int(pallet_volume_mm3) > 0 else 0.0
+    )
+    result["standing_count"] = int(standing_count_real)
     result["per_layer"] = per_layer
     return result
 
@@ -638,6 +889,9 @@ def _solve_target_enforce_2d_multishot(
     enforce_mode: str,
     num_workers: int,
     log_search: bool,
+    enforce_min_target: int,
+    enforce_standing_penalty: int,
+    enforce_hint_entries: list[dict[str, object]] | None,
 ) -> dict[str, object]:
     if not seeds:
         raise ValueError("seeds no puede ser vacio")
@@ -647,6 +901,8 @@ def _solve_target_enforce_2d_multishot(
     started_at = time.monotonic()
     attempts: list[dict[str, object]] = []
     last_unknown: dict[str, object] | None = None
+    best_sat: dict[str, object] | None = None
+    best_sat_score: tuple[int, int, int, int, int] | None = None
 
     for seed in seeds:
         elapsed = time.monotonic() - started_at
@@ -671,6 +927,9 @@ def _solve_target_enforce_2d_multishot(
             enforce_mode=enforce_mode,
             num_workers=num_workers,
             log_search=log_search,
+            enforce_min_target=enforce_min_target,
+            enforce_standing_penalty=enforce_standing_penalty,
+            enforce_hint_entries=enforce_hint_entries,
         )
         attempts.append(
             {
@@ -679,13 +938,27 @@ def _solve_target_enforce_2d_multishot(
                 "status": str(shot_result["status"]),
                 "solver_status": str(shot_result["solver_status"]),
                 "solver_status_proven": bool(shot_result["solver_status_proven"]),
+                "selected_count": shot_result.get("selected_count"),
+                "volume_mm3_total": shot_result.get("volume_mm3_total"),
+                "standing_count": shot_result.get("standing_count"),
+                "fill_ratio": shot_result.get("fill_ratio"),
             }
         )
 
         if shot_result["status"] == "SAT":
-            shot_result["time_limit_s"] = float(time_limit_s)
-            shot_result["attempts"] = attempts
-            return shot_result
+            if enforce_mode == "max":
+                score = _enforce_max_score(shot_result)
+                if best_sat is None or best_sat_score is None or score > best_sat_score:
+                    best_sat = shot_result
+                    best_sat_score = score
+                if str(shot_result.get("solver_status")) == "OPTIMAL":
+                    shot_result["time_limit_s"] = float(time_limit_s)
+                    shot_result["attempts"] = attempts
+                    return shot_result
+            else:
+                shot_result["time_limit_s"] = float(time_limit_s)
+                shot_result["attempts"] = attempts
+                return shot_result
 
         if shot_result["status"] == "UNSAT" and bool(shot_result["solver_status_proven"]):
             shot_result["time_limit_s"] = float(time_limit_s)
@@ -693,6 +966,11 @@ def _solve_target_enforce_2d_multishot(
             return shot_result
 
         last_unknown = shot_result
+
+    if enforce_mode == "max" and best_sat is not None:
+        best_sat["time_limit_s"] = float(time_limit_s)
+        best_sat["attempts"] = attempts
+        return best_sat
 
     if last_unknown is None:
         return {
@@ -705,6 +983,11 @@ def _solve_target_enforce_2d_multishot(
             "time_limit_s": float(time_limit_s),
             "used_no_overlap_2d": True,
             "enforce_mode": str(enforce_mode),
+            "objective_value": None,
+            "volume_mm3_total": None,
+            "fill_ratio": None,
+            "standing_count": None,
+            "hint_items_applied": 0,
             "per_layer": [],
             "attempts": attempts,
         }
@@ -918,6 +1201,9 @@ def run_feasibility_bound(
     enforce_2d: bool = False,
     enforce_time_limit_s: float = 30.0,
     enforce_mode: str = "sat",
+    enforce_min_target: int = 0,
+    enforce_standing_penalty: int = 10,
+    enforce_hint_json: str | None = None,
     enforce_cap_items: int = 0,
     enforce_cap_slack: int = 8,
     enforce_max_orients_per_item: int = 2,
@@ -933,6 +1219,11 @@ def run_feasibility_bound(
     base_width_mm = BASE_WIDTH_MM + 2 * int(overhang_mm)
     base_area_mm2 = base_length_mm * base_width_mm
     parsed_enforce_seeds = _parse_seed_list(enforce_seeds, fallback_seed=random_seed)
+    enforce_hint_path: Path | None = None
+    enforce_hint_entries: list[dict[str, object]] = []
+    if enforce_hint_json:
+        enforce_hint_path, enforce_hint_entries = _load_enforce_hint_entries(enforce_hint_json)
+
     enforce_items, enforce_effective_count, orients_capped = _prepare_enforce_items(
         items=items,
         target=target,
@@ -996,6 +1287,9 @@ def run_feasibility_bound(
             enforce_mode=enforce_mode,
             num_workers=enforce_num_workers,
             log_search=enforce_log_search,
+            enforce_min_target=enforce_min_target,
+            enforce_standing_penalty=enforce_standing_penalty,
+            enforce_hint_entries=enforce_hint_entries,
         )
     else:
         enforce_2d_result = {
@@ -1008,6 +1302,11 @@ def run_feasibility_bound(
             "time_limit_s": float(enforce_time_limit_s),
             "used_no_overlap_2d": True,
             "enforce_mode": str(enforce_mode),
+            "objective_value": None,
+            "volume_mm3_total": None,
+            "fill_ratio": None,
+            "standing_count": None,
+            "hint_items_applied": 0,
             "per_layer": [],
             "attempts": [],
         }
@@ -1024,6 +1323,10 @@ def run_feasibility_bound(
             "enforce_2d_enabled": bool(enforce_2d),
             "enforce_time_limit_s": float(enforce_time_limit_s),
             "enforce_mode": str(enforce_mode),
+            "enforce_min_target": int(enforce_min_target),
+            "enforce_standing_penalty": int(enforce_standing_penalty),
+            "enforce_hint_json_used": bool(enforce_hint_entries),
+            "enforce_hint_json": str(enforce_hint_path) if enforce_hint_path is not None else None,
             "enforce_cap_items": int(enforce_cap_items),
             "enforce_cap_slack": int(enforce_cap_slack),
             "enforce_max_orients_per_item": int(enforce_max_orients_per_item),
@@ -1094,7 +1397,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verify-time-limit-s", type=float, default=10.0, help="Time limit por capa para verify_2d")
     parser.add_argument("--enforce-2d", action="store_true", help="Resuelve target con modelo 2D real integrado por capas")
     parser.add_argument("--enforce-time-limit-s", type=float, default=30.0, help="Time limit total para enforce_2d")
-    parser.add_argument("--enforce-mode", choices=["sat", "opt"], default="sat", help="sat: factibilidad pura, opt: minimiza altura/capas")
+    parser.add_argument(
+        "--enforce-mode",
+        choices=["sat", "opt", "max"],
+        default="sat",
+        help="sat: selected_count==target, opt: selected_count>=target minimiza altura/capas, max: maximiza volumen",
+    )
+    parser.add_argument(
+        "--enforce-min-target",
+        type=int,
+        default=0,
+        help="Min selected_count en enforce_mode=max (sat usa target exacto, opt usa selected_count>=target)",
+    )
+    parser.add_argument(
+        "--enforce-standing-penalty",
+        type=int,
+        default=10,
+        help="Penalizacion suave a orientaciones standing (WHL/HWL) en enforce_mode=max",
+    )
+    parser.add_argument(
+        "--enforce-hint-json",
+        type=str,
+        default=None,
+        help="JSON previo para warm-start de enforce_2d (item_idx/row_idx/layer/orient/x/y)",
+    )
     parser.add_argument("--enforce-cap-items", type=int, default=0, help="Cap fijo de items para enforce_2d (0 => target + slack)")
     parser.add_argument("--enforce-cap-slack", type=int, default=8, help="Slack para cap dinamico cuando enforce-cap-items=0")
     parser.add_argument(
@@ -1129,6 +1455,9 @@ def main() -> None:
         enforce_2d=args.enforce_2d,
         enforce_time_limit_s=args.enforce_time_limit_s,
         enforce_mode=args.enforce_mode,
+        enforce_min_target=args.enforce_min_target,
+        enforce_standing_penalty=args.enforce_standing_penalty,
+        enforce_hint_json=args.enforce_hint_json,
         enforce_cap_items=args.enforce_cap_items,
         enforce_cap_slack=args.enforce_cap_slack,
         enforce_max_orients_per_item=args.enforce_max_orients_per_item,
