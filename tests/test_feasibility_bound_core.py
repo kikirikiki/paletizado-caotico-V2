@@ -116,6 +116,60 @@ def test_enforce_2d_sat_mode_returns_non_empty_coords(monkeypatch) -> None:
             assert str(coord["orient_name"]) not in FORBIDDEN_ORIENTS
 
 
+def test_enforce_2d_max_mode_returns_best_feasible_with_coords(monkeypatch) -> None:
+    _reload_feasibility_bound(monkeypatch, "0")
+    items = [
+        fb.BoundItem(
+            item_idx=0,
+            row_idx=300,
+            length_mm=6,
+            width_mm=4,
+            height_mm=3,
+            orientations=fb._deduplicated_orientations(6, 4, 3),
+        ),
+        fb.BoundItem(
+            item_idx=1,
+            row_idx=301,
+            length_mm=5,
+            width_mm=4,
+            height_mm=3,
+            orientations=fb._deduplicated_orientations(5, 4, 3),
+        ),
+        fb.BoundItem(
+            item_idx=2,
+            row_idx=302,
+            length_mm=4,
+            width_mm=3,
+            height_mm=3,
+            orientations=fb._deduplicated_orientations(4, 3, 3),
+        ),
+    ]
+
+    result = fb._solve_target_enforce_2d(
+        items=items,
+        base_length_mm=10,
+        base_width_mm=10,
+        base_area_mm2=100,
+        hmax_mm=20,
+        max_layers=2,
+        target=99,
+        time_limit_s=2.0,
+        random_seed=19,
+        enforce_mode="max",
+        enforce_min_target=1,
+        enforce_standing_penalty=10,
+    )
+
+    assert result["status"] == "SAT"
+    assert int(result["selected_count"]) >= 1
+    assert int(result["volume_mm3_total"]) > 0
+    assert float(result["fill_ratio"]) > 0.0
+    assert any(layer["coords"] for layer in result["per_layer"])
+    for layer in result["per_layer"]:
+        for coord in layer["coords"]:
+            assert str(coord["orient_name"]) not in FORBIDDEN_ORIENTS
+
+
 def test_override_env_reenables_lh_base_orientations(monkeypatch) -> None:
     _reload_feasibility_bound(monkeypatch, "1")
     names_with_override = {o.orient_name for o in fb._deduplicated_orientations(10, 8, 6)}
@@ -123,3 +177,6 @@ def test_override_env_reenables_lh_base_orientations(monkeypatch) -> None:
     assert "HLW" in names_with_override
 
     _reload_feasibility_bound(monkeypatch, "0")
+    names_without_override = {o.orient_name for o in fb._deduplicated_orientations(10, 8, 6)}
+    assert "LHW" not in names_without_override
+    assert "HLW" not in names_without_override
