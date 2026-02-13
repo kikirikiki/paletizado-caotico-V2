@@ -15,6 +15,7 @@ from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalt
 @dataclass(frozen=True)
 class SchedulerConfig:
     lookahead_k: int = 1
+    pick_window: int | None = None
     t_select_base: float = 0.0
     t_select_step: float = 0.0
     time_penalty_weight: float = 1.0
@@ -25,6 +26,20 @@ class SchedulerConfig:
     max_candidates: int = 0
     max_seconds_per_item: float = 0.0
     heartbeat_sec: float = 1.0
+
+    def __post_init__(self) -> None:
+        lookahead = max(1, int(self.lookahead_k))
+        alias = self.pick_window
+        if alias is not None:
+            alias = max(1, int(alias))
+            # Compatibilidad retroactiva:
+            # - pick_window se mapea a lookahead_k.
+            # - si lookahead_k viene no-default y contradice pick_window, se rechaza.
+            if lookahead != 1 and lookahead != alias:
+                raise ValueError("SchedulerConfig conflict: lookahead_k and pick_window differ")
+            lookahead = alias
+        object.__setattr__(self, "lookahead_k", lookahead)
+        object.__setattr__(self, "pick_window", alias)
 
 
 @dataclass(frozen=True)
