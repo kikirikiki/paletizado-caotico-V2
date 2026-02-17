@@ -135,14 +135,14 @@ def _compute_support(
 
     if z_mm <= float(eps_z_mm):
         return {
-            "support_area_mm2": float(area_footprint),
+            "support_area_mm2": int(area_footprint),
             "support_ratio": 1.0,
             "support_by_rows": [],
             "support_by_n": 0,
             "is_supported": True,
         }
 
-    support_area = 0.0
+    support_area = 0
     support_rows: list[int] = []
     seen_rows: set[int] = set()
     for prev in placed:
@@ -163,16 +163,16 @@ def _compute_support(
         if overlap_area <= 0:
             continue
 
-        support_area += float(overlap_area)
+        support_area += int(overlap_area)
         row_idx = int(prev.get("row_idx", -1))
         if row_idx not in seen_rows:
             seen_rows.add(row_idx)
             support_rows.append(row_idx)
 
-    support_ratio = (support_area / float(area_footprint)) if area_footprint > 0 else 0.0
+    support_ratio = (float(support_area) / float(area_footprint)) if area_footprint > 0 else 0.0
     is_supported = bool(support_ratio + 1e-9 >= float(min_support))
     return {
-        "support_area_mm2": float(support_area),
+        "support_area_mm2": int(support_area),
         "support_ratio": float(support_ratio),
         "support_by_rows": support_rows,
         "support_by_n": len(support_rows),
@@ -221,8 +221,8 @@ def main() -> int:
     args = ap.parse_args()
     if float(args.support_eps_z_mm) < 0:
         raise SystemExit("--support-eps-z-mm debe ser >= 0")
-    if float(args.min_support) < 0:
-        raise SystemExit("--min-support debe ser >= 0")
+    if not (0.0 <= float(args.min_support) <= 1.0):
+        raise SystemExit("--min-support debe estar en [0, 1]")
 
     in_path = Path(args.input_json)
     d = _load_json(in_path)
