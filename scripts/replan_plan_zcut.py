@@ -7,7 +7,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 @dataclass(frozen=True)
@@ -327,7 +327,26 @@ def _score(
     )
 
 
-def _mov_key(pl: Dict[str, Any], order: str, tall_dz_mm: int) -> Tuple[int, int, int, int]:
+def _is_critical_row(
+    pl: Dict[str, Any],
+    prefer_rows: Set[int],
+    critical_dz_mm: float,
+    critical_area_mm2: int,
+) -> bool:
+    dz = float(pl.get("dz_mm", 0.0) or 0.0)
+    area = int(pl.get("w_mm", 0) or 0) * int(pl.get("h_mm", 0) or 0)
+    rid = int(pl.get("row_idx", -1))
+    return bool(rid in prefer_rows or dz >= float(critical_dz_mm) or area >= int(critical_area_mm2))
+
+
+def _mov_key(
+    pl: Dict[str, Any],
+    order: str,
+    tall_dz_mm: int,
+    prefer_rows: Set[int],
+    critical_dz_mm: float,
+    critical_area_mm2: int,
+) -> Tuple[int, int, int, int]:
     dz = int(pl.get("dz_mm", 0) or 0)
     area = int(pl.get("w_mm", 0) or 0) * int(pl.get("h_mm", 0) or 0)
     rid = int(pl.get("row_idx", -1))
@@ -335,6 +354,17 @@ def _mov_key(pl: Dict[str, Any], order: str, tall_dz_mm: int) -> Tuple[int, int,
         return (0, -area, -dz, rid)
     if order == "height_area":
         return (0, -dz, -area, rid)
+    if order == "critical_first":
+        if _is_critical_row(
+            pl,
+            prefer_rows=prefer_rows,
+            critical_dz_mm=critical_dz_mm,
+            critical_area_mm2=critical_area_mm2,
+        ):
+            # pass 1 (critical): highest dz first, then area, then row
+            return (0, -dz, -area, rid)
+        # pass 2 (rest): keep area_height ordering
+        return (1, -area, -dz, rid)
     # tall_band:
     #   A) dz >= tall_dz_mm  -> dz desc, area desc, row asc
     #   B) otherwise         -> area desc, dz desc, row asc
@@ -375,6 +405,12 @@ def _best_try_key(meta: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
     )
 
 
+def _dominant_reason(rej_hmax: int, rej_coll: int, rej_stab: int) -> str:
+    # Deterministic tie-break: HMAX > STAB > COLL
+    candidates = [("HMAX", int(rej_hmax), 2), ("STAB", int(rej_stab), 1), ("COLL", int(rej_coll), 0)]
+    return max(candidates, key=lambda t: (t[1], t[2]))[0]
+
+
 def _ensure_rot_fields(pl: Dict[str, Any]) -> None:
     if "rot_xy" not in pl:
         pl["rot_xy"] = False
@@ -397,9 +433,20 @@ def _run_one(
     scan: str,
     verbose_places: bool,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    prefer_rows_set = set(args.prefer_rows_list)
     movable_sorted = sorted(
         movable,
-        key=lambda pl: (_mov_key(pl, order, int(args.tall_dz_mm)), _place_sort_key(pl)),
+        key=lambda pl: (
+            _mov_key(
+                pl,
+                order,
+                int(args.tall_dz_mm),
+                prefer_rows_set,
+                float(args.critical_dz_mm),
+                int(args.critical_area_mm2),
+            ),
+            _place_sort_key(pl),
+        ),
     )
     placed: List[Dict[str, Any]] = [json.loads(json.dumps(pl)) for pl in sorted(fixed, key=_place_sort_key)]
     for pl in placed:
@@ -409,6 +456,7 @@ def _run_one(
 
     planned_rows: List[int] = []
     unplaced_rows: List[int] = []
+    unplaced_reasons: Dict[str, Dict[str, Any]] = {}
 
     for pl in movable_sorted:
         rid = int(pl.get("row_idx", -1))
@@ -420,6 +468,14 @@ def _run_one(
 
         if w0 <= 0 or h0 <= 0 or dz <= 0:
             unplaced_rows.append(rid)
+            unplaced_reasons[str(rid)] = {
+                "candidates_generated": 0,
+                "candidates_evaluated": 0,
+                "rej_hmax": 0,
+                "rej_coll": 0,
+                "rej_stab": 0,
+                "dominant_reason": _dominant_reason(0, 0, 0),
+            }
             print(
                 f"[UNPLACED] row={rid} w={w0} h={h0} dz={int(dz)} reason=invalid_dims "
                 "candidates_generated=0 candidates_evaluated=0 rej_hmax=0 rej_coll=0 rej_stab=0"
@@ -495,6 +551,14 @@ def _run_one(
 
         if best_accept is None:
             unplaced_rows.append(rid)
+            unplaced_reasons[str(rid)] = {
+                "candidates_generated": int(candidates_generated),
+                "candidates_evaluated": int(candidates_evaluated),
+                "rej_hmax": int(rej_hmax),
+                "rej_coll": int(rej_coll),
+                "rej_stab": int(rej_stab),
+                "dominant_reason": _dominant_reason(rej_hmax, rej_coll, rej_stab),
+            }
             print(
                 f"[UNPLACED] row={rid} w={w0} h={h0} dz={int(dz)} "
                 f"candidates_generated={candidates_generated} candidates_evaluated={candidates_evaluated} "
@@ -563,6 +627,9 @@ def _run_one(
 
     supported_count = int(sum(1 for pl in placements_out if bool(pl.get("is_supported", False))))
     unsupported_count = int(len(placements_out) - supported_count)
+    ordered_unplaced_reasons: Dict[str, Dict[str, Any]] = {
+        str(rid): unplaced_reasons[str(rid)] for rid in sorted(int(k) for k in unplaced_reasons.keys())
+    }
 
     meta = {
         "order": order,
@@ -575,8 +642,22 @@ def _run_one(
         "max_top_mm": int(max_top),
         "supported_count": int(supported_count),
         "unsupported_count": int(unsupported_count),
+        "unplaced_reasons": ordered_unplaced_reasons,
     }
     return meta, placements_out
+
+
+def _parse_csv_ints(raw: str) -> List[int]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    vals: List[int] = []
+    for chunk in text.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        vals.append(int(item))
+    return vals
 
 
 def main() -> int:
@@ -599,11 +680,24 @@ def main() -> int:
     ap.add_argument("--accept", choices=["pass", "cond", "any"], default="cond", help="Minimum stability class to accept (default: cond)")
     ap.add_argument(
         "--order",
-        choices=["auto", "area_height", "height_area", "tall_band"],
+        choices=["auto", "area_height", "height_area", "tall_band", "critical_first"],
         default="auto",
         help="Movable order (default: auto)",
     )
     ap.add_argument("--tall-dz-mm", type=int, default=600, help="Height threshold for --order tall_band (default: 600)")
+    ap.add_argument("--prefer-rows", type=str, default="", help="CSV rows to prioritize when --order critical_first (default: empty)")
+    ap.add_argument(
+        "--critical-dz-mm",
+        type=float,
+        default=None,
+        help="Height threshold for --order critical_first (default: --tall-dz-mm)",
+    )
+    ap.add_argument(
+        "--critical-area-mm2",
+        type=int,
+        default=220000,
+        help="Area threshold for --order critical_first (default: 220000)",
+    )
     ap.add_argument("--scan", choices=["auto", "xy", "yx"], default="auto", help="XY scan order (default: auto)")
     ap.add_argument("--allow-rotate-xy", action="store_true", help="Also evaluate (h,w) footprint (yaw 90°) when possible.")
     ap.add_argument("--allow-partial", action="store_true", help="Return exit code 0 even when unplaced rows remain.")
@@ -626,6 +720,23 @@ def main() -> int:
 
     if args.grid <= 0:
         print("[ERROR] --grid must be > 0", file=sys.stderr)
+        return 2
+    try:
+        prefer_rows_list = _parse_csv_ints(args.prefer_rows)
+    except ValueError:
+        print(f"[ERROR] invalid --prefer-rows CSV: {args.prefer_rows!r}", file=sys.stderr)
+        return 2
+    if any(r < 0 for r in prefer_rows_list):
+        print("[ERROR] --prefer-rows does not allow negative row indices", file=sys.stderr)
+        return 2
+    args.prefer_rows_list = sorted(set(prefer_rows_list))
+    if args.critical_dz_mm is None:
+        args.critical_dz_mm = float(args.tall_dz_mm if hasattr(args, "tall_dz_mm") else 600.0)
+    if float(args.critical_dz_mm) < 0:
+        print("[ERROR] --critical-dz-mm must be >= 0", file=sys.stderr)
+        return 2
+    if int(args.critical_area_mm2) < 0:
+        print("[ERROR] --critical-area-mm2 must be >= 0", file=sys.stderr)
         return 2
     if not (0.0 <= args.hard_fail_support <= args.cond_support <= args.min_support <= 1.0):
         print("[ERROR] expected 0<=hard_fail<=cond<=min_support<=1", file=sys.stderr)
@@ -674,7 +785,7 @@ def main() -> int:
         else:
             movable.append(pl)
 
-    orders = ["area_height", "tall_band", "height_area"] if args.order == "auto" else [args.order]
+    orders = ["area_height", "critical_first", "tall_band", "height_area"] if args.order == "auto" else [args.order]
     scans = ["xy", "yx"] if args.scan == "auto" else [args.scan]
 
     print(f"PLAN: {plan_path}")
@@ -762,12 +873,16 @@ def main() -> int:
         "z_cut_mm": float(z_cut),
         "grid_mm": int(args.grid),
         "tall_dz_mm": int(args.tall_dz_mm),
+        "prefer_rows": list(args.prefer_rows_list),
+        "critical_dz_mm": float(args.critical_dz_mm),
+        "critical_area_mm2": int(args.critical_area_mm2),
         "accept_policy": args.accept,
         "order": args.order,
         "scan": args.scan,
         "placed_total": int(best_meta["placed_total"]),
         "unplaced_total": int(best_meta["unplaced"]),
         "unplaced_rows": list(best_meta["unplaced_rows"]),
+        "unplaced_reasons": dict(best_meta.get("unplaced_reasons") or {}),
         "rotate_xy": bool(args.allow_rotate_xy),
         "chosen_order_scan": chosen_order_scan,
         "fixed_count": int(len(fixed)),
