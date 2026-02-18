@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -405,6 +408,25 @@ def _best_try_key(meta: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
     )
 
 
+def _best_try_key_audit(meta: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
+    """
+    Industrial best-try priority when external audit is enabled:
+      1) minimize audit FAIL
+      2) maximize placed_total
+      3) minimize audit CONDITIONAL
+      4) minimize max_top_mm
+      5) minimize unplaced
+    """
+    audit = meta.get("audit") or {}
+    return (
+        int(audit.get("fail", 9999)),
+        -int(meta.get("placed_total", 0)),
+        int(audit.get("cond", 9999)),
+        int(meta.get("max_top_mm", 0)),
+        int(meta.get("unplaced", 0)),
+    )
+
+
 def _dominant_reason(rej_hmax: int, rej_coll: int, rej_stab: int) -> str:
     # Deterministic tie-break: HMAX > STAB > COLL
     candidates = [("HMAX", int(rej_hmax), 2), ("STAB", int(rej_stab), 1), ("COLL", int(rej_coll), 0)]
@@ -660,6 +682,71 @@ def _parse_csv_ints(raw: str) -> List[int]:
     return vals
 
 
+def _parse_csv_floats(raw: str) -> List[float]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    vals: List[float] = []
+    for chunk in text.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        vals.append(float(item))
+    return vals
+
+
+def _run_support_audit(plan_doc: Dict[str, Any], label: str) -> Dict[str, int]:
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".plan.json", encoding="utf-8") as tf:
+            tmp_path = Path(tf.name)
+            tf.write(json.dumps(plan_doc, indent=2, sort_keys=True))
+            tf.flush()
+
+        cmd = [
+            sys.executable,
+            "scripts/support_report_plan.py",
+            str(tmp_path),
+            "--min-support",
+            "0.90",
+            "--min-com-margin-low",
+            "20",
+            "--min-com-margin-high",
+            "30",
+            "--com-margin-switch-z",
+            "1200",
+            "--max-overhang",
+            "40",
+            "--grid",
+            "10",
+            "--head",
+            "0",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            print(
+                f"[WARN] audit failed {label}: returncode={proc.returncode} "
+                f"stderr={proc.stderr.strip()[:240]}"
+            )
+            return {"pass": 0, "cond": 9999, "fail": 9999}
+
+        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        m = re.search(r"counts:\s*PASS=(\d+)\s+CONDITIONAL=(\d+)\s+FAIL=(\d+)", text)
+        if not m:
+            print(f"[WARN] audit failed {label}: could not parse counts")
+            return {"pass": 0, "cond": 9999, "fail": 9999}
+        return {"pass": int(m.group(1)), "cond": int(m.group(2)), "fail": int(m.group(3))}
+    except Exception as exc:
+        print(f"[WARN] audit failed {label}: {exc}")
+        return {"pass": 0, "cond": 9999, "fail": 9999}
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Replan placements above z_cut using drop-z + industrial stability gating (greedy, deterministic)."
@@ -674,6 +761,12 @@ def main() -> int:
             "Keep boxes fixed if bottom z_mm < z_cut_mm + eps_z_mm (volume crosses or stays below the cut); "
             "replan only boxes fully above the cut."
         ),
+    )
+    ap.add_argument(
+        "--z-cut-sweep",
+        type=str,
+        default="",
+        help='Optional CSV list of z_cut values in mm (example: "0,300,600"). If provided, picks the best candidate.',
     )
     ap.add_argument("--grid", type=int, default=10, help="XY grid step in mm (default: 10)")
     ap.add_argument("--max-per-item", type=int, default=0, help="Optional cap of evaluated candidates per item (0 = no cap)")
@@ -704,6 +797,11 @@ def main() -> int:
     ap.add_argument("--reindex-layers", action="store_true", help="Rewrite layer_idx based on sorted unique z_mm in output plan.")
     ap.add_argument("--quiet-places", action="store_true", help="Do not print per-placement lines (only summaries).")
     ap.add_argument("--strict", action="store_true", help="Exit non-zero if unplaced rows remain or any output placement is FAIL.")
+    ap.add_argument(
+        "--audit-support-report",
+        action="store_true",
+        help="Audit each order/scan candidate via scripts/support_report_plan.py and rank using industrial audit counts.",
+    )
 
     ap.add_argument("--min-support", type=float, default=0.90)
     ap.add_argument("--cond-support", type=float, default=0.85)
@@ -772,18 +870,18 @@ def main() -> int:
         print("[ERROR] no placements", file=sys.stderr)
         return 2
 
-    z_cut = float(args.z_cut_mm)
-    fixed: List[Dict[str, Any]] = []
-    movable: List[Dict[str, Any]] = []
-    # Fixed rule (conservative around the cut plane):
-    # keep fixed any placement whose bottom is below z_cut (+eps), because it intersects
-    # or lies below the cut volume. Only boxes fully above the cut are movable.
-    for pl in sorted(placements_in, key=_place_sort_key):
-        z0 = _z0(pl)
-        if z0 < z_cut + eps_z + 1e-9:
-            fixed.append(pl)
-        else:
-            movable.append(pl)
+    try:
+        z_cut_sweep = _parse_csv_floats(args.z_cut_sweep)
+    except ValueError:
+        print(f"[ERROR] invalid --z-cut-sweep CSV: {args.z_cut_sweep!r}", file=sys.stderr)
+        return 2
+    if str(args.z_cut_sweep or "").strip():
+        if not z_cut_sweep:
+            print("[ERROR] --z-cut-sweep provided but no valid values were parsed", file=sys.stderr)
+            return 2
+        z_cut_values = sorted(set(float(v) for v in z_cut_sweep))
+    else:
+        z_cut_values = [float(args.z_cut_mm)]
 
     orders = ["area_height", "critical_first", "tall_band", "height_area"] if args.order == "auto" else [args.order]
     scans = ["xy", "yx"] if args.scan == "auto" else [args.scan]
@@ -791,62 +889,162 @@ def main() -> int:
     print(f"PLAN: {plan_path}")
     print(f"schema={schema!r} schema_version={schema_version} z_mode={z_mode!r} hmax={hmax} eps_z_mm={eps_z}")
     print(f"base_effective: L={L} W={W} overhang={base_eff.get('overhang_mm')}")
-    print(
-        f"z_cut_mm={z_cut} fixed={len(fixed)} movable={len(movable)} grid={args.grid} "
-        f"accept={args.accept} order={args.order} scan={args.scan} rotate_xy={args.allow_rotate_xy}"
-    )
+    if len(z_cut_values) == 1 and not str(args.z_cut_sweep or "").strip():
+        print(
+            f"z_cut_mm={z_cut_values[0]} grid={args.grid} "
+            f"accept={args.accept} order={args.order} scan={args.scan} rotate_xy={args.allow_rotate_xy}"
+        )
+    else:
+        print(
+            f"z_cut_sweep_mm={z_cut_values} grid={args.grid} "
+            f"accept={args.accept} order={args.order} scan={args.scan} rotate_xy={args.allow_rotate_xy}"
+        )
     print(
         f"thresholds: pass_support>={args.min_support:.2f} cond_support>={args.cond_support:.2f} hard_fail<{args.hard_fail_support:.2f} "
         f"com_margin(min={args.min_com_margin if args.min_com_margin is not None else 'auto'}) max_overhang<={args.max_overhang:.0f}"
     )
+    if args.audit_support_report:
+        print("audit_support_report=enabled ranking=industrial(min audit_FAIL, max placed, min audit_COND, min max_top, min unplaced)")
 
     best_meta: Optional[Dict[str, Any]] = None
     best_placements: Optional[List[Dict[str, Any]]] = None
     candidates: List[Dict[str, Any]] = []
+    best_z_cut_mm: Optional[float] = None
 
     verbose_places = not args.quiet_places
 
-    best_key: Optional[Tuple[int, int, int, int, int]] = None
+    best_key: Optional[Tuple[Any, ...]] = None
 
-    for order in orders:
-        for scan in scans:
-            if not args.quiet_places:
-                print(f"\n=== TRY order={order} scan={scan} ===")
-            meta, placements_out = _run_one(
-                placements_in=placements_in,
-                fixed=fixed,
-                movable=movable,
-                L=L,
-                W=W,
-                hmax=hmax,
-                eps_z=eps_z,
-                plan_min_support=plan_min_support,
-                args=args,
-                order=order,
-                scan=scan,
-                verbose_places=verbose_places,
-            )
+    for z_cut in z_cut_values:
+        fixed: List[Dict[str, Any]] = []
+        movable: List[Dict[str, Any]] = []
+        # Fixed rule (conservative around the cut plane):
+        # keep fixed any placement whose bottom is below z_cut (+eps), because it intersects
+        # or lies below the cut volume. Only boxes fully above the cut are movable.
+        for pl in sorted(placements_in, key=_place_sort_key):
+            z0 = _z0(pl)
+            if z0 < z_cut + eps_z + 1e-9:
+                fixed.append(pl)
+            else:
+                movable.append(pl)
 
-            counts = _counts_by_class(placements_out)
-            meta2 = dict(meta)
-            meta2["counts"] = counts
-            candidates.append(meta2)
+        print(f"\n=== Z_CUT {z_cut} === fixed={len(fixed)} movable={len(movable)}")
 
-            key = _best_try_key(meta2)
+        z_best_meta: Optional[Dict[str, Any]] = None
+        z_best_placements: Optional[List[Dict[str, Any]]] = None
+        z_best_key: Optional[Tuple[Any, ...]] = None
 
-            if best_meta is None or best_key is None or key > best_key:
-                best_meta = meta2
-                best_placements = placements_out
-                best_key = key
-
-            if args.quiet_places:
-                print(
-                    f"[TRY] order={order} scan={scan} placed={meta2['placed_total']} unplaced={meta2['unplaced']} "
-                    f"PASS={counts.get('PASS',0)} COND={counts.get('CONDITIONAL',0)} FAIL={counts.get('FAIL',0)} "
-                    f"max_top={meta2['max_top_mm']}"
+        for order in orders:
+            for scan in scans:
+                if not args.quiet_places:
+                    print(f"\n=== TRY order={order} scan={scan} ===")
+                meta, placements_out = _run_one(
+                    placements_in=placements_in,
+                    fixed=fixed,
+                    movable=movable,
+                    L=L,
+                    W=W,
+                    hmax=hmax,
+                    eps_z=eps_z,
+                    plan_min_support=plan_min_support,
+                    args=args,
+                    order=order,
+                    scan=scan,
+                    verbose_places=verbose_places,
                 )
 
+                counts = _counts_by_class(placements_out)
+                meta2 = dict(meta)
+                meta2["counts"] = counts
+                meta2["z_cut_mm"] = float(z_cut)
+                meta2["fixed_count"] = int(len(fixed))
+                meta2["movable_count"] = int(len(movable))
+
+                if args.audit_support_report:
+                    plan_for_audit = json.loads(json.dumps(d))
+                    plan_for_audit["placements"] = placements_out
+                    meta2["audit"] = _run_support_audit(plan_for_audit, label=f"z_cut={z_cut} order={order} scan={scan}")
+
+                key = _best_try_key_audit(meta2) if args.audit_support_report else _best_try_key(meta2)
+                if z_best_meta is None or z_best_key is None:
+                    z_best_meta = meta2
+                    z_best_placements = placements_out
+                    z_best_key = key
+                elif args.audit_support_report and key < z_best_key:
+                    z_best_meta = meta2
+                    z_best_placements = placements_out
+                    z_best_key = key
+                elif not args.audit_support_report and key > z_best_key:
+                    z_best_meta = meta2
+                    z_best_placements = placements_out
+                    z_best_key = key
+
+                if args.quiet_places:
+                    if args.audit_support_report:
+                        audit = meta2.get("audit") or {}
+                        print(
+                            f"[TRY] z_cut={z_cut} order={order} scan={scan} placed={meta2['placed_total']} unplaced={meta2['unplaced']} "
+                            f"PASS={counts.get('PASS',0)} COND={counts.get('CONDITIONAL',0)} FAIL={counts.get('FAIL',0)} "
+                            f"audit_PASS={audit.get('pass',0)} audit_COND={audit.get('cond',0)} audit_FAIL={audit.get('fail',0)} "
+                            f"max_top={meta2['max_top_mm']}"
+                        )
+                    else:
+                        print(
+                            f"[TRY] z_cut={z_cut} order={order} scan={scan} placed={meta2['placed_total']} unplaced={meta2['unplaced']} "
+                            f"PASS={counts.get('PASS',0)} COND={counts.get('CONDITIONAL',0)} FAIL={counts.get('FAIL',0)} "
+                            f"max_top={meta2['max_top_mm']}"
+                        )
+
+        assert z_best_meta is not None and z_best_placements is not None and z_best_key is not None
+
+        z_candidate: Dict[str, Any] = {
+            "z_cut_mm": float(z_cut),
+            "best_order": z_best_meta["order"],
+            "best_scan": z_best_meta["scan"],
+            "placed": int(z_best_meta["placed_total"]),
+            "unplaced": int(z_best_meta["unplaced"]),
+            "max_top_mm": int(z_best_meta["max_top_mm"]),
+            "unplaced_rows": list(z_best_meta["unplaced_rows"]),
+        }
+        if args.audit_support_report:
+            z_candidate["audit"] = dict(z_best_meta.get("audit") or {"pass": 0, "cond": 9999, "fail": 9999})
+        candidates.append(z_candidate)
+
+        if args.audit_support_report:
+            audit = z_best_meta.get("audit") or {}
+            print(
+                f"[Z_CUT BEST] z_cut={z_cut} order={z_best_meta['order']} scan={z_best_meta['scan']} "
+                f"placed={z_best_meta['placed_total']} unplaced={z_best_meta['unplaced']} "
+                f"audit_PASS={audit.get('pass',0)} audit_COND={audit.get('cond',0)} audit_FAIL={audit.get('fail',0)} "
+                f"max_top={z_best_meta['max_top_mm']}"
+            )
+        else:
+            c = z_best_meta.get("counts", {})
+            print(
+                f"[Z_CUT BEST] z_cut={z_cut} order={z_best_meta['order']} scan={z_best_meta['scan']} "
+                f"placed={z_best_meta['placed_total']} unplaced={z_best_meta['unplaced']} "
+                f"PASS={c.get('PASS',0)} COND={c.get('CONDITIONAL',0)} FAIL={c.get('FAIL',0)} "
+                f"max_top={z_best_meta['max_top_mm']}"
+            )
+
+        if best_meta is None or best_key is None:
+            best_meta = z_best_meta
+            best_placements = z_best_placements
+            best_key = z_best_key
+            best_z_cut_mm = float(z_cut)
+        elif args.audit_support_report and z_best_key < best_key:
+            best_meta = z_best_meta
+            best_placements = z_best_placements
+            best_key = z_best_key
+            best_z_cut_mm = float(z_cut)
+        elif not args.audit_support_report and z_best_key > best_key:
+            best_meta = z_best_meta
+            best_placements = z_best_placements
+            best_key = z_best_key
+            best_z_cut_mm = float(z_cut)
+
     assert best_meta is not None and best_placements is not None
+    chosen_z_cut = float(best_z_cut_mm if best_z_cut_mm is not None else best_meta.get("z_cut_mm", args.z_cut_mm))
 
     d["placements"] = best_placements
 
@@ -870,7 +1068,9 @@ def main() -> int:
     d["replan"] = {
         "tool": "scripts/replan_plan_zcut.py",
         "input_path": str(plan_path),
-        "z_cut_mm": float(z_cut),
+        "z_cut_mm": float(chosen_z_cut),
+        "chosen_z_cut_mm": float(chosen_z_cut),
+        "z_cut_sweep_mm": [float(v) for v in z_cut_values],
         "grid_mm": int(args.grid),
         "tall_dz_mm": int(args.tall_dz_mm),
         "prefer_rows": list(args.prefer_rows_list),
@@ -885,8 +1085,8 @@ def main() -> int:
         "unplaced_reasons": dict(best_meta.get("unplaced_reasons") or {}),
         "rotate_xy": bool(args.allow_rotate_xy),
         "chosen_order_scan": chosen_order_scan,
-        "fixed_count": int(len(fixed)),
-        "movable_count": int(len(movable)),
+        "fixed_count": int(best_meta.get("fixed_count", 0)),
+        "movable_count": int(best_meta.get("movable_count", 0)),
         "max_top_mm": int(max_top),
         "hmax_mm": int(hmax),
         "thresholds": {
@@ -900,7 +1100,12 @@ def main() -> int:
             "max_overhang": float(args.max_overhang),
             "plan_min_support": float(plan_min_support),
         },
-        "best_selection_policy": "max placed_total, min FAIL, min CONDITIONAL, min max_top_mm, min unplaced",
+        "audit_support_report": bool(args.audit_support_report),
+        "best_selection_policy": (
+            "min audit_FAIL, max placed_total, min audit_CONDITIONAL, min max_top_mm, min unplaced"
+            if args.audit_support_report
+            else "max placed_total, min FAIL, min CONDITIONAL, min max_top_mm, min unplaced"
+        ),
         "chosen": best_meta,
         "candidates": candidates,
     }
@@ -909,7 +1114,7 @@ def main() -> int:
     if out is None:
         out_dir = Path("out/plan_replanned")
         out_dir.mkdir(parents=True, exist_ok=True)
-        ztag = int(round(z_cut))
+        ztag = int(round(chosen_z_cut))
         out = str(out_dir / f"{plan_path.stem}.zcut{ztag}.plan.json")
 
     out_path = Path(out)
@@ -931,10 +1136,20 @@ def main() -> int:
 
     print("\n=== BEST CHOSEN ===")
     c = best_meta.get("counts", {})
-    print(
-        f"order={best_meta['order']} scan={best_meta['scan']} placed={best_meta['placed_total']} unplaced={best_meta['unplaced']} "
-        f"PASS={c.get('PASS',0)} COND={c.get('CONDITIONAL',0)} FAIL={c.get('FAIL',0)} max_top={best_meta['max_top_mm']}"
-    )
+    if args.audit_support_report:
+        audit = best_meta.get("audit") or {}
+        print(
+            f"z_cut={chosen_z_cut} order={best_meta['order']} scan={best_meta['scan']} "
+            f"placed={best_meta['placed_total']} unplaced={best_meta['unplaced']} "
+            f"audit_PASS={audit.get('pass',0)} audit_COND={audit.get('cond',0)} audit_FAIL={audit.get('fail',0)} "
+            f"PASS={c.get('PASS',0)} COND={c.get('CONDITIONAL',0)} FAIL={c.get('FAIL',0)} max_top={best_meta['max_top_mm']}"
+        )
+    else:
+        print(
+            f"z_cut={chosen_z_cut} order={best_meta['order']} scan={best_meta['scan']} "
+            f"placed={best_meta['placed_total']} unplaced={best_meta['unplaced']} "
+            f"PASS={c.get('PASS',0)} COND={c.get('CONDITIONAL',0)} FAIL={c.get('FAIL',0)} max_top={best_meta['max_top_mm']}"
+        )
     print(f"unplaced_rows={best_meta.get('unplaced_rows', [])}")
     print(f"WROTE: {out_path}")
 
