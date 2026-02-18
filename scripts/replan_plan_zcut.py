@@ -327,13 +327,20 @@ def _score(
     )
 
 
-def _mov_key(pl: Dict[str, Any], order: str) -> Tuple[int, int, int]:
+def _mov_key(pl: Dict[str, Any], order: str, tall_dz_mm: int) -> Tuple[int, int, int, int]:
     dz = int(pl.get("dz_mm", 0) or 0)
     area = int(pl.get("w_mm", 0) or 0) * int(pl.get("h_mm", 0) or 0)
     rid = int(pl.get("row_idx", -1))
     if order == "area_height":
-        return (-area, -dz, rid)
-    return (-dz, -area, rid)  # height_area
+        return (0, -area, -dz, rid)
+    if order == "height_area":
+        return (0, -dz, -area, rid)
+    # tall_band:
+    #   A) dz >= tall_dz_mm  -> dz desc, area desc, row asc
+    #   B) otherwise         -> area desc, dz desc, row asc
+    if dz >= int(tall_dz_mm):
+        return (0, -dz, -area, rid)
+    return (1, -area, -dz, rid)
 
 
 def _place_sort_key(pl: Dict[str, Any]) -> Tuple[int, int]:
@@ -354,7 +361,7 @@ def _best_try_key(meta: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
     Deterministic best-try priority:
       1) maximize placed_total
       2) minimize FAIL
-      3) maximize PASS
+      3) minimize CONDITIONAL
       4) minimize max_top_mm
       5) minimize unplaced
     """
@@ -362,7 +369,7 @@ def _best_try_key(meta: Dict[str, Any]) -> Tuple[int, int, int, int, int]:
     return (
         int(meta.get("placed_total", 0)),
         -int(counts.get("FAIL", 0)),
-        int(counts.get("PASS", 0)),
+        -int(counts.get("CONDITIONAL", 0)),
         -int(meta.get("max_top_mm", 0)),
         -int(meta.get("unplaced", 0)),
     )
@@ -390,7 +397,10 @@ def _run_one(
     scan: str,
     verbose_places: bool,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    movable_sorted = sorted(movable, key=lambda pl: (_mov_key(pl, order), _place_sort_key(pl)))
+    movable_sorted = sorted(
+        movable,
+        key=lambda pl: (_mov_key(pl, order, int(args.tall_dz_mm)), _place_sort_key(pl)),
+    )
     placed: List[Dict[str, Any]] = [json.loads(json.dumps(pl)) for pl in sorted(fixed, key=_place_sort_key)]
     for pl in placed:
         _ensure_rot_fields(pl)
@@ -587,7 +597,13 @@ def main() -> int:
     ap.add_argument("--grid", type=int, default=10, help="XY grid step in mm (default: 10)")
     ap.add_argument("--max-per-item", type=int, default=0, help="Optional cap of evaluated candidates per item (0 = no cap)")
     ap.add_argument("--accept", choices=["pass", "cond", "any"], default="cond", help="Minimum stability class to accept (default: cond)")
-    ap.add_argument("--order", choices=["auto", "area_height", "height_area"], default="auto", help="Movable order (default: auto)")
+    ap.add_argument(
+        "--order",
+        choices=["auto", "area_height", "height_area", "tall_band"],
+        default="auto",
+        help="Movable order (default: auto)",
+    )
+    ap.add_argument("--tall-dz-mm", type=int, default=600, help="Height threshold for --order tall_band (default: 600)")
     ap.add_argument("--scan", choices=["auto", "xy", "yx"], default="auto", help="XY scan order (default: auto)")
     ap.add_argument("--allow-rotate-xy", action="store_true", help="Also evaluate (h,w) footprint (yaw 90°) when possible.")
     ap.add_argument("--allow-partial", action="store_true", help="Return exit code 0 even when unplaced rows remain.")
@@ -658,7 +674,7 @@ def main() -> int:
         else:
             movable.append(pl)
 
-    orders = ["area_height", "height_area"] if args.order == "auto" else [args.order]
+    orders = ["area_height", "tall_band", "height_area"] if args.order == "auto" else [args.order]
     scans = ["xy", "yx"] if args.scan == "auto" else [args.scan]
 
     print(f"PLAN: {plan_path}")
@@ -745,6 +761,7 @@ def main() -> int:
         "input_path": str(plan_path),
         "z_cut_mm": float(z_cut),
         "grid_mm": int(args.grid),
+        "tall_dz_mm": int(args.tall_dz_mm),
         "accept_policy": args.accept,
         "order": args.order,
         "scan": args.scan,
@@ -768,7 +785,7 @@ def main() -> int:
             "max_overhang": float(args.max_overhang),
             "plan_min_support": float(plan_min_support),
         },
-        "best_selection_policy": "max placed_total, min FAIL, max PASS, min max_top_mm, min unplaced",
+        "best_selection_policy": "max placed_total, min FAIL, min CONDITIONAL, min max_top_mm, min unplaced",
         "chosen": best_meta,
         "candidates": candidates,
     }
