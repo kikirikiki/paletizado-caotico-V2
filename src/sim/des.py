@@ -259,6 +259,19 @@ def simulate(
                 "continuous_pallet_sequence": {dest: [] for dest in range(1, 7)},
                 "continuous_pallets_total": {dest: 0 for dest in range(1, 7)},
                 "continuous_closures_by_reason": {dest: {} for dest in range(1, 7)},
+                "accessible_window_stats": {
+                    "n_decisions": 0,
+                    "min": 0,
+                    "mean": 0.0,
+                    "max": 0,
+                    "lt5_count": 0,
+                    "lt5_ratio": 0.0,
+                },
+                "accessible_window_by_ramp_stats": {
+                    1: {"min": 0, "mean": 0.0, "max": 0},
+                    2: {"min": 0, "mean": 0.0, "max": 0},
+                },
+                "deadlock_samples": [],
             },
             stop_reason=None,
         )
@@ -306,6 +319,15 @@ def simulate(
     robot_busy_time = 0.0
     processed_boxes = 0
     stop_reason: str | None = None
+    deadlock_samples: list[dict[str, object]] = []
+    window_n_decisions = 0
+    window_total_min: int | None = None
+    window_total_max: int | None = None
+    window_total_sum = 0
+    window_lt5_count = 0
+    window_by_ramp_min: dict[int, int | None] = {1: None, 2: None}
+    window_by_ramp_max: dict[int, int | None] = {1: None, 2: None}
+    window_by_ramp_sum: dict[int, int] = {1: 0, 2: 0}
 
     ramp_wait_times: dict[int, list[float]] = {1: [], 2: []}
     upstream_blocked_time: dict[int, float] = {1: 0.0, 2: 0.0}
@@ -475,6 +497,74 @@ def simulate(
             return True
         return False
 
+    def total_remaining_boxes() -> int:
+        return sum(
+            len(ramp.queue) + len(ramp.upstream) + len(ramp.staging)
+            for ramp in ramps.values()
+        )
+
+    def capture_accessible_window() -> tuple[dict[int, int], int]:
+        window_by_ramp = {
+            rid: len(ramp.queue) + len(ramp.staging)
+            for rid, ramp in ramps.items()
+        }
+        window_total = sum(window_by_ramp.values())
+        return window_by_ramp, window_total
+
+    def record_accessible_window_decision() -> None:
+        nonlocal window_n_decisions, window_total_min, window_total_max
+        nonlocal window_total_sum, window_lt5_count
+        window_by_ramp, window_total = capture_accessible_window()
+        window_n_decisions += 1
+        window_total_sum += window_total
+        if window_total_min is None or window_total < window_total_min:
+            window_total_min = window_total
+        if window_total_max is None or window_total > window_total_max:
+            window_total_max = window_total
+        if window_total < 5:
+            window_lt5_count += 1
+
+        for rid, ramp_window in window_by_ramp.items():
+            window_by_ramp_sum[rid] = window_by_ramp_sum.get(rid, 0) + int(ramp_window)
+            current_min = window_by_ramp_min.get(rid)
+            current_max = window_by_ramp_max.get(rid)
+            if current_min is None or ramp_window < current_min:
+                window_by_ramp_min[rid] = int(ramp_window)
+            if current_max is None or ramp_window > current_max:
+                window_by_ramp_max[rid] = int(ramp_window)
+
+    def append_deadlock_sample(subreason: str, details: dict[str, Any] | None = None) -> None:
+        if len(deadlock_samples) >= 20:
+            return
+
+        details = details if isinstance(details, dict) else {}
+        waiting_box = first_waiting_box_for_deadlock()
+        box_id = details.get("box_id")
+        dims = details.get("dims")
+        pallet_id = details.get("pallet_id")
+        if waiting_box is not None:
+            if box_id is None:
+                box_id = waiting_box.box_id
+            if dims is None:
+                dims = [waiting_box.length_mm, waiting_box.width_mm, waiting_box.height_mm]
+            if pallet_id is None:
+                pallet_id = waiting_box.destination
+
+        window_by_ramp, window_total = capture_accessible_window()
+        deadlock_samples.append(
+            {
+                "now": float(current_time),
+                "stop_reason": "DEADLOCK",
+                "subreason": str(subreason).upper().strip() or "UNKNOWN",
+                "box_id": box_id,
+                "dims": dims,
+                "pallet_id": pallet_id,
+                "window_total": int(window_total),
+                "window_by_ramp": {int(rid): int(size) for rid, size in window_by_ramp.items()},
+                "remaining_total": int(total_remaining_boxes()),
+            }
+        )
+
     def map_policy_reason(reason: str) -> str:
         """
         Convención:
@@ -613,6 +703,7 @@ def simulate(
                             )
                             robot_busy = True
             else:
+                record_accessible_window_decision()
                 plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time)
                 if plan is None:
                     closures_started = False
@@ -627,15 +718,13 @@ def simulate(
                     policy_details = getattr(policy, "stop_details", {}) or {}
                     if policy_stop == "DEADLOCK":
                         details = policy_details if isinstance(policy_details, dict) else {}
+                        append_deadlock_sample(str(details.get("reason", "UNKNOWN")), details)
                         logger.error(
                             "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s remaining=%s",
                             details.get("box_id"),
                             details.get("dims"),
                             details.get("reason"),
-                            sum(
-                                len(ramp.queue) + len(ramp.upstream) + len(ramp.staging)
-                                for ramp in ramps.values()
-                            ),
+                            total_remaining_boxes(),
                         )
                         print(
                             "[DEADLOCK] no feasible placement. item=%s dims=%s reason=%s remaining=%s"
@@ -643,10 +732,7 @@ def simulate(
                                 details.get("box_id"),
                                 details.get("dims"),
                                 details.get("reason"),
-                                sum(
-                                    len(ramp.queue) + len(ramp.upstream) + len(ramp.staging)
-                                    for ramp in ramps.values()
-                                ),
+                                total_remaining_boxes(),
                             ),
                             flush=True,
                         )
@@ -658,6 +744,7 @@ def simulate(
                         stop_reason = "DEADLOCK"
                         break
                     if not events and not robot_busy and system_has_boxes():
+                        append_deadlock_sample("STRUCTURAL", {})
                         if continuous_pallets and not closures_started:
                             if close_continuous_deadlock("STRUCTURAL"):
                                 clear_policy_deadlock_state()
@@ -736,6 +823,39 @@ def simulate(
     pallet_kpis["continuous_closures_by_reason"] = {
         dest: dict(reasons) for dest, reasons in closures_by_reason.items()
     }
+
+    if window_n_decisions > 0:
+        window_stats = {
+            "n_decisions": int(window_n_decisions),
+            "min": int(window_total_min if window_total_min is not None else 0),
+            "mean": float(window_total_sum / float(window_n_decisions)),
+            "max": int(window_total_max if window_total_max is not None else 0),
+            "lt5_count": int(window_lt5_count),
+            "lt5_ratio": float(window_lt5_count / float(window_n_decisions)),
+        }
+    else:
+        window_stats = {
+            "n_decisions": 0,
+            "min": 0,
+            "mean": 0.0,
+            "max": 0,
+            "lt5_count": 0,
+            "lt5_ratio": 0.0,
+        }
+    pallet_kpis["accessible_window_stats"] = window_stats
+
+    window_by_ramp_stats: dict[int, dict[str, float | int]] = {}
+    for rid in sorted(ramps):
+        if window_n_decisions > 0:
+            window_by_ramp_stats[rid] = {
+                "min": int(window_by_ramp_min.get(rid) if window_by_ramp_min.get(rid) is not None else 0),
+                "mean": float(window_by_ramp_sum.get(rid, 0) / float(window_n_decisions)),
+                "max": int(window_by_ramp_max.get(rid) if window_by_ramp_max.get(rid) is not None else 0),
+            }
+        else:
+            window_by_ramp_stats[rid] = {"min": 0, "mean": 0.0, "max": 0}
+    pallet_kpis["accessible_window_by_ramp_stats"] = window_by_ramp_stats
+    pallet_kpis["deadlock_samples"] = list(deadlock_samples)
 
     return SimulationResult(
         total_boxes=len(arrival_list),
