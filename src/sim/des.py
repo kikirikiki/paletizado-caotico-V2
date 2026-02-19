@@ -219,8 +219,23 @@ def simulate(
     config: SimConfig,
     packer: Packer | None = None,
     decision_policy: Any | None = None,
+    continuous_pallets: bool = False,
+    arrival_mode: str = "excel",
 ) -> SimulationResult:
-    arrival_list = sorted(list(arrivals), key=lambda a: (a.time, a.row_idx))
+    arrival_mode_key = str(arrival_mode).strip().lower()
+    if arrival_mode_key not in ("excel", "immediate"):
+        raise ValueError(f"arrival_mode no soportado: {arrival_mode}")
+
+    arrival_items = list(arrivals)
+    if arrival_mode_key == "excel":
+        arrival_list = sorted(arrival_items, key=lambda a: (a.time, a.row_idx))
+        event_time_for = lambda a: float(a.time)
+        sim_start = float(arrival_list[0].time) if arrival_list else 0.0
+    else:
+        arrival_list = sorted(arrival_items, key=lambda a: a.row_idx)
+        event_time_for = lambda a: 0.0
+        sim_start = 0.0
+
     if not arrival_list:
         return SimulationResult(
             total_boxes=0,
@@ -240,7 +255,11 @@ def simulate(
             changeover_time_by_destination={dest: 0.0 for dest in range(1, 7)},
             staging_max_occupancy={1: 0, 2: 0},
             staging_full_percent={1: 0.0, 2: 0.0},
-            pallet_kpis={},
+            pallet_kpis={
+                "continuous_pallet_sequence": {dest: [] for dest in range(1, 7)},
+                "continuous_pallets_total": {dest: 0 for dest in range(1, 7)},
+                "continuous_closures_by_reason": {dest: {} for dest in range(1, 7)},
+            },
             stop_reason=None,
         )
 
@@ -259,6 +278,8 @@ def simulate(
         2: RampState(ramp_id=2, capacity=config.ramp_capacity, staging_capacity=staging_cap),
     }
     destinations = {dest: DestinationState(destination=dest) for dest in range(1, 7)}
+    closed_pallets: dict[int, list[int]] = {dest: [] for dest in destinations}
+    closures_by_reason: dict[int, dict[str, int]] = {dest: {} for dest in destinations}
 
     scheduler = Scheduler()
     events: list[tuple[float, int, Event]] = []
@@ -267,7 +288,7 @@ def simulate(
         ramp_id = assign_ramp(arrival.destination)
         box = Box(
             box_id=box_id,
-            arrival_time=float(arrival.time),
+            arrival_time=event_time_for(arrival),
             destination=arrival.destination,
             ramp_id=ramp_id,
             length_mm=arrival.length_mm,
@@ -280,7 +301,6 @@ def simulate(
         heapq.heappush(events, (event.time, event.seq, event))
         seq += 1
 
-    sim_start = arrival_list[0].time
     current_time = sim_start
     robot_busy = False
     robot_busy_time = 0.0
@@ -352,6 +372,12 @@ def simulate(
         dest_state = destinations[destination]
         if dest_state.state == "CHANGEOVER":
             return
+        if dest_state.count > 0:
+            closed_pallets[destination].append(int(dest_state.count))
+            dest_state.count = 0
+        reason_key = str(reason).strip() or "UNKNOWN"
+        by_reason = closures_by_reason.setdefault(destination, {})
+        by_reason[reason_key] = int(by_reason.get(reason_key, 0)) + 1
         dest_state.state = "CHANGEOVER"
         dest_state.changeovers += 1
         dest_state.changeover_time += config.t_changeover
@@ -468,6 +494,52 @@ def simulate(
         # Por defecto: cierre normal
         return f"CLOSE_{r}"
 
+    def first_waiting_box_for_deadlock() -> Box | None:
+        for rid in sorted(ramps):
+            ramp = ramps[rid]
+            if ramp.queue:
+                return ramp.queue[0]
+            if ramp.staging:
+                return ramp.staging[0]
+        return None
+
+    def clear_policy_deadlock_state() -> None:
+        if policy is None:
+            return
+        if hasattr(policy, "stop_reason"):
+            setattr(policy, "stop_reason", None)
+        if hasattr(policy, "stop_details"):
+            setattr(policy, "stop_details", {})
+
+    def close_continuous_deadlock(subreason: str, details: dict[str, Any] | None = None) -> bool:
+        details = details or {}
+        waiting_box = first_waiting_box_for_deadlock()
+
+        candidate_dest: int | None = None
+        if waiting_box is not None:
+            candidate_dest = int(waiting_box.destination)
+        else:
+            maybe_pallet = details.get("pallet_id")
+            if maybe_pallet is not None and str(maybe_pallet).isdigit():
+                candidate_dest = int(maybe_pallet)
+
+        if candidate_dest is None or candidate_dest not in destinations:
+            for dest_id, dest_state in destinations.items():
+                if dest_state.state == "ACTIVE" and dest_state.count > 0:
+                    candidate_dest = int(dest_id)
+                    break
+
+        if candidate_dest is None:
+            return False
+
+        dest_state = destinations[candidate_dest]
+        if dest_state.state != "ACTIVE" or dest_state.count <= 0:
+            return False
+
+        deadlock_reason = str(subreason).upper().strip() or "UNKNOWN"
+        start_changeover(candidate_dest, current_time, reason=f"DEADLOCK_{deadlock_reason}")
+        return True
+
     update_flags()
 
     while events or robot_busy or system_has_boxes():
@@ -543,16 +615,18 @@ def simulate(
             else:
                 plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time)
                 if plan is None:
+                    closures_started = False
                     pending = getattr(policy, "drain_pending_closures", None)
                     if callable(pending):
                         for dest_id, reason in pending().items():
                             dest_key = int(dest_id) if str(dest_id).isdigit() else dest_id
                             if dest_key in destinations and destinations[dest_key].state == "ACTIVE":
                                 start_changeover(dest_key, current_time, reason=map_policy_reason(str(reason)))
+                                closures_started = True
                     policy_stop = getattr(policy, "stop_reason", None)
+                    policy_details = getattr(policy, "stop_details", {}) or {}
                     if policy_stop == "DEADLOCK":
-                        stop_reason = "DEADLOCK"
-                        details = getattr(policy, "stop_details", {}) or {}
+                        details = policy_details if isinstance(policy_details, dict) else {}
                         logger.error(
                             "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s remaining=%s",
                             details.get("box_id"),
@@ -576,8 +650,19 @@ def simulate(
                             ),
                             flush=True,
                         )
+                        if continuous_pallets:
+                            if close_continuous_deadlock(str(details.get("reason", "UNKNOWN")), details):
+                                clear_policy_deadlock_state()
+                                update_flags()
+                                continue
+                        stop_reason = "DEADLOCK"
                         break
                     if not events and not robot_busy and system_has_boxes():
+                        if continuous_pallets and not closures_started:
+                            if close_continuous_deadlock("STRUCTURAL"):
+                                clear_policy_deadlock_state()
+                                update_flags()
+                                continue
                         stop_reason = "DEADLOCK"
                         logger.error(
                             "DEADLOCK: no plan and no pending events with boxes remaining (t=%.3f).",
@@ -632,6 +717,10 @@ def simulate(
         for rid in (1, 2)
     }
 
+    for dest, dest_state in destinations.items():
+        if dest_state.state == "ACTIVE" and dest_state.count > 0:
+            closed_pallets[dest].append(int(dest_state.count))
+
     pallet_kpis: dict[str, object] = {}
     if policy is not None and hasattr(policy, "collect_kpis"):
         try:
@@ -639,6 +728,14 @@ def simulate(
         except Exception:
             logger.exception("policy collect_kpis failed")
             pallet_kpis = {}
+    if not isinstance(pallet_kpis, dict):
+        pallet_kpis = {}
+    pallet_kpis = dict(pallet_kpis)
+    pallet_kpis["continuous_pallet_sequence"] = {dest: list(seq) for dest, seq in closed_pallets.items()}
+    pallet_kpis["continuous_pallets_total"] = {dest: len(seq) for dest, seq in closed_pallets.items()}
+    pallet_kpis["continuous_closures_by_reason"] = {
+        dest: dict(reasons) for dest, reasons in closures_by_reason.items()
+    }
 
     return SimulationResult(
         total_boxes=len(arrival_list),
