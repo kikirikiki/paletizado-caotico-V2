@@ -2,10 +2,18 @@
 set -euo pipefail
 
 # Ensure we run from repo root
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
 
-echo "[smoke] repo_root=$ROOT_DIR"
+python="$repo_root/.venv/bin/python"
+
+echo "[smoke] repo_root=$repo_root"
+echo "[smoke] python=$python"
+
+if [[ ! -x "$python" ]]; then
+  echo "[smoke][FAIL] Python del venv no encontrado o no ejecutable: $python"
+  exit 2
+fi
 
 # Guardrail: do not allow committing python bytecode / cache
 if git ls-files | grep -E '(__pycache__/|\.pyc$)' >/dev/null; then
@@ -16,15 +24,12 @@ if git ls-files | grep -E '(__pycache__/|\.pyc$)' >/dev/null; then
 fi
 
 # Make src importable for local runs (no packaging assumptions)
-export PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${repo_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Optional: show python info
-if command -v python >/dev/null; then
-  echo "[smoke] python=$(command -v python)"
-  python -V || true
-fi
+"$python" -V || true
 
-echo "[smoke] running: pytest -q"
-pytest -q
+echo "[smoke] running: $python -m pytest -q"
+"$python" -m pytest -q
 
 echo "[smoke] OK"
