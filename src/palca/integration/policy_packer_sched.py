@@ -37,6 +37,7 @@ class PolicyConfig:
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
     score_mode: str = "gain_frag"
+    height_slack_mm: int = 0
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -107,6 +108,7 @@ class PolicyPackerScheduler:
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
         score_mode: str = "gain_frag",
+        height_slack_mm: int = 0,
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
@@ -131,6 +133,7 @@ class PolicyPackerScheduler:
             time_budget_ms=time_budget_ms,
             priority_weight=priority_weight,
             score_mode=score_mode,
+            height_slack_mm=height_slack_mm,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -155,6 +158,7 @@ class PolicyPackerScheduler:
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             score_mode=score_mode,
+            height_slack_mm=max(0, int(height_slack_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -425,8 +429,13 @@ class PolicyPackerScheduler:
         height_mean = float(sum(height_hist_sorted) / max(1, height_count))
         above_min_count = int(getattr(self._scheduler, "selected_height_above_min_feasible_count", 0) or 0)
         choices_count = int(getattr(self._scheduler, "selected_height_choices_count", 0) or 0)
+        slack_decisions_count = int(getattr(self._scheduler, "selected_height_slack_decisions_count", 0) or 0)
+        slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
+        slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
+        height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
 
         kpis["score_mode"] = score_mode
+        kpis["height_slack_mm"] = int(height_slack_mm)
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
         kpis["selected_height_after_mm_mean"] = height_mean
@@ -436,6 +445,8 @@ class PolicyPackerScheduler:
         kpis["selected_height_after_mm_p99"] = _percentile(height_hist_sorted, 0.99)
         kpis["selected_height_above_min_feasible_count"] = above_min_count
         kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
+        kpis["selected_height_slack_filtered_rate"] = float(slack_filtered_count / max(1, slack_decisions_count))
+        kpis["selected_height_slack_set_size_mean"] = float(slack_set_size_sum / max(1, slack_decisions_count))
         return kpis
 
     def _collect_pallets(self, ramps: Mapping[int, Any]) -> dict[int | str, PalletModel]:

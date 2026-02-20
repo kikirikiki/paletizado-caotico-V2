@@ -91,9 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument(
         "--score-mode",
-        choices=["gain_frag", "min_height_then_gain"],
+        choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"],
         default="gain_frag",
-        help="gain_frag=score actual; min_height_then_gain=prioriza menor altura final, luego gain/frag",
+        help=(
+            "gain_frag=score actual; min_height_then_gain=prioriza menor altura final, luego gain/frag; "
+            "min_height_slack_then_gain=prioriza altura con slack, luego gain/frag"
+        ),
+    )
+    parser.add_argument(
+        "--height-slack-mm",
+        type=int,
+        default=0,
+        help="Slack de altura para min_height_slack_then_gain (mm)",
     )
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
     parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
@@ -256,6 +265,7 @@ def run_simulation(
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
     score_mode: str = "gain_frag",
+    height_slack_mm: int = 0,
     time_budget_ms: int = 120,
     micro_plan: bool = False,
     micro_depth: int = 3,
@@ -394,6 +404,7 @@ def run_simulation(
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             score_mode=score_mode,
+            height_slack_mm=max(0, int(height_slack_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -467,6 +478,7 @@ def run_simulation(
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
             "score_mode": score_mode,
+            "height_slack_mm": int(max(0, int(height_slack_mm))),
             "time_budget_ms": time_budget_ms,
             "micro_plan": bool(micro_plan),
             "micro_depth": int(micro_depth),
@@ -534,6 +546,7 @@ def main() -> None:
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
         score_mode=str(args.score_mode),
+        height_slack_mm=int(args.height_slack_mm),
         time_budget_ms=args.time_budget_ms,
         micro_plan=bool(args.micro_plan),
         micro_depth=int(args.micro_depth),
