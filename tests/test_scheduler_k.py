@@ -6,8 +6,9 @@ from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, Sch
 
 
 class FakePallet:
-    def __init__(self, gains: dict[int, float]) -> None:
+    def __init__(self, gains: dict[int, float], heights: dict[int, int] | None = None) -> None:
         self._gains = gains
+        self._heights = heights or {}
 
     def preview_place(self, box: Box) -> PlacementPreview:
         gain = float(self._gains.get(int(box.box_id), 0.0))
@@ -27,6 +28,7 @@ class FakePallet:
             placement=placement,
             packing_gain=gain,
             fragmentation=0.0,
+            height_after_mm=self._heights.get(int(box.box_id)),
             infeasible_reason=None,
             debug=None,
         )
@@ -65,3 +67,17 @@ def test_scheduler_k1_picks_head() -> None:
     plan = scheduler.choose_action(sim_state)
     assert plan is not None
     assert plan.buffer_index == 0
+
+
+def test_scheduler_min_height_then_gain_prefers_lower_height() -> None:
+    boxes = [
+        Box(box_id=1, length_mm=1, width_mm=1, height_mm=1, timestamp=0.0, destination=1),
+        Box(box_id=2, length_mm=1, width_mm=1, height_mm=1, timestamp=0.0, destination=1),
+    ]
+    pallets = {1: FakePallet({1: 0.9, 2: 1.0}, heights={1: 1000, 2: 900})}
+    sim_state = SchedulerSimState(now=0.0, ramps={1: boxes}, pallets=pallets, pallet_blocked=set())
+    scheduler = SchedulerV1(SchedulerConfig(lookahead_k=2, score_mode="min_height_then_gain"))
+    plan = scheduler.choose_action(sim_state)
+    assert plan is not None
+    assert plan.buffer_index == 1
+    assert int(getattr(plan.preview, "height_after_mm", -1)) == 900
