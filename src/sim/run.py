@@ -90,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
+    parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
+    parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
+    parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
+    parser.add_argument(
+        "--micro-topk",
+        type=int,
+        default=15,
+        help="Max candidatos factibles a expandir por paso del micro-planner",
+    )
     parser.add_argument("--weight-col", type=str, default=None, help="Columna peso (opcional)")
     parser.add_argument(
         "--max-tries-per-item",
@@ -241,6 +250,10 @@ def run_simulation(
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
     time_budget_ms: int = 120,
+    micro_plan: bool = False,
+    micro_depth: int = 3,
+    micro_width: int = 8,
+    micro_topk: int = 15,
     weight_col: str | None = None,
     max_tries_per_item: int = 0,
     max_candidates: int = 0,
@@ -356,6 +369,10 @@ def run_simulation(
             time_penalty_weight=time_penalty_weight,
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
+            micro_plan_enabled=bool(micro_plan),
+            micro_plan_depth=int(micro_depth),
+            micro_plan_width=int(micro_width),
+            micro_plan_topk_per_step=int(micro_topk),
             priority_weight=priority_weight,
             stability_mode=stability_mode,
             min_support_ratio=min_support,
@@ -442,6 +459,10 @@ def run_simulation(
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
             "time_budget_ms": time_budget_ms,
+            "micro_plan": bool(micro_plan),
+            "micro_depth": int(micro_depth),
+            "micro_width": int(micro_width),
+            "micro_topk": int(micro_topk),
             "weight_col": weight_col,
             "max_tries_per_item": max_tries_per_item,
             "max_candidates": max_candidates,
@@ -504,6 +525,10 @@ def main() -> None:
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
         time_budget_ms=args.time_budget_ms,
+        micro_plan=bool(args.micro_plan),
+        micro_depth=int(args.micro_depth),
+        micro_width=int(args.micro_width),
+        micro_topk=int(args.micro_topk),
         weight_col=args.weight_col,
         max_tries_per_item=int(args.max_tries_per_item),
         max_candidates=int(args.max_candidates),

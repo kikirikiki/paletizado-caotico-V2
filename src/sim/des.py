@@ -542,6 +542,8 @@ def simulate(
         box_id = details.get("box_id")
         dims = details.get("dims")
         pallet_id = details.get("pallet_id")
+        micro_plan_enabled = details.get("micro_plan_enabled")
+        micro_plan_feasible = details.get("micro_plan_feasible_first_candidates")
         if waiting_box is not None:
             if box_id is None:
                 box_id = waiting_box.box_id
@@ -562,6 +564,10 @@ def simulate(
                 "window_total": int(window_total),
                 "window_by_ramp": {int(rid): int(size) for rid, size in window_by_ramp.items()},
                 "remaining_total": int(total_remaining_boxes()),
+                "micro_plan_enabled": bool(micro_plan_enabled) if micro_plan_enabled is not None else None,
+                "micro_plan_feasible_first_candidates": (
+                    int(micro_plan_feasible) if micro_plan_feasible is not None else None
+                ),
             }
         )
 
