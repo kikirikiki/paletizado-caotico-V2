@@ -23,6 +23,7 @@ class _LayerCandidate:
     width_mm: int
     z_mm: int
     next_height_mm: int
+    height_after_mm: int
     packing_gain: float
     fragmentation: float
     score_delta: float
@@ -281,6 +282,7 @@ class PalletModel:
                 placement=placement,
                 packing_gain=best.packing_gain,
                 fragmentation=best.fragmentation,
+                height_after_mm=int(best.height_after_mm),
                 score_adjustment=best.score_delta,
                 infeasible_reason=None,
                 debug=debug,
@@ -551,6 +553,7 @@ class PalletModel:
                         width_mm=w_mm,
                         z_mm=adjusted.z_mm,
                         next_height_mm=next_height,
+                        height_after_mm=int(layer.z_mm + next_height),
                         packing_gain=weighted_gain,
                         fragmentation=weighted_frag,
                         score_delta=score_delta,

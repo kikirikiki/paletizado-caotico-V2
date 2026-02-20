@@ -36,6 +36,7 @@ class PolicyConfig:
     loadbear_penalty_weight: float = 1.0
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
+    score_mode: str = "gain_frag"
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -105,6 +106,7 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        score_mode: str = "gain_frag",
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
@@ -128,6 +130,7 @@ class PolicyPackerScheduler:
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
             priority_weight=priority_weight,
+            score_mode=score_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -151,6 +154,7 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            score_mode=score_mode,
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -398,6 +402,40 @@ class PolicyPackerScheduler:
             int(k): int(v)
             for k, v in dict(getattr(self._scheduler, "micro_plan_best_seq_len_hist", {}) or {}).items()
         }
+        score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
+        height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
+        height_hist_sorted = sorted(height_hist)
+        height_count = len(height_hist_sorted)
+
+        def _percentile(values: list[int], q: float) -> float:
+            if not values:
+                return 0.0
+            if len(values) == 1:
+                return float(values[0])
+            pos = (len(values) - 1) * max(0.0, min(1.0, float(q)))
+            lo = int(pos)
+            hi = min(lo + 1, len(values) - 1)
+            if lo == hi:
+                return float(values[lo])
+            frac = pos - lo
+            return float(values[lo] + (values[hi] - values[lo]) * frac)
+
+        height_min = float(height_hist_sorted[0]) if height_hist_sorted else 0.0
+        height_max = float(height_hist_sorted[-1]) if height_hist_sorted else 0.0
+        height_mean = float(sum(height_hist_sorted) / max(1, height_count))
+        above_min_count = int(getattr(self._scheduler, "selected_height_above_min_feasible_count", 0) or 0)
+        choices_count = int(getattr(self._scheduler, "selected_height_choices_count", 0) or 0)
+
+        kpis["score_mode"] = score_mode
+        kpis["selected_height_after_mm_count"] = int(height_count)
+        kpis["selected_height_after_mm_min"] = height_min
+        kpis["selected_height_after_mm_mean"] = height_mean
+        kpis["selected_height_after_mm_max"] = height_max
+        kpis["selected_height_after_mm_p50"] = _percentile(height_hist_sorted, 0.50)
+        kpis["selected_height_after_mm_p90"] = _percentile(height_hist_sorted, 0.90)
+        kpis["selected_height_after_mm_p99"] = _percentile(height_hist_sorted, 0.99)
+        kpis["selected_height_above_min_feasible_count"] = above_min_count
+        kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
         return kpis
 
     def _collect_pallets(self, ramps: Mapping[int, Any]) -> dict[int | str, PalletModel]:

@@ -13,6 +13,9 @@ from ..packer.pallet_model import PalletModel
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
 
+ALLOWED_SCORE_MODES = ("gain_frag", "min_height_then_gain")
+
+
 @dataclass(frozen=True)
 class SchedulerConfig:
     lookahead_k: int = 1
@@ -27,6 +30,7 @@ class SchedulerConfig:
     max_candidates: int = 0
     max_seconds_per_item: float = 0.0
     heartbeat_sec: float = 1.0
+    score_mode: str = "gain_frag"
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -51,6 +55,10 @@ class SchedulerConfig:
         object.__setattr__(self, "micro_plan_width", max(1, int(self.micro_plan_width)))
         object.__setattr__(self, "micro_plan_topk_per_step", max(1, int(self.micro_plan_topk_per_step)))
         object.__setattr__(self, "micro_plan_window_total", int(self.micro_plan_window_total))
+        mode = str(self.score_mode or "gain_frag").strip().lower()
+        if mode not in ALLOWED_SCORE_MODES:
+            raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
+        object.__setattr__(self, "score_mode", mode)
 
 
 @dataclass(frozen=True)
@@ -96,11 +104,31 @@ class _BeamAction:
     max_priority: float
 
 
+@dataclass(frozen=True)
+class _ScoreTerms:
+    packing_gain: float
+    fragmentation: float
+    score_adjustment: float
+    dt_extra: float
+    time_cost: float
+    starv_cost: float
+    priority_score: float
+    scalar_score: float
+    height_after_mm: int
+
+
 @dataclass
 class _BeamNode:
     ramps: dict[int, _BeamRampState]
     pallets: dict[int | str, PalletModel]
     score_sum: float = 0.0
+    gain_sum: float = 0.0
+    fragmentation_sum: float = 0.0
+    score_adjustment_sum: float = 0.0
+    time_cost_sum: float = 0.0
+    starv_cost_sum: float = 0.0
+    priority_sum: float = 0.0
+    height_after_mm: int = 0
     placed_count: int = 0
     first_plan: PickPlan | None = None
 
@@ -127,6 +155,9 @@ class SchedulerV1:
         self.micro_plan_depth_effective_sum = 0.0
         self.micro_plan_depth_effective_count = 0
         self.micro_plan_best_seq_len_hist: dict[int, int] = {}
+        self.selected_height_after_mm_hist: list[int] = []
+        self.selected_height_above_min_feasible_count = 0
+        self.selected_height_choices_count = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -163,6 +194,10 @@ class SchedulerV1:
             ) + 1
 
             if micro_plan is not None:
+                self._record_height_decision(
+                    selected_height=micro_stats.get("selected_height_after_mm"),
+                    min_feasible_height=micro_stats.get("feasible_first_min_height_mm"),
+                )
                 self.last_eval_stats = {
                     "items_evaluated": 0,
                     "items_feasible": 0,
@@ -206,9 +241,12 @@ class SchedulerV1:
         next_heartbeat = time.perf_counter() + heartbeat_sec if heartbeat_sec > 0 else None
 
         best: PickPlan | None = None
+        use_min_height_mode = self.config.score_mode == "min_height_then_gain"
+        best_key: tuple[Any, ...] | None = None
         best_score = float("-inf")
         best_dt = float("inf")
         best_timestamp = float("inf")
+        feasible_min_height: int | None = None
         cutoff = False
         cutoff_reason = ""
 
@@ -318,21 +356,40 @@ class SchedulerV1:
                     continue
                 items_feasible += 1
 
-                score, dt_extra = self._score_candidate(
+                height_after_mm = self._resolve_height_after_mm(preview, pallet)
+                feasible_min_height = (
+                    int(height_after_mm)
+                    if feasible_min_height is None
+                    else min(int(feasible_min_height), int(height_after_mm))
+                )
+
+                terms = self._score_candidate(
                     now=float(sim_state.now),
                     box=box,
                     idx=idx,
                     preview=preview,
                     max_priority=max_priority,
+                    height_after_mm=height_after_mm,
                 )
+                score = float(terms.scalar_score)
+                dt_extra = float(terms.dt_extra)
 
-                if (
-                    score > best_score
-                    or (
-                        score == best_score
-                        and (dt_extra < best_dt or (dt_extra == best_dt and box.timestamp < best_timestamp))
+                if use_min_height_mode:
+                    candidate_key = self._min_height_then_gain_key(terms=terms, box=box)
+                    is_better = best_key is None or candidate_key < best_key
+                else:
+                    candidate_key = ()
+                    is_better = (
+                        score > best_score
+                        or (
+                            score == best_score
+                            and (dt_extra < best_dt or (dt_extra == best_dt and box.timestamp < best_timestamp))
+                        )
                     )
-                ):
+
+                if is_better:
+                    if use_min_height_mode:
+                        best_key = tuple(candidate_key)
                     best_score = score
                     best_dt = dt_extra
                     best_timestamp = box.timestamp
@@ -365,6 +422,14 @@ class SchedulerV1:
             "cutoff_reason": cutoff_reason,
         }
 
+        if best is not None:
+            pallet_for_best = sim_state.pallets.get(best.pallet_id)
+            selected_height = self._resolve_height_after_mm(best.preview, pallet_for_best)
+            self._record_height_decision(
+                selected_height=selected_height,
+                min_feasible_height=feasible_min_height,
+            )
+
         if items_evaluated > 0 and items_feasible == 0 and not cutoff and not self.last_blocked_pallets:
             self.last_deadlock = True
             self.last_deadlock_item = deadlock_item or {
@@ -389,6 +454,13 @@ class SchedulerV1:
             ramps=self._build_beam_ramps(sim_state),
             pallets=dict(sim_state.pallets),
             score_sum=0.0,
+            gain_sum=0.0,
+            fragmentation_sum=0.0,
+            score_adjustment_sum=0.0,
+            time_cost_sum=0.0,
+            starv_cost_sum=0.0,
+            priority_sum=0.0,
+            height_after_mm=self._state_height_after_mm(dict(sim_state.pallets)),
             placed_count=0,
             first_plan=None,
         )
@@ -397,6 +469,7 @@ class SchedulerV1:
 
         nodes_expanded = 0
         feasible_first_candidates = 0
+        feasible_first_min_height: int | None = None
         depth_effective = 0
         cutoff = False
         cutoff_reason = ""
@@ -418,13 +491,13 @@ class SchedulerV1:
                 if not actions:
                     continue
 
-                node_children: list[tuple[_BeamNode, float]] = []
+                node_children: list[_BeamNode] = []
                 for action in actions:
                     if deadline is not None and time.perf_counter() >= deadline:
                         cutoff = True
                         cutoff_reason = "time_budget"
                         break
-                    child, step_score = self._expand_beam_node(
+                    child = self._expand_beam_node(
                         node=node,
                         action=action,
                         sim_state=sim_state,
@@ -434,15 +507,19 @@ class SchedulerV1:
                     nodes_expanded += 1
                     if depth == 0:
                         feasible_first_candidates += 1
-                    node_children.append((child, float(step_score)))
+                        first_h = self._resolve_height_after_mm(child.first_plan.preview) if child.first_plan else None
+                        if first_h is not None:
+                            feasible_first_min_height = (
+                                int(first_h)
+                                if feasible_first_min_height is None
+                                else min(int(feasible_first_min_height), int(first_h))
+                            )
+                    node_children.append(child)
 
                 if node_children:
-                    node_children.sort(
-                        key=lambda item: (float(item[1]), float(item[0].score_sum)),
-                        reverse=True,
-                    )
+                    node_children.sort(key=self._beam_rank_key, reverse=True)
                     keep = min(len(node_children), topk_per_step)
-                    next_beam.extend(child for child, _ in node_children[:keep])
+                    next_beam.extend(node_children[:keep])
 
                 if cutoff:
                     break
@@ -464,6 +541,7 @@ class SchedulerV1:
         best_seq_len = int(best_node.placed_count)
         stats = {
             "enabled": True,
+            "score_mode": str(self.config.score_mode),
             "depth_limit": int(depth_limit),
             "width": int(beam_width),
             "topk_per_step": int(topk_per_step),
@@ -471,6 +549,14 @@ class SchedulerV1:
             "depth_effective": int(depth_effective),
             "best_seq_len": int(best_seq_len),
             "feasible_first_candidates": int(feasible_first_candidates),
+            "feasible_first_min_height_mm": (
+                int(feasible_first_min_height) if feasible_first_min_height is not None else None
+            ),
+            "selected_height_after_mm": (
+                self._resolve_height_after_mm(best_node.first_plan.preview)
+                if best_node.first_plan is not None
+                else None
+            ),
             "cutoff": bool(cutoff),
             "cutoff_reason": str(cutoff_reason),
         }
@@ -479,8 +565,19 @@ class SchedulerV1:
             return None, stats
         return best_node.first_plan, stats
 
-    @staticmethod
-    def _beam_rank_key(node: _BeamNode) -> tuple[int, float]:
+    def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
+        if self.config.score_mode == "min_height_then_gain":
+            return (
+                int(node.placed_count),
+                -int(node.height_after_mm),
+                float(node.gain_sum),
+                -float(node.fragmentation_sum),
+                -float(node.time_cost_sum),
+                -float(node.starv_cost_sum),
+                float(node.priority_sum),
+                float(node.score_adjustment_sum),
+                float(node.score_sum),
+            )
         return (int(node.placed_count), float(node.score_sum))
 
     def _build_beam_ramps(self, sim_state: SchedulerSimState) -> dict[int, _BeamRampState]:
@@ -576,35 +673,37 @@ class SchedulerV1:
         node: _BeamNode,
         action: _BeamAction,
         sim_state: SchedulerSimState,
-    ) -> tuple[_BeamNode | None, float]:
+    ) -> _BeamNode | None:
         ramp = node.ramps.get(action.ramp_id)
         if ramp is None:
-            return None, 0.0
+            return None
         idx = int(action.buffer_index)
         if idx < 0 or idx >= len(ramp.queue):
-            return None, 0.0
+            return None
 
         box = ramp.queue[idx]
         pallet_id = box.destination
         if pallet_id is None:
-            return None, 0.0
+            return None
         if pallet_id in sim_state.pallet_blocked:
-            return None, 0.0
+            return None
 
         pallet = node.pallets.get(pallet_id)
         if pallet is None:
-            return None, 0.0
+            return None
 
         preview = self._preview_place(pallet, box)
         if not preview.feasible:
-            return None, 0.0
+            return None
 
-        score, dt_extra = self._score_candidate(
+        height_after_mm = self._resolve_height_after_mm(preview, pallet)
+        terms = self._score_candidate(
             now=float(sim_state.now),
             box=box,
             idx=idx,
             preview=preview,
             max_priority=float(action.max_priority),
+            height_after_mm=height_after_mm,
         )
 
         first_plan = node.first_plan
@@ -615,15 +714,15 @@ class SchedulerV1:
                 box_id=box.box_id,
                 pallet_id=pallet_id,
                 preview=preview,
-                score=float(score),
-                dt_extra=float(dt_extra),
+                score=float(terms.scalar_score),
+                dt_extra=float(terms.dt_extra),
             )
 
         pallet_clone = copy.deepcopy(pallet)
         try:
             pallet_clone.commit_place(preview)
         except Exception:
-            return None, 0.0
+            return None
 
         new_pallets = dict(node.pallets)
         new_pallets[pallet_id] = pallet_clone
@@ -634,11 +733,18 @@ class SchedulerV1:
         child = _BeamNode(
             ramps=new_ramps,
             pallets=new_pallets,
-            score_sum=float(node.score_sum) + float(score),
+            score_sum=float(node.score_sum) + float(terms.scalar_score),
+            gain_sum=float(node.gain_sum) + float(terms.packing_gain),
+            fragmentation_sum=float(node.fragmentation_sum) + float(terms.fragmentation),
+            score_adjustment_sum=float(node.score_adjustment_sum) + float(terms.score_adjustment),
+            time_cost_sum=float(node.time_cost_sum) + float(terms.time_cost),
+            starv_cost_sum=float(node.starv_cost_sum) + float(terms.starv_cost),
+            priority_sum=float(node.priority_sum) + float(terms.priority_score),
+            height_after_mm=int(self._state_height_after_mm(new_pallets)),
             placed_count=int(node.placed_count) + 1,
             first_plan=first_plan,
         )
-        return child, float(score)
+        return child
 
     @staticmethod
     def _beam_pick_and_refill(ramp: _BeamRampState, idx: int) -> _BeamRampState:
@@ -671,7 +777,8 @@ class SchedulerV1:
         idx: int,
         preview: PlacementPreview,
         max_priority: float,
-    ) -> tuple[float, float]:
+        height_after_mm: int,
+    ) -> _ScoreTerms:
         dt_extra = selection_dt(idx, self.config.t_select_base, self.config.t_select_step)
         time_cost = time_penalty(dt_extra, self.config.time_penalty_weight)
         age = max(0.0, float(now) - float(box.timestamp))
@@ -688,7 +795,87 @@ class SchedulerV1:
             - starv_cost
             + priority_score
         )
-        return float(score), float(dt_extra)
+        return _ScoreTerms(
+            packing_gain=float(preview.packing_gain),
+            fragmentation=float(preview.fragmentation),
+            score_adjustment=float(getattr(preview, "score_adjustment", 0.0) or 0.0),
+            dt_extra=float(dt_extra),
+            time_cost=float(time_cost),
+            starv_cost=float(starv_cost),
+            priority_score=float(priority_score),
+            scalar_score=float(score),
+            height_after_mm=int(height_after_mm),
+        )
+
+    @staticmethod
+    def _min_height_then_gain_key(terms: _ScoreTerms, box: Box) -> tuple[Any, ...]:
+        return (
+            int(terms.height_after_mm),
+            -float(terms.packing_gain),
+            float(terms.fragmentation),
+            -float(terms.score_adjustment),
+            float(terms.time_cost),
+            float(terms.starv_cost),
+            -float(terms.priority_score),
+            float(terms.dt_extra),
+            float(box.timestamp),
+            str(getattr(box, "box_id", "")),
+        )
+
+    @staticmethod
+    def _resolve_height_after_mm(preview: PlacementPreview, pallet: PalletModel | None = None) -> int:
+        height_after = getattr(preview, "height_after_mm", None)
+        if height_after is not None:
+            try:
+                return int(height_after)
+            except (TypeError, ValueError):
+                pass
+
+        placement = getattr(preview, "placement", None)
+        if placement is not None:
+            try:
+                return int(getattr(placement, "z_mm", 0)) + int(getattr(placement, "height_mm", 0))
+            except (TypeError, ValueError):
+                pass
+
+        if pallet is not None:
+            try:
+                return int(pallet.current_height_mm())
+            except Exception:
+                pass
+        return 0
+
+    @staticmethod
+    def _state_height_after_mm(pallets: Mapping[int | str, PalletModel]) -> int:
+        if not pallets:
+            return 0
+        max_height = 0
+        for pallet in pallets.values():
+            try:
+                max_height = max(max_height, int(pallet.current_height_mm()))
+            except Exception:
+                continue
+        return int(max_height)
+
+    def _record_height_decision(self, *, selected_height: Any, min_feasible_height: Any) -> None:
+        if selected_height is None:
+            return
+        try:
+            selected = int(selected_height)
+        except (TypeError, ValueError):
+            return
+
+        self.selected_height_after_mm_hist.append(selected)
+        self.selected_height_choices_count += 1
+
+        if min_feasible_height is None:
+            return
+        try:
+            min_height = int(min_feasible_height)
+        except (TypeError, ValueError):
+            return
+        if selected > min_height:
+            self.selected_height_above_min_feasible_count += 1
 
     def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
         kwargs: dict[str, object] = {}

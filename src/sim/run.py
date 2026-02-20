@@ -89,6 +89,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
+    parser.add_argument(
+        "--score-mode",
+        choices=["gain_frag", "min_height_then_gain"],
+        default="gain_frag",
+        help="gain_frag=score actual; min_height_then_gain=prioriza menor altura final, luego gain/frag",
+    )
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
     parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
@@ -249,6 +255,7 @@ def run_simulation(
     priority_mode: str = "none",
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
+    score_mode: str = "gain_frag",
     time_budget_ms: int = 120,
     micro_plan: bool = False,
     micro_depth: int = 3,
@@ -386,6 +393,7 @@ def run_simulation(
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            score_mode=score_mode,
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -458,6 +466,7 @@ def run_simulation(
             "priority_mode": priority_mode,
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
+            "score_mode": score_mode,
             "time_budget_ms": time_budget_ms,
             "micro_plan": bool(micro_plan),
             "micro_depth": int(micro_depth),
@@ -524,6 +533,7 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        score_mode=str(args.score_mode),
         time_budget_ms=args.time_budget_ms,
         micro_plan=bool(args.micro_plan),
         micro_depth=int(args.micro_depth),
