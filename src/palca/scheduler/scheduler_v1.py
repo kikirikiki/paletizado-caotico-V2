@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import inspect
 import logging
@@ -26,6 +27,12 @@ class SchedulerConfig:
     max_candidates: int = 0
     max_seconds_per_item: float = 0.0
     heartbeat_sec: float = 1.0
+    micro_plan_enabled: bool = False
+    micro_plan_depth: int = 3
+    micro_plan_width: int = 8
+    micro_plan_topk_per_step: int = 15
+    micro_plan_window_total: int = 15
+    micro_plan_window_strategy: str = "fifo_ramp"
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -40,6 +47,10 @@ class SchedulerConfig:
             lookahead = alias
         object.__setattr__(self, "lookahead_k", lookahead)
         object.__setattr__(self, "pick_window", alias)
+        object.__setattr__(self, "micro_plan_depth", max(1, int(self.micro_plan_depth)))
+        object.__setattr__(self, "micro_plan_width", max(1, int(self.micro_plan_width)))
+        object.__setattr__(self, "micro_plan_topk_per_step", max(1, int(self.micro_plan_topk_per_step)))
+        object.__setattr__(self, "micro_plan_window_total", int(self.micro_plan_window_total))
 
 
 @dataclass(frozen=True)
@@ -54,13 +65,44 @@ class PickPlan:
 
 
 @dataclass(frozen=True)
+class SchedulerRampState:
+    queue: tuple[Box, ...] = ()
+    upstream: tuple[Box, ...] = ()
+    capacity: int = 0
+
+
+@dataclass(frozen=True)
 class SchedulerSimState:
     now: float
     ramps: Mapping[int, Sequence[Box]]
     pallets: Mapping[int | str, PalletModel]
     pallet_blocked: set[int | str]
+    ramp_states: Mapping[int, SchedulerRampState] = field(default_factory=dict)
     ramp_sizes: Mapping[int, int] = field(default_factory=dict)
     remaining_total: int = 0
+
+
+@dataclass
+class _BeamRampState:
+    queue: list[Box]
+    upstream: list[Box]
+    capacity: int
+
+
+@dataclass(frozen=True)
+class _BeamAction:
+    ramp_id: int
+    buffer_index: int
+    max_priority: float
+
+
+@dataclass
+class _BeamNode:
+    ramps: dict[int, _BeamRampState]
+    pallets: dict[int | str, PalletModel]
+    score_sum: float = 0.0
+    placed_count: int = 0
+    first_plan: PickPlan | None = None
 
 
 class SchedulerV1:
@@ -71,19 +113,95 @@ class SchedulerV1:
         self.last_deadlock = False
         self.last_deadlock_item: dict[str, Any] | None = None
         self.last_eval_stats: dict[str, Any] = {}
+        self.last_micro_plan_stats: dict[str, Any] = {}
+        self.last_micro_feasible_first_candidates = 0
         self._logger = logging.getLogger(__name__)
+
+        self.micro_plan_calls = 0
+        self.micro_plan_fallback_greedy = 0
+        self.micro_plan_time_ms_sum = 0.0
+        self.micro_plan_time_ms_min: float | None = None
+        self.micro_plan_time_ms_max = 0.0
+        self.micro_plan_time_ms_count = 0
+        self.micro_plan_nodes_expanded_total = 0
+        self.micro_plan_depth_effective_sum = 0.0
+        self.micro_plan_depth_effective_count = 0
+        self.micro_plan_best_seq_len_hist: dict[int, int] = {}
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
         self.last_deadlock = False
         self.last_deadlock_item = None
         self.last_eval_stats = {}
+        self.last_micro_plan_stats = {}
+        self.last_micro_feasible_first_candidates = 0
         k = max(1, int(self.config.lookahead_k))
 
         deadline = None
         if self.config.time_budget_ms and self.config.time_budget_ms > 0:
             deadline = time.perf_counter() + (float(self.config.time_budget_ms) / 1000.0)
 
+        micro_enabled = bool(self.config.micro_plan_enabled)
+        micro_stats: dict[str, Any] = {}
+        if micro_enabled:
+            self.micro_plan_calls += 1
+            micro_start = time.perf_counter()
+            micro_plan, micro_stats = self._choose_action_micro(sim_state, deadline)
+            micro_elapsed_ms = (time.perf_counter() - micro_start) * 1000.0
+            self._record_micro_time(micro_elapsed_ms)
+
+            self.last_micro_plan_stats = dict(micro_stats)
+            self.last_micro_feasible_first_candidates = int(
+                micro_stats.get("feasible_first_candidates", 0) or 0
+            )
+            self.micro_plan_nodes_expanded_total += int(micro_stats.get("nodes_expanded", 0) or 0)
+            self.micro_plan_depth_effective_sum += float(micro_stats.get("depth_effective", 0.0) or 0.0)
+            self.micro_plan_depth_effective_count += 1
+            best_seq_len = int(micro_stats.get("best_seq_len", 0) or 0)
+            self.micro_plan_best_seq_len_hist[best_seq_len] = int(
+                self.micro_plan_best_seq_len_hist.get(best_seq_len, 0)
+            ) + 1
+
+            if micro_plan is not None:
+                self.last_eval_stats = {
+                    "items_evaluated": 0,
+                    "items_feasible": 0,
+                    "cutoff": bool(micro_stats.get("cutoff", False)),
+                    "cutoff_reason": str(micro_stats.get("cutoff_reason", "")),
+                    "micro_plan": dict(micro_stats),
+                    "mode": "micro",
+                }
+                return micro_plan
+
+            self.micro_plan_fallback_greedy += 1
+
+        plan = self._choose_action_greedy(sim_state, deadline=deadline, lookahead_k=k)
+        if micro_stats:
+            self.last_eval_stats["micro_plan"] = dict(micro_stats)
+        if self.last_deadlock and self.last_deadlock_item is not None and micro_enabled:
+            details = dict(self.last_deadlock_item)
+            details["micro_plan_enabled"] = True
+            details["micro_plan_feasible_first_candidates"] = int(self.last_micro_feasible_first_candidates)
+            self.last_deadlock_item = details
+        return plan
+
+    def _record_micro_time(self, elapsed_ms: float) -> None:
+        elapsed = max(0.0, float(elapsed_ms))
+        self.micro_plan_time_ms_sum += elapsed
+        self.micro_plan_time_ms_count += 1
+        if self.micro_plan_time_ms_min is None:
+            self.micro_plan_time_ms_min = elapsed
+        else:
+            self.micro_plan_time_ms_min = min(float(self.micro_plan_time_ms_min), elapsed)
+        self.micro_plan_time_ms_max = max(float(self.micro_plan_time_ms_max), elapsed)
+
+    def _choose_action_greedy(
+        self,
+        sim_state: SchedulerSimState,
+        *,
+        deadline: float | None,
+        lookahead_k: int,
+    ) -> PickPlan | None:
         heartbeat_sec = float(self.config.heartbeat_sec) if self.config.heartbeat_sec else 0.0
         next_heartbeat = time.perf_counter() + heartbeat_sec if heartbeat_sec > 0 else None
 
@@ -99,7 +217,7 @@ class SchedulerV1:
         deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
-            ramp_items = list(ramp)[:k]
+            ramp_items = list(ramp)[:lookahead_k]
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
                 cutoff_reason = "time_budget"
@@ -200,24 +318,12 @@ class SchedulerV1:
                     continue
                 items_feasible += 1
 
-                dt_extra = selection_dt(idx, self.config.t_select_base, self.config.t_select_step)
-                time_cost = time_penalty(dt_extra, self.config.time_penalty_weight)
-                age = max(0.0, float(sim_state.now) - float(box.timestamp))
-                starv_cost = starvation_penalty(age, self.config.starvation_weight)
-                priority_val = float(getattr(box, "priority", 0.0) or 0.0)
-                if max_priority > 0:
-                    priority_norm = priority_val / max_priority
-                else:
-                    priority_norm = 0.0
-                priority_score = priority_bonus(priority_norm, self.config.priority_weight)
-
-                score = (
-                    float(preview.packing_gain)
-                    - float(preview.fragmentation)
-                    + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
-                    - time_cost
-                    - starv_cost
-                    + priority_score
+                score, dt_extra = self._score_candidate(
+                    now=float(sim_state.now),
+                    box=box,
+                    idx=idx,
+                    preview=preview,
+                    max_priority=max_priority,
                 )
 
                 if (
@@ -269,6 +375,320 @@ class SchedulerV1:
             }
 
         return best
+
+    def _choose_action_micro(
+        self,
+        sim_state: SchedulerSimState,
+        deadline: float | None,
+    ) -> tuple[PickPlan | None, dict[str, Any]]:
+        depth_limit = max(1, int(self.config.micro_plan_depth))
+        beam_width = max(1, int(self.config.micro_plan_width))
+        topk_per_step = max(1, int(self.config.micro_plan_topk_per_step))
+
+        root = _BeamNode(
+            ramps=self._build_beam_ramps(sim_state),
+            pallets=dict(sim_state.pallets),
+            score_sum=0.0,
+            placed_count=0,
+            first_plan=None,
+        )
+        beam: list[_BeamNode] = [root]
+        best_node = root
+
+        nodes_expanded = 0
+        feasible_first_candidates = 0
+        depth_effective = 0
+        cutoff = False
+        cutoff_reason = ""
+
+        for depth in range(depth_limit):
+            if deadline is not None and time.perf_counter() >= deadline:
+                cutoff = True
+                cutoff_reason = "time_budget"
+                break
+
+            next_beam: list[_BeamNode] = []
+            for node in beam:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    cutoff = True
+                    cutoff_reason = "time_budget"
+                    break
+
+                actions = self._enumerate_beam_actions(node.ramps)
+                if not actions:
+                    continue
+
+                node_children: list[tuple[_BeamNode, float]] = []
+                for action in actions:
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        cutoff = True
+                        cutoff_reason = "time_budget"
+                        break
+                    child, step_score = self._expand_beam_node(
+                        node=node,
+                        action=action,
+                        sim_state=sim_state,
+                    )
+                    if child is None:
+                        continue
+                    nodes_expanded += 1
+                    if depth == 0:
+                        feasible_first_candidates += 1
+                    node_children.append((child, float(step_score)))
+
+                if node_children:
+                    node_children.sort(
+                        key=lambda item: (float(item[1]), float(item[0].score_sum)),
+                        reverse=True,
+                    )
+                    keep = min(len(node_children), topk_per_step)
+                    next_beam.extend(child for child, _ in node_children[:keep])
+
+                if cutoff:
+                    break
+
+            if not next_beam:
+                break
+
+            next_beam.sort(key=self._beam_rank_key, reverse=True)
+            beam = next_beam[:beam_width]
+            depth_effective = depth + 1
+
+            for candidate in beam:
+                if self._beam_rank_key(candidate) > self._beam_rank_key(best_node):
+                    best_node = candidate
+
+            if cutoff:
+                break
+
+        best_seq_len = int(best_node.placed_count)
+        stats = {
+            "enabled": True,
+            "depth_limit": int(depth_limit),
+            "width": int(beam_width),
+            "topk_per_step": int(topk_per_step),
+            "nodes_expanded": int(nodes_expanded),
+            "depth_effective": int(depth_effective),
+            "best_seq_len": int(best_seq_len),
+            "feasible_first_candidates": int(feasible_first_candidates),
+            "cutoff": bool(cutoff),
+            "cutoff_reason": str(cutoff_reason),
+        }
+
+        if best_node.first_plan is None:
+            return None, stats
+        return best_node.first_plan, stats
+
+    @staticmethod
+    def _beam_rank_key(node: _BeamNode) -> tuple[int, float]:
+        return (int(node.placed_count), float(node.score_sum))
+
+    def _build_beam_ramps(self, sim_state: SchedulerSimState) -> dict[int, _BeamRampState]:
+        result: dict[int, _BeamRampState] = {}
+        if sim_state.ramp_states:
+            merged_ramp_ids = sorted(set(sim_state.ramps.keys()) | set(sim_state.ramp_states.keys()))
+            for rid in merged_ramp_ids:
+                snapshot = sim_state.ramp_states.get(rid)
+                if snapshot is None:
+                    queue_items = list(sim_state.ramps.get(rid, []))
+                    result[int(rid)] = _BeamRampState(
+                        queue=queue_items,
+                        upstream=[],
+                        capacity=max(0, len(queue_items)),
+                    )
+                    continue
+                queue_items = list(snapshot.queue)
+                upstream_items = list(snapshot.upstream)
+                cap = int(snapshot.capacity) if int(snapshot.capacity) > 0 else len(queue_items)
+                result[int(rid)] = _BeamRampState(
+                    queue=queue_items,
+                    upstream=upstream_items,
+                    capacity=max(0, cap),
+                )
+            return result
+
+        for rid, queue in sim_state.ramps.items():
+            queue_items = list(queue)
+            result[int(rid)] = _BeamRampState(
+                queue=queue_items,
+                upstream=[],
+                capacity=max(0, len(queue_items)),
+            )
+        return result
+
+    def _enumerate_beam_actions(self, ramps: Mapping[int, _BeamRampState]) -> list[_BeamAction]:
+        if not ramps:
+            return []
+        queue_lens = {int(rid): len(state.queue) for rid, state in ramps.items()}
+        allocation = self._allocate_micro_window(queue_lens)
+        actions: list[_BeamAction] = []
+        for rid in sorted(allocation):
+            limit = int(allocation[rid])
+            if limit <= 0:
+                continue
+            queue = ramps[rid].queue
+            max_priority = self._max_priority(queue[:limit])
+            for idx in range(limit):
+                actions.append(_BeamAction(ramp_id=int(rid), buffer_index=int(idx), max_priority=max_priority))
+        return actions
+
+    def _allocate_micro_window(self, queue_lens: Mapping[int, int]) -> dict[int, int]:
+        ramp_ids = sorted(int(rid) for rid in queue_lens)
+        if not ramp_ids:
+            return {}
+
+        total_limit = int(self.config.micro_plan_window_total)
+        if total_limit <= 0:
+            return {rid: max(0, int(queue_lens.get(rid, 0))) for rid in ramp_ids}
+
+        strategy = str(self.config.micro_plan_window_strategy or "fifo_ramp").strip().lower()
+        allocation = {rid: 0 for rid in ramp_ids}
+        remaining = int(total_limit)
+
+        if strategy == "round_robin":
+            while remaining > 0:
+                progressed = False
+                for rid in ramp_ids:
+                    if allocation[rid] >= max(0, int(queue_lens.get(rid, 0))):
+                        continue
+                    allocation[rid] += 1
+                    remaining -= 1
+                    progressed = True
+                    if remaining <= 0:
+                        break
+                if not progressed:
+                    break
+            return allocation
+
+        # default: FIFO por rampa (rampa 1, luego 2, ...)
+        for rid in ramp_ids:
+            if remaining <= 0:
+                break
+            can_take = max(0, int(queue_lens.get(rid, 0)))
+            take = min(can_take, remaining)
+            allocation[rid] = int(take)
+            remaining -= take
+        return allocation
+
+    def _expand_beam_node(
+        self,
+        *,
+        node: _BeamNode,
+        action: _BeamAction,
+        sim_state: SchedulerSimState,
+    ) -> tuple[_BeamNode | None, float]:
+        ramp = node.ramps.get(action.ramp_id)
+        if ramp is None:
+            return None, 0.0
+        idx = int(action.buffer_index)
+        if idx < 0 or idx >= len(ramp.queue):
+            return None, 0.0
+
+        box = ramp.queue[idx]
+        pallet_id = box.destination
+        if pallet_id is None:
+            return None, 0.0
+        if pallet_id in sim_state.pallet_blocked:
+            return None, 0.0
+
+        pallet = node.pallets.get(pallet_id)
+        if pallet is None:
+            return None, 0.0
+
+        preview = self._preview_place(pallet, box)
+        if not preview.feasible:
+            return None, 0.0
+
+        score, dt_extra = self._score_candidate(
+            now=float(sim_state.now),
+            box=box,
+            idx=idx,
+            preview=preview,
+            max_priority=float(action.max_priority),
+        )
+
+        first_plan = node.first_plan
+        if first_plan is None:
+            first_plan = PickPlan(
+                ramp_id=int(action.ramp_id),
+                buffer_index=int(idx),
+                box_id=box.box_id,
+                pallet_id=pallet_id,
+                preview=preview,
+                score=float(score),
+                dt_extra=float(dt_extra),
+            )
+
+        pallet_clone = copy.deepcopy(pallet)
+        try:
+            pallet_clone.commit_place(preview)
+        except Exception:
+            return None, 0.0
+
+        new_pallets = dict(node.pallets)
+        new_pallets[pallet_id] = pallet_clone
+
+        new_ramps = dict(node.ramps)
+        new_ramps[action.ramp_id] = self._beam_pick_and_refill(ramp, idx)
+
+        child = _BeamNode(
+            ramps=new_ramps,
+            pallets=new_pallets,
+            score_sum=float(node.score_sum) + float(score),
+            placed_count=int(node.placed_count) + 1,
+            first_plan=first_plan,
+        )
+        return child, float(score)
+
+    @staticmethod
+    def _beam_pick_and_refill(ramp: _BeamRampState, idx: int) -> _BeamRampState:
+        queue = list(ramp.queue)
+        upstream = list(ramp.upstream)
+        if 0 <= idx < len(queue):
+            queue.pop(idx)
+
+        cap = max(0, int(ramp.capacity))
+        while cap > 0 and len(queue) < cap and upstream:
+            queue.append(upstream.pop(0))
+
+        return _BeamRampState(queue=queue, upstream=upstream, capacity=cap)
+
+    @staticmethod
+    def _max_priority(boxes: Sequence[Box]) -> float:
+        max_priority = 0.0
+        for item in boxes:
+            try:
+                max_priority = max(max_priority, float(getattr(item, "priority", 0.0) or 0.0))
+            except Exception:
+                continue
+        return float(max_priority)
+
+    def _score_candidate(
+        self,
+        *,
+        now: float,
+        box: Box,
+        idx: int,
+        preview: PlacementPreview,
+        max_priority: float,
+    ) -> tuple[float, float]:
+        dt_extra = selection_dt(idx, self.config.t_select_base, self.config.t_select_step)
+        time_cost = time_penalty(dt_extra, self.config.time_penalty_weight)
+        age = max(0.0, float(now) - float(box.timestamp))
+        starv_cost = starvation_penalty(age, self.config.starvation_weight)
+        priority_val = float(getattr(box, "priority", 0.0) or 0.0)
+        priority_norm = (priority_val / max_priority) if max_priority > 0 else 0.0
+        priority_score = priority_bonus(priority_norm, self.config.priority_weight)
+
+        score = (
+            float(preview.packing_gain)
+            - float(preview.fragmentation)
+            + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
+            - time_cost
+            - starv_cost
+            + priority_score
+        )
+        return float(score), float(dt_extra)
 
     def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
         kwargs: dict[str, object] = {}

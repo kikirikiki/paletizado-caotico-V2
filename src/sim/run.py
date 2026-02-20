@@ -28,6 +28,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ramp_cap", type=int, default=15)
     parser.add_argument("--staging_cap", type=int, default=0)
     parser.add_argument("--time_scale", type=float, default=1.0, help="Escala de tiempo (1,2,3,4,...)")
+    parser.add_argument(
+        "--force-destination",
+        type=int,
+        default=None,
+        help="Si se define, fuerza ese destino (1..6) para todas las cajas",
+    )
+    parser.add_argument(
+        "--continuous-pallets",
+        action="store_true",
+        help="Modo continuo: cierra pallet por DEADLOCK y sigue con uno nuevo",
+    )
+
+    parser.add_argument(
+        "--arrival-mode",
+        choices=["excel", "immediate"],
+        default="excel",
+        help="excel=usa timestamps del Excel; immediate=ignora timestamps y hace arrivals en t=0 para simular ventana física constante (ramp_cap)",
+    )
 
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
@@ -72,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
+    parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
+    parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
+    parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
+    parser.add_argument(
+        "--micro-topk",
+        type=int,
+        default=15,
+        help="Max candidatos factibles a expandir por paso del micro-planner",
+    )
     parser.add_argument("--weight-col", type=str, default=None, help="Columna peso (opcional)")
     parser.add_argument(
         "--max-tries-per-item",
@@ -200,6 +227,7 @@ def run_simulation(
     policy: str = "legacy",
     lookahead_k: int = 1,
     time_scale: float = 1.0,
+    arrival_mode: str = "excel",
     # palca
     overhang_mm: int = 0,
     heuristic: str = "baf",
@@ -222,11 +250,17 @@ def run_simulation(
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
     time_budget_ms: int = 120,
+    micro_plan: bool = False,
+    micro_depth: int = 3,
+    micro_width: int = 8,
+    micro_topk: int = 15,
     weight_col: str | None = None,
     max_tries_per_item: int = 0,
     max_candidates: int = 0,
     max_seconds_per_item: float = 0.0,
     watchdog_heartbeat_sec: float = 1.0,
+    force_destination: int | None = None,
+    continuous_pallets: bool = False,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -247,6 +281,9 @@ def run_simulation(
 
     arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
+    if force_destination is not None and not (1 <= int(force_destination) <= 6):
+        raise ValueError("force_destination debe estar entre 1 y 6")
+
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
 
@@ -259,6 +296,24 @@ def run_simulation(
                 length_mm=a.length_mm,
                 width_mm=a.width_mm,
                 height_mm=a.height_mm,
+                weight_kg=a.weight_kg,
+                priority=a.priority,
+            )
+            for a in arrivals
+        ]
+
+    if force_destination is not None:
+        forced_dest = int(force_destination)
+        arrivals = [
+            Arrival(
+                time=a.time,
+                destination=forced_dest,
+                row_idx=a.row_idx,
+                length_mm=a.length_mm,
+                width_mm=a.width_mm,
+                height_mm=a.height_mm,
+                weight_kg=a.weight_kg,
+                priority=a.priority,
             )
             for a in arrivals
         ]
@@ -314,6 +369,10 @@ def run_simulation(
             time_penalty_weight=time_penalty_weight,
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
+            micro_plan_enabled=bool(micro_plan),
+            micro_plan_depth=int(micro_depth),
+            micro_plan_width=int(micro_width),
+            micro_plan_topk_per_step=int(micro_topk),
             priority_weight=priority_weight,
             stability_mode=stability_mode,
             min_support_ratio=min_support,
@@ -346,7 +405,13 @@ def run_simulation(
                     print("[VIZ] attached via decision_policy._viewer/_viewer_rect_cls (fallback)", flush=True)
 
     try:
-        result = simulate(arrivals, config, decision_policy=decision_policy)
+        result = simulate(
+            arrivals,
+            config,
+            decision_policy=decision_policy,
+            continuous_pallets=continuous_pallets,
+            arrival_mode=arrival_mode,
+        )
     finally:
         if viewer is not None:
             if viz_block:
@@ -372,6 +437,7 @@ def run_simulation(
             "policy": policy,
             "lookahead_k": lookahead_k,
             "time_scale": time_scale,
+            "arrival_mode": arrival_mode,
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
             "t_select_base": t_select_base,
@@ -393,11 +459,17 @@ def run_simulation(
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
             "time_budget_ms": time_budget_ms,
+            "micro_plan": bool(micro_plan),
+            "micro_depth": int(micro_depth),
+            "micro_width": int(micro_width),
+            "micro_topk": int(micro_topk),
             "weight_col": weight_col,
             "max_tries_per_item": max_tries_per_item,
             "max_candidates": max_candidates,
             "max_seconds_per_item": max_seconds_per_item,
             "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
+            "force_destination": force_destination,
+            "continuous_pallets": continuous_pallets,
             "viz_dest": viz_dest,
         },
         "metrics": result.to_dict(),
@@ -431,6 +503,7 @@ def main() -> None:
         policy=args.policy,
         lookahead_k=args.k,
         time_scale=args.time_scale,
+        arrival_mode=str(args.arrival_mode),
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
         t_select_base=args.t_select_base,
@@ -452,11 +525,19 @@ def main() -> None:
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
         time_budget_ms=args.time_budget_ms,
+        micro_plan=bool(args.micro_plan),
+        micro_depth=int(args.micro_depth),
+        micro_width=int(args.micro_width),
+        micro_topk=int(args.micro_topk),
         weight_col=args.weight_col,
         max_tries_per_item=int(args.max_tries_per_item),
         max_candidates=int(args.max_candidates),
         max_seconds_per_item=float(args.max_seconds_per_item),
         watchdog_heartbeat_sec=float(args.watchdog_heartbeat_sec),
+        force_destination=(
+            int(args.force_destination) if args.force_destination is not None else None
+        ),
+        continuous_pallets=bool(args.continuous_pallets),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
@@ -466,8 +547,39 @@ def main() -> None:
         viz_dest=int(args.viz_dest),
     )
 
+    if args.print and args.continuous_pallets:
+        _print_continuous_summary(payload, args.force_destination)
+
     if (not args.out) or args.print:
         print(json.dumps(payload, indent=2, ensure_ascii=True))
+
+
+def _print_continuous_summary(payload: dict[str, Any], forced_destination: int | None) -> None:
+    metrics = payload.get("metrics", {})
+    pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
+    seq_by_dest = pallet_kpis.get("continuous_pallet_sequence", {}) if isinstance(pallet_kpis, dict) else {}
+    total_by_dest = pallet_kpis.get("continuous_pallets_total", {}) if isinstance(pallet_kpis, dict) else {}
+    reason_by_dest = pallet_kpis.get("continuous_closures_by_reason", {}) if isinstance(pallet_kpis, dict) else {}
+
+    def _lookup(d: Any, dest: int, default: Any) -> Any:
+        if not isinstance(d, dict):
+            return default
+        if dest in d:
+            return d[dest]
+        key = str(dest)
+        if key in d:
+            return d[key]
+        return default
+
+    destination = int(forced_destination) if forced_destination is not None else 1
+    sequence = _lookup(seq_by_dest, destination, [])
+    pallets_total = _lookup(total_by_dest, destination, len(sequence))
+    closures = _lookup(reason_by_dest, destination, {})
+    boxes_total = int(sum(sequence)) if isinstance(sequence, list) else 0
+
+    print(f"continuous dest={destination} pallets={pallets_total} boxes_total={boxes_total}")
+    print(f"sequence: {sequence} (len={len(sequence)} sum={boxes_total})")
+    print(f"closures_by_reason: {closures}")
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
