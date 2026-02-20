@@ -10,10 +10,16 @@ from typing import Any, Mapping, Sequence
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
+from ..scoring.height_slack import (
+    ScoreMode,
+    SlackDecisionStats,
+    choose_with_height_slack,
+    rank_for_expansion_with_height_slack,
+)
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
 
-ALLOWED_SCORE_MODES = ("gain_frag", "min_height_then_gain")
+ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,7 @@ class SchedulerConfig:
     max_seconds_per_item: float = 0.0
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
+    height_slack_mm: int = 0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -59,6 +66,7 @@ class SchedulerConfig:
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
         object.__setattr__(self, "score_mode", mode)
+        object.__setattr__(self, "height_slack_mm", max(0, int(self.height_slack_mm)))
 
 
 @dataclass(frozen=True)
@@ -133,6 +141,20 @@ class _BeamNode:
     first_plan: PickPlan | None = None
 
 
+@dataclass(frozen=True)
+class _ScoredCandidate:
+    plan: PickPlan
+    box: Box
+    terms: _ScoreTerms
+
+
+@dataclass(frozen=True)
+class _BeamExpansion:
+    node: _BeamNode
+    box: Box
+    terms: _ScoreTerms
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -158,6 +180,9 @@ class SchedulerV1:
         self.selected_height_after_mm_hist: list[int] = []
         self.selected_height_above_min_feasible_count = 0
         self.selected_height_choices_count = 0
+        self.selected_height_slack_decisions_count = 0
+        self.selected_height_slack_filtered_count = 0
+        self.selected_height_slack_set_size_sum = 0.0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -177,7 +202,7 @@ class SchedulerV1:
         if micro_enabled:
             self.micro_plan_calls += 1
             micro_start = time.perf_counter()
-            micro_plan, micro_stats = self._choose_action_micro(sim_state, deadline)
+            micro_plan, micro_stats, micro_slack_stats = self._choose_action_micro(sim_state, deadline)
             micro_elapsed_ms = (time.perf_counter() - micro_start) * 1000.0
             self._record_micro_time(micro_elapsed_ms)
 
@@ -198,6 +223,7 @@ class SchedulerV1:
                     selected_height=micro_stats.get("selected_height_after_mm"),
                     min_feasible_height=micro_stats.get("feasible_first_min_height_mm"),
                 )
+                self._record_slack_decision(micro_slack_stats)
                 self.last_eval_stats = {
                     "items_evaluated": 0,
                     "items_feasible": 0,
@@ -240,18 +266,12 @@ class SchedulerV1:
         heartbeat_sec = float(self.config.heartbeat_sec) if self.config.heartbeat_sec else 0.0
         next_heartbeat = time.perf_counter() + heartbeat_sec if heartbeat_sec > 0 else None
 
-        best: PickPlan | None = None
-        use_min_height_mode = self.config.score_mode == "min_height_then_gain"
-        best_key: tuple[Any, ...] | None = None
-        best_score = float("-inf")
-        best_dt = float("inf")
-        best_timestamp = float("inf")
-        feasible_min_height: int | None = None
         cutoff = False
         cutoff_reason = ""
 
         items_evaluated = 0
         items_feasible = 0
+        feasible_candidates: list[_ScoredCandidate] = []
         deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
@@ -357,11 +377,6 @@ class SchedulerV1:
                 items_feasible += 1
 
                 height_after_mm = self._resolve_height_after_mm(preview, pallet)
-                feasible_min_height = (
-                    int(height_after_mm)
-                    if feasible_min_height is None
-                    else min(int(feasible_min_height), int(height_after_mm))
-                )
 
                 terms = self._score_candidate(
                     now=float(sim_state.now),
@@ -371,37 +386,21 @@ class SchedulerV1:
                     max_priority=max_priority,
                     height_after_mm=height_after_mm,
                 )
-                score = float(terms.scalar_score)
-                dt_extra = float(terms.dt_extra)
-
-                if use_min_height_mode:
-                    candidate_key = self._min_height_then_gain_key(terms=terms, box=box)
-                    is_better = best_key is None or candidate_key < best_key
-                else:
-                    candidate_key = ()
-                    is_better = (
-                        score > best_score
-                        or (
-                            score == best_score
-                            and (dt_extra < best_dt or (dt_extra == best_dt and box.timestamp < best_timestamp))
-                        )
+                feasible_candidates.append(
+                    _ScoredCandidate(
+                        plan=PickPlan(
+                            ramp_id=int(ramp_id),
+                            buffer_index=int(idx),
+                            box_id=box.box_id,
+                            pallet_id=pallet_id,
+                            preview=preview,
+                            score=float(terms.scalar_score),
+                            dt_extra=float(terms.dt_extra),
+                        ),
+                        box=box,
+                        terms=terms,
                     )
-
-                if is_better:
-                    if use_min_height_mode:
-                        best_key = tuple(candidate_key)
-                    best_score = score
-                    best_dt = dt_extra
-                    best_timestamp = box.timestamp
-                    best = PickPlan(
-                        ramp_id=int(ramp_id),
-                        buffer_index=int(idx),
-                        box_id=box.box_id,
-                        pallet_id=pallet_id,
-                        preview=preview,
-                        score=score,
-                        dt_extra=dt_extra,
-                    )
+                )
 
             if cutoff:
                 break
@@ -422,13 +421,30 @@ class SchedulerV1:
             "cutoff_reason": cutoff_reason,
         }
 
-        if best is not None:
-            pallet_for_best = sim_state.pallets.get(best.pallet_id)
-            selected_height = self._resolve_height_after_mm(best.preview, pallet_for_best)
-            self._record_height_decision(
-                selected_height=selected_height,
-                min_feasible_height=feasible_min_height,
+        best_plan: PickPlan | None = None
+        if feasible_candidates:
+            best_by_slack, slack_stats = choose_with_height_slack(
+                candidates=feasible_candidates,
+                score_mode=self.config.score_mode,
+                height_slack_mm=int(self.config.height_slack_mm),
+                height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                gain_frag_key_fn=self._gain_frag_candidate_key,
             )
+            if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                selected = min(
+                    feasible_candidates,
+                    key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+                )
+            else:
+                selected = best_by_slack
+
+            if selected is not None:
+                best_plan = selected.plan
+                self._record_height_decision(
+                    selected_height=selected.terms.height_after_mm,
+                    min_feasible_height=slack_stats.min_height_after_mm,
+                )
+                self._record_slack_decision(slack_stats)
 
         if items_evaluated > 0 and items_feasible == 0 and not cutoff and not self.last_blocked_pallets:
             self.last_deadlock = True
@@ -439,13 +455,13 @@ class SchedulerV1:
                 "dims": None,
             }
 
-        return best
+        return best_plan
 
     def _choose_action_micro(
         self,
         sim_state: SchedulerSimState,
         deadline: float | None,
-    ) -> tuple[PickPlan | None, dict[str, Any]]:
+    ) -> tuple[PickPlan | None, dict[str, Any], SlackDecisionStats | None]:
         depth_limit = max(1, int(self.config.micro_plan_depth))
         beam_width = max(1, int(self.config.micro_plan_width))
         topk_per_step = max(1, int(self.config.micro_plan_topk_per_step))
@@ -470,6 +486,7 @@ class SchedulerV1:
         nodes_expanded = 0
         feasible_first_candidates = 0
         feasible_first_min_height: int | None = None
+        root_slack_stats: SlackDecisionStats | None = None
         depth_effective = 0
         cutoff = False
         cutoff_reason = ""
@@ -491,35 +508,56 @@ class SchedulerV1:
                 if not actions:
                     continue
 
-                node_children: list[_BeamNode] = []
+                expansions: list[_BeamExpansion] = []
                 for action in actions:
                     if deadline is not None and time.perf_counter() >= deadline:
                         cutoff = True
                         cutoff_reason = "time_budget"
                         break
-                    child = self._expand_beam_node(
+                    expansion = self._expand_beam_node(
                         node=node,
                         action=action,
                         sim_state=sim_state,
                     )
-                    if child is None:
+                    if expansion is None:
                         continue
                     nodes_expanded += 1
-                    if depth == 0:
-                        feasible_first_candidates += 1
-                        first_h = self._resolve_height_after_mm(child.first_plan.preview) if child.first_plan else None
-                        if first_h is not None:
-                            feasible_first_min_height = (
-                                int(first_h)
-                                if feasible_first_min_height is None
-                                else min(int(feasible_first_min_height), int(first_h))
-                            )
-                    node_children.append(child)
+                    expansions.append(expansion)
 
-                if node_children:
-                    node_children.sort(key=self._beam_rank_key, reverse=True)
-                    keep = min(len(node_children), topk_per_step)
-                    next_beam.extend(node_children[:keep])
+                if depth == 0:
+                    feasible_first_candidates += len(expansions)
+                    for expansion in expansions:
+                        feasible_first_min_height = (
+                            int(expansion.terms.height_after_mm)
+                            if feasible_first_min_height is None
+                            else min(int(feasible_first_min_height), int(expansion.terms.height_after_mm))
+                        )
+                    if root_slack_stats is None:
+                        _selected_root, root_slack_stats = choose_with_height_slack(
+                            candidates=expansions,
+                            score_mode=self.config.score_mode,
+                            height_slack_mm=int(self.config.height_slack_mm),
+                            height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                            gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+                        )
+
+                if expansions:
+                    if self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
+                        ordered_expansions = rank_for_expansion_with_height_slack(
+                            candidates=expansions,
+                            score_mode=self.config.score_mode,
+                            height_slack_mm=int(self.config.height_slack_mm),
+                            height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                            gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+                        )
+                    else:
+                        ordered_expansions = sorted(
+                            expansions,
+                            key=lambda candidate: self._beam_rank_key(candidate.node),
+                            reverse=True,
+                        )
+                    keep = min(len(ordered_expansions), topk_per_step)
+                    next_beam.extend(candidate.node for candidate in ordered_expansions[:keep])
 
                 if cutoff:
                     break
@@ -557,13 +595,14 @@ class SchedulerV1:
                 if best_node.first_plan is not None
                 else None
             ),
+            "height_slack_mm": int(self.config.height_slack_mm),
             "cutoff": bool(cutoff),
             "cutoff_reason": str(cutoff_reason),
         }
 
         if best_node.first_plan is None:
-            return None, stats
-        return best_node.first_plan, stats
+            return None, stats, root_slack_stats
+        return best_node.first_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.score_mode == "min_height_then_gain":
@@ -673,7 +712,7 @@ class SchedulerV1:
         node: _BeamNode,
         action: _BeamAction,
         sim_state: SchedulerSimState,
-    ) -> _BeamNode | None:
+    ) -> _BeamExpansion | None:
         ramp = node.ramps.get(action.ramp_id)
         if ramp is None:
             return None
@@ -744,7 +783,7 @@ class SchedulerV1:
             placed_count=int(node.placed_count) + 1,
             first_plan=first_plan,
         )
-        return child
+        return _BeamExpansion(node=child, box=box, terms=terms)
 
     @staticmethod
     def _beam_pick_and_refill(ramp: _BeamRampState, idx: int) -> _BeamRampState:
@@ -806,6 +845,22 @@ class SchedulerV1:
             scalar_score=float(score),
             height_after_mm=int(height_after_mm),
         )
+
+    @staticmethod
+    def _gain_frag_sort_key(terms: _ScoreTerms, box: Box) -> tuple[Any, ...]:
+        return (
+            float(terms.scalar_score),
+            -float(terms.dt_extra),
+            -float(box.timestamp),
+        )
+
+    @staticmethod
+    def _gain_frag_candidate_key(candidate: _ScoredCandidate) -> tuple[Any, ...]:
+        return SchedulerV1._gain_frag_sort_key(candidate.terms, candidate.box)
+
+    @staticmethod
+    def _beam_expansion_gain_frag_key(candidate: _BeamExpansion) -> tuple[Any, ...]:
+        return SchedulerV1._gain_frag_sort_key(candidate.terms, candidate.box)
 
     @staticmethod
     def _min_height_then_gain_key(terms: _ScoreTerms, box: Box) -> tuple[Any, ...]:
@@ -876,6 +931,14 @@ class SchedulerV1:
             return
         if selected > min_height:
             self.selected_height_above_min_feasible_count += 1
+
+    def _record_slack_decision(self, stats: SlackDecisionStats | None) -> None:
+        if stats is None:
+            return
+        self.selected_height_slack_decisions_count += 1
+        self.selected_height_slack_set_size_sum += float(max(0, int(stats.slack_set_n)))
+        if bool(stats.slack_set_used) and int(stats.slack_set_n) > 0:
+            self.selected_height_slack_filtered_count += 1
 
     def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
         kwargs: dict[str, object] = {}
