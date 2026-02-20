@@ -10,7 +10,7 @@ from ..domain.pallet_spec import PalletSpec
 from ..packer.controls import BalanceConfig, ControlConfig, LoadBearConfig, StabilityConfig
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring import ScoringWeights
-from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerSimState, SchedulerV1
+from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerRampState, SchedulerSimState, SchedulerV1
 from .kpi_hooks import aggregate_pallet_kpis
 
 
@@ -36,6 +36,8 @@ class PolicyConfig:
     loadbear_penalty_weight: float = 1.0
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
+    score_mode: str = "gain_frag"
+    height_slack_mm: int = 0
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -43,6 +45,10 @@ class PolicyConfig:
     heartbeat_sec: float = 1.0
     settle_max_iter: int = 0
     settle_timeout_ms: int = 0
+    micro_plan_enabled: bool = False
+    micro_plan_depth: int = 3
+    micro_plan_width: int = 8
+    micro_plan_topk_per_step: int = 15
 
 
 class PolicyPackerScheduler:
@@ -101,6 +107,8 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        score_mode: str = "gain_frag",
+        height_slack_mm: int = 0,
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
@@ -108,6 +116,10 @@ class PolicyPackerScheduler:
         heartbeat_sec: float = 1.0,
         settle_max_iter: int = 0,
         settle_timeout_ms: int = 0,
+        micro_plan_enabled: bool = False,
+        micro_plan_depth: int = 3,
+        micro_plan_width: int = 8,
+        micro_plan_topk_per_step: int = 15,
     ) -> "PolicyPackerScheduler":
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
             raise ValueError(f"K no soportado: {lookahead_k}")
@@ -120,10 +132,16 @@ class PolicyPackerScheduler:
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
             priority_weight=priority_weight,
+            score_mode=score_mode,
+            height_slack_mm=height_slack_mm,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
             heartbeat_sec=heartbeat_sec,
+            micro_plan_enabled=micro_plan_enabled,
+            micro_plan_depth=micro_plan_depth,
+            micro_plan_width=micro_plan_width,
+            micro_plan_topk_per_step=micro_plan_topk_per_step,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -139,6 +157,8 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            score_mode=score_mode,
+            height_slack_mm=max(0, int(height_slack_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -146,6 +166,10 @@ class PolicyPackerScheduler:
             heartbeat_sec=heartbeat_sec,
             settle_max_iter=settle_max_iter,
             settle_timeout_ms=settle_timeout_ms,
+            micro_plan_enabled=micro_plan_enabled,
+            micro_plan_depth=micro_plan_depth,
+            micro_plan_width=micro_plan_width,
+            micro_plan_topk_per_step=micro_plan_topk_per_step,
         )
         return cls(config=config)
 
@@ -160,6 +184,7 @@ class PolicyPackerScheduler:
         self.stop_details = {}
         pallets = self._collect_pallets(ramps)
         ramp_boxes = self._collect_ramp_boxes(ramps)
+        ramp_states = self._collect_ramp_states(ramps)
         blocked = {
             dest_id
             for dest_id, state in destinations.items()
@@ -179,6 +204,7 @@ class PolicyPackerScheduler:
         sim_state = SchedulerSimState(
             now=float(now),
             ramps=ramp_boxes,
+            ramp_states=ramp_states,
             pallets=pallets,
             pallet_blocked=blocked,
             ramp_sizes=ramp_sizes,
@@ -360,6 +386,67 @@ class PolicyPackerScheduler:
             "dt_extra_avg_non_head": float(self.dt_extra_non_head_total / max(1, non_head)),
             "deadline_cutoffs_count": deadline_cutoffs,
         }
+        micro_count = int(getattr(self._scheduler, "micro_plan_time_ms_count", 0) or 0)
+        micro_sum = float(getattr(self._scheduler, "micro_plan_time_ms_sum", 0.0) or 0.0)
+        micro_min_raw = getattr(self._scheduler, "micro_plan_time_ms_min", None)
+        micro_min = float(micro_min_raw) if micro_min_raw is not None else 0.0
+        micro_max = float(getattr(self._scheduler, "micro_plan_time_ms_max", 0.0) or 0.0)
+        kpis["micro_plan_calls"] = int(getattr(self._scheduler, "micro_plan_calls", 0) or 0)
+        kpis["micro_plan_fallback_greedy"] = int(getattr(self._scheduler, "micro_plan_fallback_greedy", 0) or 0)
+        kpis["micro_plan_time_ms_min"] = float(micro_min)
+        kpis["micro_plan_time_ms_mean"] = float(micro_sum / max(1, micro_count))
+        kpis["micro_plan_time_ms_max"] = float(micro_max)
+        kpis["micro_plan_nodes_expanded_total"] = int(
+            getattr(self._scheduler, "micro_plan_nodes_expanded_total", 0) or 0
+        )
+        depth_count = int(getattr(self._scheduler, "micro_plan_depth_effective_count", 0) or 0)
+        depth_sum = float(getattr(self._scheduler, "micro_plan_depth_effective_sum", 0.0) or 0.0)
+        kpis["micro_plan_depth_effective_mean"] = float(depth_sum / max(1, depth_count))
+        kpis["micro_plan_best_seq_len_hist"] = {
+            int(k): int(v)
+            for k, v in dict(getattr(self._scheduler, "micro_plan_best_seq_len_hist", {}) or {}).items()
+        }
+        score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
+        height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
+        height_hist_sorted = sorted(height_hist)
+        height_count = len(height_hist_sorted)
+
+        def _percentile(values: list[int], q: float) -> float:
+            if not values:
+                return 0.0
+            if len(values) == 1:
+                return float(values[0])
+            pos = (len(values) - 1) * max(0.0, min(1.0, float(q)))
+            lo = int(pos)
+            hi = min(lo + 1, len(values) - 1)
+            if lo == hi:
+                return float(values[lo])
+            frac = pos - lo
+            return float(values[lo] + (values[hi] - values[lo]) * frac)
+
+        height_min = float(height_hist_sorted[0]) if height_hist_sorted else 0.0
+        height_max = float(height_hist_sorted[-1]) if height_hist_sorted else 0.0
+        height_mean = float(sum(height_hist_sorted) / max(1, height_count))
+        above_min_count = int(getattr(self._scheduler, "selected_height_above_min_feasible_count", 0) or 0)
+        choices_count = int(getattr(self._scheduler, "selected_height_choices_count", 0) or 0)
+        slack_decisions_count = int(getattr(self._scheduler, "selected_height_slack_decisions_count", 0) or 0)
+        slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
+        slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
+        height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
+
+        kpis["score_mode"] = score_mode
+        kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["selected_height_after_mm_count"] = int(height_count)
+        kpis["selected_height_after_mm_min"] = height_min
+        kpis["selected_height_after_mm_mean"] = height_mean
+        kpis["selected_height_after_mm_max"] = height_max
+        kpis["selected_height_after_mm_p50"] = _percentile(height_hist_sorted, 0.50)
+        kpis["selected_height_after_mm_p90"] = _percentile(height_hist_sorted, 0.90)
+        kpis["selected_height_after_mm_p99"] = _percentile(height_hist_sorted, 0.99)
+        kpis["selected_height_above_min_feasible_count"] = above_min_count
+        kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
+        kpis["selected_height_slack_filtered_rate"] = float(slack_filtered_count / max(1, slack_decisions_count))
+        kpis["selected_height_slack_set_size_mean"] = float(slack_set_size_sum / max(1, slack_decisions_count))
         return kpis
 
     def _collect_pallets(self, ramps: Mapping[int, Any]) -> dict[int | str, PalletModel]:
@@ -383,6 +470,19 @@ class PolicyPackerScheduler:
             items = list(queue)[:k]
             ramp_boxes[int(ramp_id)] = [self._to_box(item) for item in items]
         return ramp_boxes
+
+    def _collect_ramp_states(self, ramps: Mapping[int, Any]) -> dict[int, SchedulerRampState]:
+        snapshots: dict[int, SchedulerRampState] = {}
+        for ramp_id, ramp in ramps.items():
+            queue = tuple(self._to_box(item) for item in list(getattr(ramp, "queue", [])))
+            upstream = tuple(self._to_box(item) for item in list(getattr(ramp, "upstream", [])))
+            capacity = int(getattr(ramp, "capacity", len(queue)) or len(queue))
+            snapshots[int(ramp_id)] = SchedulerRampState(
+                queue=queue,
+                upstream=upstream,
+                capacity=max(0, capacity),
+            )
+        return snapshots
 
     def _to_box(self, item: Any) -> Box:
         length_mm = getattr(item, "length_mm", None) or self.config.default_box_length_mm
