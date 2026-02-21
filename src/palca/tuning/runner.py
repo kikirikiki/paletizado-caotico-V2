@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import subprocess
 import time
-from typing import Sequence
+from typing import Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -18,9 +19,19 @@ class RunResult:
     error: str | None = None
 
 
-def run_sim_subprocess(command: Sequence[str], *, json_path: str, timeout_sec: float) -> RunResult:
+def run_sim_subprocess(
+    command: Sequence[str],
+    *,
+    json_path: str,
+    timeout_sec: float,
+    cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> RunResult:
     cmd = [str(part) for part in command]
     started = time.perf_counter()
+    child_env = os.environ.copy()
+    if env:
+        child_env.update({str(k): str(v) for k, v in env.items()})
     try:
         proc = subprocess.run(
             cmd,
@@ -28,6 +39,8 @@ def run_sim_subprocess(command: Sequence[str], *, json_path: str, timeout_sec: f
             text=True,
             check=False,
             timeout=max(1.0, float(timeout_sec)),
+            cwd=cwd,
+            env=child_env,
         )
     except subprocess.TimeoutExpired as exc:
         duration = time.perf_counter() - started
