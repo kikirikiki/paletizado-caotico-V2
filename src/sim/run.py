@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import random
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="excel",
         help="excel=usa timestamps del Excel; immediate=ignora timestamps y hace arrivals en t=0 para simular ventana física constante (ramp_cap)",
     )
+    parser.add_argument("--episode-seed", type=int, default=0, help="Seed para episodio reproducible")
+    parser.add_argument(
+        "--shuffle-window",
+        type=int,
+        default=0,
+        help="Ventana de shuffle por bloques (<=1 deshabilita)",
+    )
+    parser.add_argument(
+        "--shuffle-strength",
+        type=float,
+        default=0.0,
+        help="Intensidad de shuffle (<=0 deshabilita)",
+    )
+    parser.add_argument("--episode-id", type=str, default=None, help="ID de episodio para metadata")
 
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
@@ -165,6 +180,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _is_episode_shuffle_enabled(*, shuffle_window: int, shuffle_strength: float) -> bool:
+    return int(shuffle_window) > 1 and float(shuffle_strength) > 0.0
+
+
+def _apply_episode_shuffle(
+    arrivals: list[Arrival],
+    *,
+    seed: int,
+    shuffle_window: int,
+    shuffle_strength: float,
+) -> list[Arrival]:
+    if not _is_episode_shuffle_enabled(shuffle_window=shuffle_window, shuffle_strength=shuffle_strength):
+        return list(arrivals)
+
+    rng = random.Random(int(seed))
+    items = list(arrivals)
+    window = int(shuffle_window)
+    strength = float(shuffle_strength)
+
+    for start in range(0, len(items), window):
+        stop = min(start + window, len(items))
+        block = items[start:stop]
+        if len(block) <= 1:
+            continue
+        if strength >= 1.0:
+            rng.shuffle(block)
+        else:
+            n_swaps = max(1, int(round(strength * window)))
+            for _ in range(n_swaps):
+                i = rng.randrange(len(block))
+                j = rng.randrange(len(block))
+                block[i], block[j] = block[j], block[i]
+        items[start:stop] = block
+    return items
+
+
 def _detect_destinations(arrivals: list[Arrival]) -> list[int]:
     dests: set[int] = set()
     for a in arrivals:
@@ -243,6 +294,10 @@ def run_simulation(
     lookahead_k: int = 1,
     time_scale: float = 1.0,
     arrival_mode: str = "excel",
+    episode_seed: int = 0,
+    shuffle_window: int = 0,
+    shuffle_strength: float = 0.0,
+    episode_id: str | None = None,
     # palca
     overhang_mm: int = 0,
     heuristic: str = "baf",
@@ -333,6 +388,28 @@ def run_simulation(
                 priority=a.priority,
             )
             for a in arrivals
+        ]
+
+    if _is_episode_shuffle_enabled(shuffle_window=shuffle_window, shuffle_strength=shuffle_strength):
+        ordered = sorted(arrivals, key=lambda a: int(a.row_idx))
+        shuffled = _apply_episode_shuffle(
+            ordered,
+            seed=int(episode_seed),
+            shuffle_window=int(shuffle_window),
+            shuffle_strength=float(shuffle_strength),
+        )
+        arrivals = [
+            Arrival(
+                time=a.time,
+                destination=a.destination,
+                row_idx=idx,
+                length_mm=a.length_mm,
+                width_mm=a.width_mm,
+                height_mm=a.height_mm,
+                weight_kg=a.weight_kg,
+                priority=a.priority,
+            )
+            for idx, a in enumerate(shuffled, start=1)
         ]
 
     pallet_ids = _detect_destinations(arrivals) if viz else None
@@ -457,6 +534,10 @@ def run_simulation(
             "lookahead_k": lookahead_k,
             "time_scale": time_scale,
             "arrival_mode": arrival_mode,
+            "episode_seed": int(episode_seed),
+            "shuffle_window": int(shuffle_window),
+            "shuffle_strength": float(shuffle_strength),
+            "episode_id": episode_id,
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
             "t_select_base": t_select_base,
@@ -525,6 +606,10 @@ def main() -> None:
         lookahead_k=args.k,
         time_scale=args.time_scale,
         arrival_mode=str(args.arrival_mode),
+        episode_seed=int(args.episode_seed),
+        shuffle_window=int(args.shuffle_window),
+        shuffle_strength=float(args.shuffle_strength),
+        episode_id=args.episode_id,
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
         t_select_base=args.t_select_base,
