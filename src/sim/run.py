@@ -4,9 +4,10 @@ import argparse
 import csv
 import json
 import os
-import random
 from pathlib import Path
 from typing import Any
+
+from palca.tuning.episodes import apply_shuffle
 
 from .des import Arrival, SimConfig, simulate
 from .io import load_arrivals
@@ -194,38 +195,6 @@ def _is_episode_shuffle_enabled(*, shuffle_window: int, shuffle_strength: float)
     return int(shuffle_window) > 1 and float(shuffle_strength) > 0.0
 
 
-def _apply_episode_shuffle(
-    arrivals: list[Arrival],
-    *,
-    seed: int,
-    shuffle_window: int,
-    shuffle_strength: float,
-) -> list[Arrival]:
-    if not _is_episode_shuffle_enabled(shuffle_window=shuffle_window, shuffle_strength=shuffle_strength):
-        return list(arrivals)
-
-    rng = random.Random(int(seed))
-    items = list(arrivals)
-    window = int(shuffle_window)
-    strength = float(shuffle_strength)
-
-    for start in range(0, len(items), window):
-        stop = min(start + window, len(items))
-        block = items[start:stop]
-        if len(block) <= 1:
-            continue
-        if strength >= 1.0:
-            rng.shuffle(block)
-        else:
-            n_swaps = max(1, int(round(strength * window)))
-            for _ in range(n_swaps):
-                i = rng.randrange(len(block))
-                j = rng.randrange(len(block))
-                block[i], block[j] = block[j], block[i]
-        items[start:stop] = block
-    return items
-
-
 def _detect_destinations(arrivals: list[Arrival]) -> list[int]:
     dests: set[int] = set()
     for a in arrivals:
@@ -404,11 +373,11 @@ def run_simulation(
 
     if _is_episode_shuffle_enabled(shuffle_window=shuffle_window, shuffle_strength=shuffle_strength):
         ordered = sorted(arrivals, key=lambda a: int(a.row_idx))
-        shuffled = _apply_episode_shuffle(
+        shuffled = apply_shuffle(
             ordered,
             seed=int(episode_seed),
-            shuffle_window=int(shuffle_window),
-            shuffle_strength=float(shuffle_strength),
+            window=int(shuffle_window),
+            strength=float(shuffle_strength),
         )
         arrivals = [
             Arrival(
