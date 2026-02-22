@@ -302,7 +302,14 @@ class PolicyPackerScheduler:
                 _retry_ctx_overrides, retry_event = retry_controller.step(retry_ctx)
                 from_mode = retry_controller.mode
                 retry_controller.mode = ControllerMode.RESCUE
-                rescue_overrides = retry_controller.overrides_for_mode(ControllerMode.RESCUE)
+                attempt1_effective_budget_ms = int(
+                    self._effective_scheduler_config(self._scheduler.config, overrides).time_budget_ms
+                )
+                rescue_overrides, retry_profile = self._build_retry_overrides(
+                    retry_reason=retry_reason,
+                    attempt1_effective_budget_ms=attempt1_effective_budget_ms,
+                    fallback_overrides=retry_controller.overrides_for_mode(ControllerMode.RESCUE),
+                )
                 override_attempts.append(rescue_overrides)
                 if from_mode != ControllerMode.RESCUE:
                     retry_event = ControllerEvent(
@@ -326,7 +333,7 @@ class PolicyPackerScheduler:
                     overrides=rescue_overrides,
                     plan=retry_plan,
                     fail_reason=retry_fail_reason,
-                    note=f"retry_reason={retry_reason}",
+                    note=f"retry_reason={retry_reason} retry_profile={retry_profile}",
                 )
 
                 if retry_plan is not None:
@@ -740,6 +747,49 @@ class PolicyPackerScheduler:
         if "NO_FEASIBLE" in normalized or normalized in {"NO_PLAN", "NO_SPACE"}:
             return "NO_FEASIBLE"
         return normalized
+
+    @staticmethod
+    def _build_retry_overrides(
+        *,
+        retry_reason: str,
+        attempt1_effective_budget_ms: int,
+        fallback_overrides: Overrides,
+    ) -> tuple[Overrides, str]:
+        attempt2_budget_ms = max(int(attempt1_effective_budget_ms), 4500)
+
+        if retry_reason == "HEIGHT_LIMIT":
+            return (
+                Overrides(
+                    score_mode="min_height_then_gain",
+                    height_slack_mm=0,
+                    micro_depth=8,
+                    micro_width=140,
+                    micro_topk=25,
+                    time_budget_ms=attempt2_budget_ms,
+                ),
+                "L2-H",
+            )
+
+        if retry_reason in {"STABILITY", "NO_FEASIBLE"}:
+            return (
+                Overrides(
+                    score_mode="min_height_slack_then_gain",
+                    height_slack_mm=80,
+                    micro_depth=8,
+                    micro_width=160,
+                    micro_topk=30,
+                    time_budget_ms=attempt2_budget_ms,
+                ),
+                "L2-S",
+            )
+
+        return (
+            replace(
+                fallback_overrides,
+                time_budget_ms=max(int(fallback_overrides.time_budget_ms or 0), attempt2_budget_ms),
+            ),
+            "L2-S",
+        )
 
     def _record_controller_debug_attempt(
         self,
