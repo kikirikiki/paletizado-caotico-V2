@@ -114,6 +114,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=15,
         help="Max candidatos factibles a expandir por paso del micro-planner",
     )
+    parser.add_argument(
+        "--online-controller",
+        action="store_true",
+        help="Habilita controller online de modos NORMAL/PUSH/RESCUE sobre palca",
+    )
+    parser.add_argument(
+        "--controller-debug",
+        action="store_true",
+        help="Guarda eventos de debug del online-controller (max 200)",
+    )
     parser.add_argument("--weight-col", type=str, default=None, help="Columna peso (opcional)")
     parser.add_argument(
         "--max-tries-per-item",
@@ -271,6 +281,8 @@ def run_simulation(
     micro_depth: int = 3,
     micro_width: int = 8,
     micro_topk: int = 15,
+    online_controller: bool = False,
+    controller_debug: bool = False,
     weight_col: str | None = None,
     max_tries_per_item: int = 0,
     max_candidates: int = 0,
@@ -390,6 +402,8 @@ def run_simulation(
             micro_plan_depth=int(micro_depth),
             micro_plan_width=int(micro_width),
             micro_plan_topk_per_step=int(micro_topk),
+            online_controller=bool(online_controller),
+            controller_debug=bool(controller_debug),
             priority_weight=priority_weight,
             stability_mode=stability_mode,
             min_support_ratio=min_support,
@@ -443,6 +457,19 @@ def run_simulation(
             else:
                 viewer.finalize(block=False)
 
+    metrics_payload = result.to_dict()
+    controller_metrics: dict[str, Any] = {"enabled": False}
+    if policy == "palca" and decision_policy is not None and hasattr(decision_policy, "collect_controller_metrics"):
+        try:
+            raw_controller_metrics = decision_policy.collect_controller_metrics()  # type: ignore[attr-defined]
+            if isinstance(raw_controller_metrics, dict):
+                controller_metrics = dict(raw_controller_metrics)
+        except Exception:
+            controller_metrics = {"enabled": False}
+    if "enabled" not in controller_metrics:
+        controller_metrics["enabled"] = bool(policy == "palca" and online_controller)
+    metrics_payload["controller"] = controller_metrics
+
     payload: dict[str, Any] = {
         "model": model,
         "params": {
@@ -484,6 +511,8 @@ def run_simulation(
             "micro_depth": int(micro_depth),
             "micro_width": int(micro_width),
             "micro_topk": int(micro_topk),
+            "online_controller": bool(online_controller),
+            "controller_debug": bool(controller_debug),
             "weight_col": weight_col,
             "max_tries_per_item": max_tries_per_item,
             "max_candidates": max_candidates,
@@ -493,7 +522,7 @@ def run_simulation(
             "continuous_pallets": continuous_pallets,
             "viz_dest": viz_dest,
         },
-        "metrics": result.to_dict(),
+        "metrics": metrics_payload,
     }
 
     if out_path:
@@ -552,6 +581,8 @@ def main() -> None:
         micro_depth=int(args.micro_depth),
         micro_width=int(args.micro_width),
         micro_topk=int(args.micro_topk),
+        online_controller=bool(args.online_controller),
+        controller_debug=bool(args.controller_debug),
         weight_col=args.weight_col,
         max_tries_per_item=int(args.max_tries_per_item),
         max_candidates=int(args.max_candidates),
