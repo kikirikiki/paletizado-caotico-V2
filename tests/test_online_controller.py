@@ -110,3 +110,21 @@ def test_overrides_correctos_por_modo() -> None:
         "micro_topk": 12,
         "time_budget_ms": 3000,
     }
+
+
+def test_transitions_only_on_mode_change() -> None:
+    controller = _baseline_controller()
+
+    first_event = None
+    for pick_index in range(0, 6):
+        _overrides, event = controller.step(
+            DecisionContext(last_ok=True, last_fail_reason=None, consec_ok=6 + pick_index, consec_fail=0, pick_index=pick_index)
+        )
+        if pick_index == 0:
+            first_event = event
+        else:
+            assert event is None
+
+    assert first_event is not None
+    assert first_event.from_mode == ControllerMode.NORMAL
+    assert first_event.to_mode == ControllerMode.PUSH

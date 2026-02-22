@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import logging
 import os
@@ -17,6 +18,7 @@ from .kpi_hooks import aggregate_pallet_kpis
 
 
 SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15)
+RESCUE_RETRY_REASONS = {"STABILITY", "HEIGHT_LIMIT", "NO_FEASIBLE"}
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,10 @@ class PolicyPackerScheduler:
         self._controller_mode_counts: dict[str, int] = {mode.value: 0 for mode in ControllerMode}
         self._controller_transitions: list[dict[str, object]] = []
         self._controller_overrides_applied: dict[str, int] = {}
+        self._controller_retry_attempts_total = 0
+        self._controller_retry_success_total = 0
+        self._controller_retry_fail_total = 0
+        self._controller_retry_by_reason: dict[str, int] = {}
         self._controller_consec_ok = 0
         self._controller_consec_fail = 0
         self._controller_consecutive_failures_max = 0
@@ -245,7 +251,8 @@ class PolicyPackerScheduler:
         )
 
         overrides = Overrides()
-        controller_event: ControllerEvent | None = None
+        override_attempts: list[Overrides] = []
+        controller_events: list[ControllerEvent] = []
         if self._online_controller_enabled and self._controller is not None:
             controller_ctx = DecisionContext(
                 last_ok=bool(self._controller_last_ok),
@@ -254,28 +261,101 @@ class PolicyPackerScheduler:
                 consec_fail=int(self._controller_consec_fail),
                 pick_index=int(self._controller_pick_index),
             )
-            overrides, controller_event = self._controller.step(controller_ctx)
+            controller_overrides, controller_event = self._controller.step(controller_ctx)
+            overrides = controller_overrides
+            if controller_event is not None:
+                controller_events.append(controller_event)
+        override_attempts.append(overrides)
 
-        plan = self._choose_action_with_overrides(sim_state, overrides)
+        plan, fail_reason, pending_closures, stop_reason, stop_details = self._run_scheduler_attempt(
+            sim_state=sim_state,
+            overrides=overrides,
+        )
+        self._record_controller_debug_attempt(
+            attempt_index=1,
+            mode=self._controller.mode if self._controller is not None else ControllerMode.NORMAL,
+            overrides=overrides,
+            plan=plan,
+            fail_reason=fail_reason,
+        )
 
-        # reset pending closures (se rellenará si plan es None)
-        self._pending_closures = {}
-        fail_reason = self._infer_fail_reason()
-        if plan is None and self._scheduler.last_blocked_pallets:
-            self._pending_closures = dict(self._scheduler.last_blocked_pallets)
-            blocked_reasons = [str(v) for v in self._scheduler.last_blocked_pallets.values()]
-            fail_reason = blocked_reasons[0] if blocked_reasons else fail_reason
+        if (
+            plan is None
+            and self._online_controller_enabled
+            and self._controller is not None
+        ):
+            retry_reason = self._normalize_retry_reason(fail_reason)
+            if retry_reason in RESCUE_RETRY_REASONS:
+                self._controller_retry_attempts_total += 1
+                self._controller_retry_by_reason[retry_reason] = int(
+                    self._controller_retry_by_reason.get(retry_reason, 0)
+                ) + 1
 
-        if plan is None and self._scheduler.last_deadlock:
-            self.stop_reason = "DEADLOCK"
-            details = self._scheduler.last_deadlock_item or {}
-            self.stop_details = dict(details)
-            fail_reason = str(details.get("reason", fail_reason or "DEADLOCK"))
+                retry_controller = deepcopy(self._controller)
+                retry_ctx = DecisionContext(
+                    last_ok=False,
+                    last_fail_reason=retry_reason,
+                    consec_ok=0,
+                    consec_fail=int(self._controller_consec_fail) + 1,
+                    pick_index=int(self._controller_pick_index),
+                )
+                _retry_ctx_overrides, retry_event = retry_controller.step(retry_ctx)
+                from_mode = retry_controller.mode
+                retry_controller.mode = ControllerMode.RESCUE
+                rescue_overrides = retry_controller.overrides_for_mode(ControllerMode.RESCUE)
+                override_attempts.append(rescue_overrides)
+                if from_mode != ControllerMode.RESCUE:
+                    retry_event = ControllerEvent(
+                        pick_index=int(self._controller_pick_index),
+                        from_mode=from_mode,
+                        to_mode=ControllerMode.RESCUE,
+                        trigger=f"retry_force_rescue:{retry_reason}",
+                        overrides=rescue_overrides.to_dict(),
+                        note="emergency_retry_attempt",
+                    )
+
+                retry_plan, retry_fail_reason, retry_pending, retry_stop_reason, retry_stop_details = (
+                    self._run_scheduler_attempt(
+                        sim_state=sim_state,
+                        overrides=rescue_overrides,
+                    )
+                )
+                self._record_controller_debug_attempt(
+                    attempt_index=2,
+                    mode=ControllerMode.RESCUE,
+                    overrides=rescue_overrides,
+                    plan=retry_plan,
+                    fail_reason=retry_fail_reason,
+                    note=f"retry_reason={retry_reason}",
+                )
+
+                if retry_plan is not None:
+                    self._controller = retry_controller
+                    if retry_event is not None:
+                        controller_events.append(retry_event)
+                    overrides = rescue_overrides
+                    plan = retry_plan
+                    fail_reason = retry_fail_reason
+                    pending_closures = retry_pending
+                    stop_reason = retry_stop_reason
+                    stop_details = retry_stop_details
+                    self._controller_retry_success_total += 1
+                else:
+                    self._controller_retry_fail_total += 1
+                    fail_reason = retry_fail_reason
+                    pending_closures = retry_pending
+                    stop_reason = retry_stop_reason
+                    stop_details = retry_stop_details
+
+        self._pending_closures = dict(pending_closures)
+        self.stop_reason = stop_reason
+        self.stop_details = dict(stop_details)
+        if plan is None and self.stop_reason == "DEADLOCK":
             self._logger.error(
                 "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s",
-                details.get("box_id"),
-                details.get("dims"),
-                details.get("reason"),
+                self.stop_details.get("box_id"),
+                self.stop_details.get("dims"),
+                self.stop_details.get("reason"),
             )
 
         # KPI: medir non-head picks + dt_extra
@@ -294,8 +374,8 @@ class PolicyPackerScheduler:
         self._update_controller_metrics(
             plan=plan,
             fail_reason=fail_reason,
-            overrides=overrides,
-            controller_event=controller_event,
+            override_attempts=override_attempts,
+            controller_events=controller_events,
         )
         return plan
 
@@ -509,6 +589,10 @@ class PolicyPackerScheduler:
             "mode_counts": mode_counts,
             "transitions": list(self._controller_transitions),
             "overrides_applied": dict(self._controller_overrides_applied),
+            "retry_attempts_total": int(self._controller_retry_attempts_total),
+            "retry_success_total": int(self._controller_retry_success_total),
+            "retry_fail_total": int(self._controller_retry_fail_total),
+            "retry_by_reason": dict(self._controller_retry_by_reason),
             "consecutive_failures_max": int(self._controller_consecutive_failures_max),
         }
         if self._controller_debug:
@@ -576,21 +660,25 @@ class PolicyPackerScheduler:
         *,
         plan: PickPlan | None,
         fail_reason: str | None,
-        overrides: Overrides,
-        controller_event: ControllerEvent | None,
+        override_attempts: Iterable[Overrides],
+        controller_events: Iterable[ControllerEvent] | None,
     ) -> None:
         if not self._online_controller_enabled or self._controller is None:
             return
 
         mode_name = self._controller.mode.value
         self._controller_mode_counts[mode_name] = int(self._controller_mode_counts.get(mode_name, 0)) + 1
-        for key in overrides.to_dict():
+        applied_override_keys: set[str] = set()
+        for attempt_overrides in override_attempts:
+            applied_override_keys.update(attempt_overrides.to_dict().keys())
+        for key in applied_override_keys:
             self._controller_overrides_applied[key] = int(self._controller_overrides_applied.get(key, 0)) + 1
 
-        serialized_event: dict[str, object] | None = None
-        if controller_event is not None:
-            serialized_event = self._serialize_controller_event(controller_event)
-            self._controller_transitions.append(serialized_event)
+        if controller_events is not None:
+            for controller_event in controller_events:
+                if controller_event.from_mode == controller_event.to_mode:
+                    continue
+                self._controller_transitions.append(self._serialize_controller_event(controller_event))
 
         ok = plan is not None
         if ok:
@@ -609,19 +697,74 @@ class PolicyPackerScheduler:
             int(self._controller_consec_fail),
         )
 
-        if self._controller_debug and len(self._controller_debug_events) < self._controller_debug_max_events:
-            self._controller_debug_events.append(
-                {
-                    "pick_index": int(self._controller_pick_index),
-                    "mode": str(mode_name),
-                    "ok": bool(ok),
-                    "fail_reason": self._controller_last_fail_reason,
-                    "overrides": overrides.to_dict(),
-                    "event": serialized_event,
-                }
-            )
-
         self._controller_pick_index += 1
+
+    def _run_scheduler_attempt(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        overrides: Overrides,
+    ) -> tuple[PickPlan | None, str | None, dict[int | str, str], str | None, dict[str, object]]:
+        plan = self._choose_action_with_overrides(sim_state, overrides)
+        fail_reason = self._infer_fail_reason()
+        pending_closures: dict[int | str, str] = {}
+        stop_reason: str | None = None
+        stop_details: dict[str, object] = {}
+
+        if plan is None and self._scheduler.last_blocked_pallets:
+            pending_closures = dict(self._scheduler.last_blocked_pallets)
+            blocked_reasons = [str(v) for v in self._scheduler.last_blocked_pallets.values() if v is not None]
+            if blocked_reasons:
+                fail_reason = blocked_reasons[0]
+
+        if plan is None and self._scheduler.last_deadlock:
+            stop_reason = "DEADLOCK"
+            details = self._scheduler.last_deadlock_item or {}
+            stop_details = dict(details)
+            fail_reason = str(details.get("reason", fail_reason or "DEADLOCK"))
+
+        return plan, fail_reason, pending_closures, stop_reason, stop_details
+
+    @staticmethod
+    def _normalize_retry_reason(reason: str | None) -> str:
+        if reason is None:
+            return "NO_FEASIBLE"
+
+        normalized = str(reason).upper().strip()
+        if not normalized:
+            return "NO_FEASIBLE"
+        if "STABILITY" in normalized:
+            return "STABILITY"
+        if "HEIGHT_LIMIT" in normalized:
+            return "HEIGHT_LIMIT"
+        if "NO_FEASIBLE" in normalized or normalized in {"NO_PLAN", "NO_SPACE"}:
+            return "NO_FEASIBLE"
+        return normalized
+
+    def _record_controller_debug_attempt(
+        self,
+        *,
+        attempt_index: int,
+        mode: ControllerMode,
+        overrides: Overrides,
+        plan: PickPlan | None,
+        fail_reason: str | None,
+        note: str | None = None,
+    ) -> None:
+        if not self._controller_debug or len(self._controller_debug_events) >= self._controller_debug_max_events:
+            return
+
+        self._controller_debug_events.append(
+            {
+                "pick_index": int(self._controller_pick_index),
+                "attempt_index": int(attempt_index),
+                "mode": mode.value,
+                "overrides": overrides.to_dict(),
+                "result": "ok" if plan is not None else "fail",
+                "fail_reason": str(fail_reason) if fail_reason is not None else None,
+                "note": note,
+            }
+        )
 
     @staticmethod
     def _serialize_controller_event(event: ControllerEvent) -> dict[str, object]:

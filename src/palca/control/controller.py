@@ -97,18 +97,16 @@ class OnlineController:
                 trigger = f"enter_push_consec_ok>={self.enter_push_ok}"
 
         overrides = self._overrides_for_mode(self.mode)
-        overrides_dict = overrides.to_dict()
         changed_mode = self.mode != from_mode
-        overrides_differ = self._overrides_differ_from_baseline(overrides_dict)
 
         event: ControllerEvent | None = None
-        if changed_mode or overrides_differ:
+        if changed_mode:
             event = ControllerEvent(
                 pick_index=int(ctx.pick_index),
                 from_mode=from_mode,
                 to_mode=self.mode,
-                trigger=trigger or "mode_override_applied",
-                overrides=dict(overrides_dict),
+                trigger=trigger or "mode_changed",
+                overrides=dict(overrides.to_dict()),
                 note=note,
             )
 
@@ -124,6 +122,9 @@ class OnlineController:
 
         return overrides, event
 
+    def overrides_for_mode(self, mode: ControllerMode) -> Overrides:
+        return self._overrides_for_mode(mode)
+
     def _overrides_for_mode(self, mode: ControllerMode) -> Overrides:
         if mode == ControllerMode.PUSH:
             return Overrides(time_budget_ms=int(self._push_time_budget_ms))
@@ -136,13 +137,3 @@ class OnlineController:
                 time_budget_ms=int(self._rescue_values["time_budget_ms"]),
             )
         return Overrides()
-
-    def _overrides_differ_from_baseline(self, overrides: dict[str, object]) -> bool:
-        if not overrides:
-            return False
-        for key, value in overrides.items():
-            if key not in self._baseline:
-                continue
-            if value != self._baseline[key]:
-                return True
-        return False
