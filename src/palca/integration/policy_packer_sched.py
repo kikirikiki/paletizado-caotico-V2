@@ -201,6 +201,8 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            online_controller=online_controller,
+            controller_debug=controller_debug,
         )
         return cls(config=config)
 
