@@ -4,7 +4,7 @@ from .types import ControllerEvent, ControllerMode, DecisionContext, Overrides
 
 
 class OnlineController:
-    DEFAULT_ANTI_HEIGHT_THRESHOLD_MM = 200
+    DEFAULT_ANTI_HEIGHT_THRESHOLD_MM = 100
 
     def __init__(
         self,
@@ -166,12 +166,10 @@ class OnlineController:
             return False
 
     def _with_anti_height_overrides(self, base: Overrides) -> Overrides:
-        baseline_micro_depth = int(self._baseline["micro_depth"])
-        anti_micro_depth = 8 if baseline_micro_depth < 8 else None
         return Overrides(
             score_mode="min_height_then_gain",
             height_slack_mm=0,
-            micro_depth=anti_micro_depth if anti_micro_depth is not None else base.micro_depth,
+            micro_depth=base.micro_depth,
             micro_width=base.micro_width,
             micro_topk=base.micro_topk,
             time_budget_ms=base.time_budget_ms,

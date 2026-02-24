@@ -140,7 +140,7 @@ def test_anti_height_blocks_push() -> None:
             consec_ok=6,
             consec_fail=0,
             pick_index=0,
-            height_margin_mm=150,
+            height_margin_mm=90,
         )
     )
 
@@ -149,7 +149,6 @@ def test_anti_height_blocks_push() -> None:
     assert overrides.to_dict() == {
         "score_mode": "min_height_then_gain",
         "height_slack_mm": 0,
-        "micro_depth": 8,
     }
     assert controller.anti_height_picks_total == 1
     assert controller.anti_height_entries_total == 1
@@ -165,7 +164,7 @@ def test_anti_height_only_when_margin_small() -> None:
             consec_ok=6,
             consec_fail=0,
             pick_index=0,
-            height_margin_mm=500,
+            height_margin_mm=150,
         )
     )
 
