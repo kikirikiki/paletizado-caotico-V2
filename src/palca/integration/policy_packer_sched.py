@@ -18,7 +18,7 @@ from .kpi_hooks import aggregate_pallet_kpis
 
 
 SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15)
-RESCUE_RETRY_REASONS = {"STABILITY", "HEIGHT_LIMIT", "NO_FEASIBLE"}
+RESCUE_RETRY_REASONS = {"STABILITY", "NO_FEASIBLE"}
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,7 @@ class PolicyPackerScheduler:
         self._controller_retry_success_total = 0
         self._controller_retry_fail_total = 0
         self._controller_retry_by_reason: dict[str, int] = {}
+        self._controller_retry_skipped_by_reason: dict[str, int] = {}
         self._controller_consec_ok = 0
         self._controller_consec_fail = 0
         self._controller_consecutive_failures_max = 0
@@ -279,13 +280,19 @@ class PolicyPackerScheduler:
             fail_reason=fail_reason,
         )
 
+        treat_fail_as_normal_close = False
         if (
             plan is None
             and self._online_controller_enabled
             and self._controller is not None
         ):
             retry_reason = self._normalize_retry_reason(fail_reason)
-            if retry_reason in RESCUE_RETRY_REASONS:
+            if retry_reason == "HEIGHT_LIMIT":
+                self._controller_retry_skipped_by_reason[retry_reason] = int(
+                    self._controller_retry_skipped_by_reason.get(retry_reason, 0)
+                ) + 1
+                treat_fail_as_normal_close = True
+            elif retry_reason in RESCUE_RETRY_REASONS:
                 self._controller_retry_attempts_total += 1
                 self._controller_retry_by_reason[retry_reason] = int(
                     self._controller_retry_by_reason.get(retry_reason, 0)
@@ -381,6 +388,7 @@ class PolicyPackerScheduler:
         self._update_controller_metrics(
             plan=plan,
             fail_reason=fail_reason,
+            treat_fail_as_normal_close=treat_fail_as_normal_close,
             override_attempts=override_attempts,
             controller_events=controller_events,
         )
@@ -600,6 +608,7 @@ class PolicyPackerScheduler:
             "retry_success_total": int(self._controller_retry_success_total),
             "retry_fail_total": int(self._controller_retry_fail_total),
             "retry_by_reason": dict(self._controller_retry_by_reason),
+            "retry_skipped_by_reason": dict(self._controller_retry_skipped_by_reason),
             "consecutive_failures_max": int(self._controller_consecutive_failures_max),
         }
         if self._controller_debug:
@@ -667,6 +676,7 @@ class PolicyPackerScheduler:
         *,
         plan: PickPlan | None,
         fail_reason: str | None,
+        treat_fail_as_normal_close: bool,
         override_attempts: Iterable[Overrides],
         controller_events: Iterable[ControllerEvent] | None,
     ) -> None:
@@ -687,7 +697,7 @@ class PolicyPackerScheduler:
                     continue
                 self._controller_transitions.append(self._serialize_controller_event(controller_event))
 
-        ok = plan is not None
+        ok = plan is not None or bool(treat_fail_as_normal_close)
         if ok:
             self._controller_consec_ok += 1
             self._controller_consec_fail = 0
