@@ -46,6 +46,9 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     balance_scores: list[float] = []
     com_dx: list[float] = []
     com_dy: list[float] = []
+    orientation_counts = {"planar": 0, "stand_hw": 0}
+    stand_hw_used_by_dest: dict[int, int] = {}
+    orientation_counts_by_dest: dict[int, dict[str, int]] = {}
 
     for dest, pallets in pallets_by_dest.items():
         pallet_list = list(pallets)
@@ -59,7 +62,14 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         volume_by_dest[dest] = mean(vol_values) if vol_values else 0.0
 
         layer_accum: dict[int, list[float]] = {}
+        dest_orientation_counts = {"planar": 0, "stand_hw": 0}
         for pallet in pallet_list:
+            for placement in pallet.placements:
+                family = str(getattr(placement, "orientation_family", "planar") or "planar").strip().lower()
+                if family not in ("planar", "stand_hw"):
+                    family = "planar"
+                orientation_counts[family] = int(orientation_counts.get(family, 0)) + 1
+                dest_orientation_counts[family] = int(dest_orientation_counts.get(family, 0)) + 1
             for layer_id, util in layer_utilization(pallet).items():
                 layer_accum.setdefault(layer_id, []).append(util)
             support_checks += int(pallet.stats.support_ratio_checks)
@@ -80,6 +90,8 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         layer_util_by_dest[dest] = {
             layer_id: mean(vals) if vals else 0.0 for layer_id, vals in layer_accum.items()
         }
+        orientation_counts_by_dest[dest] = dict(dest_orientation_counts)
+        stand_hw_used_by_dest[dest] = int(dest_orientation_counts.get("stand_hw", 0))
 
     support_pct = (100.0 * support_rejects / max(1, support_checks)) if support_checks else 0.0
     corner_pct = (100.0 * corner_rejects / max(1, corner_checks)) if corner_checks else 0.0
@@ -105,4 +117,11 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         "balance_quadrant_weights": balance_quadrant_sum,
         "com_offset_mm": {"x": com_offset[0], "y": com_offset[1]},
         "balance_score": balance_score,
+        "orientation_counts": {k: int(v) for k, v in orientation_counts.items()},
+        "orientation_counts_by_dest": {
+            int(dest): {k: int(v) for k, v in counts.items()}
+            for dest, counts in orientation_counts_by_dest.items()
+        },
+        "stand_hw_used_total": int(orientation_counts.get("stand_hw", 0)),
+        "stand_hw_used_by_dest": {int(dest): int(v) for dest, v in stand_hw_used_by_dest.items()},
     }

@@ -120,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Slack de altura para min_height_slack_then_gain (mm)",
     )
+    parser.add_argument(
+        "--orientation-mode",
+        choices=["planar", "planar+stand_hw"],
+        default="planar",
+        help="Modo de orientaciones de caja: planar (2) o planar+stand_hw (4).",
+    )
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
     parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
@@ -300,6 +306,7 @@ def run_simulation(
     balance_weight: float = 0.0,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
+    orientation_mode: str = "planar",
     time_budget_ms: int = 120,
     micro_plan: bool = False,
     micro_depth: int = 3,
@@ -465,6 +472,7 @@ def run_simulation(
             balance_weight=balance_weight,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            orientation_mode=str(orientation_mode),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -556,6 +564,7 @@ def run_simulation(
             "balance_weight": balance_weight,
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
+            "orientation_mode": str(orientation_mode),
             "time_budget_ms": time_budget_ms,
             "micro_plan": bool(micro_plan),
             "micro_depth": int(micro_depth),
@@ -630,6 +639,7 @@ def main() -> None:
         balance_weight=args.balance_weight,
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
+        orientation_mode=str(args.orientation_mode),
         time_budget_ms=args.time_budget_ms,
         micro_plan=bool(args.micro_plan),
         micro_depth=int(args.micro_depth),
