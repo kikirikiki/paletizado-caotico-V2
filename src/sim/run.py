@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stand-hw-height-margin-gate-mm",
         type=int,
-        default=400,
+        default=200,
         help="Permite stand_hw solo si (max_height-current_height) <= gate (mm).",
     )
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
@@ -313,7 +313,7 @@ def run_simulation(
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
     orientation_mode: str = "planar",
-    stand_hw_height_margin_gate_mm: int = 400,
+    stand_hw_height_margin_gate_mm: int = 200,
     time_budget_ms: int = 120,
     micro_plan: bool = False,
     micro_depth: int = 3,

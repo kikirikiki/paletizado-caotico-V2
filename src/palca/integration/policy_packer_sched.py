@@ -43,7 +43,7 @@ class PolicyConfig:
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
     orientation_mode: str = "planar"
-    stand_hw_height_margin_gate_mm: int = 400
+    stand_hw_height_margin_gate_mm: int = 200
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -148,7 +148,7 @@ class PolicyPackerScheduler:
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
         orientation_mode: str = "planar",
-        stand_hw_height_margin_gate_mm: int = 400,
+        stand_hw_height_margin_gate_mm: int = 200,
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
