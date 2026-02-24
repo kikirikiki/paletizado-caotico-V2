@@ -5,6 +5,8 @@ from typing import Any
 from palca.domain.box import Box
 from palca.domain.pallet_spec import PalletSpec
 from palca.integration.kpi_hooks import aggregate_pallet_kpis
+from palca.packer.layer import LayerState
+from palca.packer.maxrects2d import MaxRects2D
 from palca.packer.pallet_model import (
     ORIENTATION_MODE_PLANAR,
     ORIENTATION_MODE_PLANAR_STAND_HW,
@@ -101,7 +103,11 @@ def test_orientation_mode_stand_hw_metrics() -> None:
     assert not planar_preview.feasible
     assert planar_preview.infeasible_reason == "OVERSIZE"
 
-    extended_model = PalletModel(spec=spec, orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW)
+    extended_model = PalletModel(
+        spec=spec,
+        orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW,
+        stand_hw_height_margin_gate_mm=3000,
+    )
     preview = extended_model.preview_place(box)
     assert preview.feasible
     assert preview.placement is not None
@@ -118,3 +124,45 @@ def test_orientation_mode_stand_hw_metrics() -> None:
     assert int(orientation_counts.get("planar", 0)) == 0
     assert int(kpis.get("stand_hw_used_total", 0)) == 1
     assert int(stand_hw_used_by_dest.get(1, 0)) == 1
+    assert int(kpis.get("stand_hw_gate_mm", 0)) == 3000
+    assert int(kpis.get("stand_hw_gate_allows_total", 0)) == 1
+    assert int(kpis.get("stand_hw_gate_blocks_total", 0)) == 0
+
+
+def test_stand_hw_height_margin_gating() -> None:
+    spec = PalletSpec(length_mm=1200, width_mm=800, max_height_mm=1200)
+    gate_mm = 400
+
+    high_margin_model = PalletModel(
+        spec=spec,
+        orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW,
+        stand_hw_height_margin_gate_mm=gate_mm,
+    )
+    high_margin_families = {
+        variant.family
+        for variant in high_margin_model._orientations(400, 300, 200)  # noqa: SLF001
+    }
+    assert high_margin_families == {"planar"}
+    assert high_margin_model.stats.stand_hw_gate_blocks_total == 1
+    assert high_margin_model.stats.stand_hw_gate_allows_total == 0
+
+    low_margin_model = PalletModel(
+        spec=spec,
+        orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW,
+        stand_hw_height_margin_gate_mm=gate_mm,
+    )
+    low_margin_model.layers = [
+        LayerState(
+            layer_id=0,
+            z_mm=0,
+            bin=MaxRects2D(spec.bin_length_mm, spec.bin_width_mm, heuristic="baf"),
+            height_mm=1000,
+        )
+    ]
+    low_margin_families = {
+        variant.family
+        for variant in low_margin_model._orientations(400, 300, 200)  # noqa: SLF001
+    }
+    assert "stand_hw" in low_margin_families
+    assert low_margin_model.stats.stand_hw_gate_blocks_total == 0
+    assert low_margin_model.stats.stand_hw_gate_allows_total == 1

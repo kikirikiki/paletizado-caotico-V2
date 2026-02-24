@@ -42,6 +42,9 @@ class PalletStats:
     settle_total_mm: float = 0.0
     settle_max_mm: float = 0.0
     floating_boxes_count: int = 0
+    stand_hw_gate_blocks_total: int = 0
+    stand_hw_gate_allows_total: int = 0
+    stand_hw_rejected_support_total: int = 0
 
     def record_settle(self, settle_mm: float) -> None:
         self.settle_adjustments_count += 1
@@ -79,6 +82,7 @@ class _PreviewBudget:
 ORIENTATION_MODE_PLANAR = "planar"
 ORIENTATION_MODE_PLANAR_STAND_HW = "planar+stand_hw"
 ALLOWED_ORIENTATION_MODES = (ORIENTATION_MODE_PLANAR, ORIENTATION_MODE_PLANAR_STAND_HW)
+DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM = 400
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,10 @@ def normalize_orientation_mode(mode: str | None) -> str:
     if value not in ALLOWED_ORIENTATION_MODES:
         raise ValueError(f"Unsupported orientation_mode: {mode}")
     return value
+
+
+def should_allow_stand_hw(height_margin_mm: int, gate_mm: int) -> bool:
+    return int(height_margin_mm) <= max(0, int(gate_mm))
 
 
 def orientation_dims_for_mode(
@@ -123,6 +131,7 @@ def _orientation_variants_for_mode(
     *,
     mode: str,
     allow_rotate: bool,
+    allow_stand_hw: bool | None = None,
 ) -> list[_OrientationVariant]:
     normalized_mode = normalize_orientation_mode(mode)
     l_mm = int(length_mm)
@@ -153,7 +162,11 @@ def _orientation_variants_for_mode(
             )
         )
 
-    if normalized_mode == ORIENTATION_MODE_PLANAR_STAND_HW:
+    include_stand_hw = normalized_mode == ORIENTATION_MODE_PLANAR_STAND_HW
+    if allow_stand_hw is not None:
+        include_stand_hw = include_stand_hw and bool(allow_stand_hw)
+
+    if include_stand_hw:
         variants.append(
             _OrientationVariant(
                 rot90=False,
@@ -236,11 +249,13 @@ class PalletModel:
         controls: ControlStack | None = None,
         control_config: ControlConfig | None = None,
         orientation_mode: str = ORIENTATION_MODE_PLANAR,
+        stand_hw_height_margin_gate_mm: int = DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM,
     ) -> None:
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
         self.scoring_weights = _normalize_scoring_weights(scoring_weights)
         self.orientation_mode = normalize_orientation_mode(orientation_mode)
+        self.stand_hw_height_margin_gate_mm = max(0, int(stand_hw_height_margin_gate_mm))
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -739,12 +754,21 @@ class PalletModel:
         return sorted(points, key=lambda pt: (pt[0], pt[1]))
 
     def _orientations(self, length_mm: int, width_mm: int, height_mm: int) -> list[_OrientationVariant]:
+        allow_stand_hw: bool | None = None
+        if self.orientation_mode == ORIENTATION_MODE_PLANAR_STAND_HW:
+            height_margin_mm = max(0, int(self.spec.max_height_mm) - int(self.current_height_mm()))
+            allow_stand_hw = should_allow_stand_hw(height_margin_mm, self.stand_hw_height_margin_gate_mm)
+            if allow_stand_hw:
+                self.stats.stand_hw_gate_allows_total += 1
+            else:
+                self.stats.stand_hw_gate_blocks_total += 1
         return _orientation_variants_for_mode(
             length_mm,
             width_mm,
             height_mm,
             mode=self.orientation_mode,
             allow_rotate=bool(self.spec.allow_rotate),
+            allow_stand_hw=allow_stand_hw,
         )
 
     def _best_by_maxrects_score(self, candidates: list[_LayerCandidate]) -> list[_LayerCandidate]:

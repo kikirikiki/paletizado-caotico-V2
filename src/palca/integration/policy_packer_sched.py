@@ -43,6 +43,7 @@ class PolicyConfig:
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
     orientation_mode: str = "planar"
+    stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -147,6 +148,7 @@ class PolicyPackerScheduler:
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
         orientation_mode: str = "planar",
+        stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
@@ -200,6 +202,7 @@ class PolicyPackerScheduler:
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
+            stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -938,6 +941,7 @@ class PolicyPackerScheduler:
             scoring_weights=self.config.scoring_weights,
             control_config=control_config,
             orientation_mode=str(self.config.orientation_mode),
+            stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
         )
 
     def _get_first_attr(self, obj: Any, names: tuple[str, ...]) -> Any:

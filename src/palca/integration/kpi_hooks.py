@@ -49,6 +49,10 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     orientation_counts = {"planar": 0, "stand_hw": 0}
     stand_hw_used_by_dest: dict[int, int] = {}
     orientation_counts_by_dest: dict[int, dict[str, int]] = {}
+    stand_hw_gate_mm = 0
+    stand_hw_gate_blocks_total = 0
+    stand_hw_gate_allows_total = 0
+    stand_hw_rejected_support_total = 0
 
     for dest, pallets in pallets_by_dest.items():
         pallet_list = list(pallets)
@@ -80,6 +84,10 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             settle_total += float(pallet.stats.settle_total_mm)
             settle_max = max(settle_max, float(pallet.stats.settle_max_mm))
             floating_total += int(pallet.stats.floating_boxes_count)
+            stand_hw_gate_mm = int(getattr(pallet, "stand_hw_height_margin_gate_mm", stand_hw_gate_mm))
+            stand_hw_gate_blocks_total += int(getattr(pallet.stats, "stand_hw_gate_blocks_total", 0))
+            stand_hw_gate_allows_total += int(getattr(pallet.stats, "stand_hw_gate_allows_total", 0))
+            stand_hw_rejected_support_total += int(getattr(pallet.stats, "stand_hw_rejected_support_total", 0))
 
             metrics = pallet.balance_metrics()
             for i, val in enumerate(metrics.quadrant_weights):
@@ -124,4 +132,8 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         },
         "stand_hw_used_total": int(orientation_counts.get("stand_hw", 0)),
         "stand_hw_used_by_dest": {int(dest): int(v) for dest, v in stand_hw_used_by_dest.items()},
+        "stand_hw_gate_mm": int(stand_hw_gate_mm),
+        "stand_hw_gate_blocks_total": int(stand_hw_gate_blocks_total),
+        "stand_hw_gate_allows_total": int(stand_hw_gate_allows_total),
+        "stand_hw_rejected_support_total": int(stand_hw_rejected_support_total),
     }
