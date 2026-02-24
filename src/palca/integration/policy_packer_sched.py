@@ -42,6 +42,8 @@ class PolicyConfig:
     balance_weight: float = 0.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    orientation_mode: str = "planar"
+    stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -145,6 +147,8 @@ class PolicyPackerScheduler:
         balance_weight: float = 0.0,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
+        orientation_mode: str = "planar",
+        stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
@@ -197,6 +201,8 @@ class PolicyPackerScheduler:
             balance_weight=balance_weight,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            orientation_mode=str(orientation_mode),
+            stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -584,6 +590,7 @@ class PolicyPackerScheduler:
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
         kpis["selected_height_after_mm_mean"] = height_mean
@@ -933,6 +940,8 @@ class PolicyPackerScheduler:
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,
             control_config=control_config,
+            orientation_mode=str(self.config.orientation_mode),
+            stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
         )
 
     def _get_first_attr(self, obj: Any, names: tuple[str, ...]) -> Any:

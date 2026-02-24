@@ -42,6 +42,9 @@ class PalletStats:
     settle_total_mm: float = 0.0
     settle_max_mm: float = 0.0
     floating_boxes_count: int = 0
+    stand_hw_gate_blocks_total: int = 0
+    stand_hw_gate_allows_total: int = 0
+    stand_hw_rejected_support_total: int = 0
 
     def record_settle(self, settle_mm: float) -> None:
         self.settle_adjustments_count += 1
@@ -74,6 +77,127 @@ class _PreviewBudget:
             self.timeout_hit = True
             return True
         return False
+
+
+ORIENTATION_MODE_PLANAR = "planar"
+ORIENTATION_MODE_PLANAR_STAND_HW = "planar+stand_hw"
+ALLOWED_ORIENTATION_MODES = (ORIENTATION_MODE_PLANAR, ORIENTATION_MODE_PLANAR_STAND_HW)
+DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM = 400
+
+
+@dataclass(frozen=True)
+class _OrientationVariant:
+    rot90: bool
+    length_mm: int
+    width_mm: int
+    height_mm: int
+    name: str
+    family: str
+
+
+def normalize_orientation_mode(mode: str | None) -> str:
+    value = str(mode or ORIENTATION_MODE_PLANAR).strip().lower()
+    if value not in ALLOWED_ORIENTATION_MODES:
+        raise ValueError(f"Unsupported orientation_mode: {mode}")
+    return value
+
+
+def should_allow_stand_hw(height_margin_mm: int, gate_mm: int) -> bool:
+    return int(height_margin_mm) <= max(0, int(gate_mm))
+
+
+def orientation_dims_for_mode(
+    length_mm: int,
+    width_mm: int,
+    height_mm: int,
+    *,
+    mode: str,
+    allow_rotate: bool,
+) -> list[tuple[int, int, int]]:
+    variants = _orientation_variants_for_mode(
+        length_mm,
+        width_mm,
+        height_mm,
+        mode=mode,
+        allow_rotate=allow_rotate,
+    )
+    return [(v.length_mm, v.width_mm, v.height_mm) for v in variants]
+
+
+def _orientation_variants_for_mode(
+    length_mm: int,
+    width_mm: int,
+    height_mm: int,
+    *,
+    mode: str,
+    allow_rotate: bool,
+    allow_stand_hw: bool | None = None,
+) -> list[_OrientationVariant]:
+    normalized_mode = normalize_orientation_mode(mode)
+    l_mm = int(length_mm)
+    w_mm = int(width_mm)
+    h_mm = int(height_mm)
+    if l_mm <= 0 or w_mm <= 0 or h_mm <= 0:
+        return []
+
+    variants: list[_OrientationVariant] = [
+        _OrientationVariant(
+            rot90=False,
+            length_mm=l_mm,
+            width_mm=w_mm,
+            height_mm=h_mm,
+            name="LWH",
+            family="planar",
+        )
+    ]
+    if allow_rotate and l_mm != w_mm:
+        variants.append(
+            _OrientationVariant(
+                rot90=True,
+                length_mm=w_mm,
+                width_mm=l_mm,
+                height_mm=h_mm,
+                name="WLH",
+                family="planar",
+            )
+        )
+
+    include_stand_hw = normalized_mode == ORIENTATION_MODE_PLANAR_STAND_HW
+    if allow_stand_hw is not None:
+        include_stand_hw = include_stand_hw and bool(allow_stand_hw)
+
+    if include_stand_hw:
+        variants.append(
+            _OrientationVariant(
+                rot90=False,
+                length_mm=h_mm,
+                width_mm=w_mm,
+                height_mm=l_mm,
+                name="HWL",
+                family="stand_hw",
+            )
+        )
+        if allow_rotate and h_mm != w_mm:
+            variants.append(
+                _OrientationVariant(
+                    rot90=True,
+                    length_mm=w_mm,
+                    width_mm=h_mm,
+                    height_mm=l_mm,
+                    name="WHL",
+                    family="stand_hw",
+                )
+            )
+
+    deduped: list[_OrientationVariant] = []
+    seen: set[tuple[int, int, int]] = set()
+    for variant in variants:
+        key = (int(variant.length_mm), int(variant.width_mm), int(variant.height_mm))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(variant)
+    return deduped
 
 
 def _coerce_weight(value: Any, *, default: float) -> float:
@@ -124,10 +248,14 @@ class PalletModel:
         scoring_weights: ScoringWeights | None = None,
         controls: ControlStack | None = None,
         control_config: ControlConfig | None = None,
+        orientation_mode: str = ORIENTATION_MODE_PLANAR,
+        stand_hw_height_margin_gate_mm: int = DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM,
     ) -> None:
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
         self.scoring_weights = _normalize_scoring_weights(scoring_weights)
+        self.orientation_mode = normalize_orientation_mode(orientation_mode)
+        self.stand_hw_height_margin_gate_mm = max(0, int(stand_hw_height_margin_gate_mm))
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -189,21 +317,24 @@ class PalletModel:
 
         bin_l = self.spec.bin_length_mm
         bin_w = self.spec.bin_width_mm
-
-        if not self._fits_in_bin(length_mm, width_mm, bin_l, bin_w):
-            if not self.spec.allow_rotate or not self._fits_in_bin(width_mm, length_mm, bin_l, bin_w):
-                return PlacementPreview(
-                    feasible=False,
-                    placement=None,
-                    packing_gain=0.0,
-                    fragmentation=0.0,
-                    infeasible_reason="OVERSIZE",
-                    debug={
-                        "bin": (bin_l, bin_w),
-                        "box": (length_mm, width_mm),
-                        "candidates_evaluated": 0,
-                    },
-                )
+        orientation_variants = self._orientations(length_mm, width_mm, height_mm)
+        has_footprint_fit = any(
+            self._fits_in_bin(variant.length_mm, variant.width_mm, bin_l, bin_w)
+            for variant in orientation_variants
+        )
+        if not has_footprint_fit:
+            return PlacementPreview(
+                feasible=False,
+                placement=None,
+                packing_gain=0.0,
+                fragmentation=0.0,
+                infeasible_reason="OVERSIZE",
+                debug={
+                    "bin": (bin_l, bin_w),
+                    "box": (length_mm, width_mm, height_mm),
+                    "candidates_evaluated": 0,
+                },
+            )
 
         if not self.controls.manifest.is_eligible(box, self):
             return PlacementPreview(
@@ -293,9 +424,7 @@ class PalletModel:
             layer_candidates, layer_rejected, layer_evaluated, _ = self._preview_in_layer(
                 active_layer,
                 box,
-                length_mm,
-                width_mm,
-                height_mm,
+                orientation_variants,
                 is_new_layer=False,
                 budget=budget,
             )
@@ -305,7 +434,7 @@ class PalletModel:
                 best = _select_best(layer_candidates)
                 return _build_preview(best)
 
-        if self._can_open_new_layer(height_mm):
+        if self._can_open_new_layer_for_orientations(orientation_variants):
             new_layer_id = len(self.layers)
             z_mm = self.current_height_mm()
             new_layer = LayerState(
@@ -316,9 +445,7 @@ class PalletModel:
             layer_candidates, layer_rejected, layer_evaluated, _ = self._preview_in_layer(
                 new_layer,
                 box,
-                length_mm,
-                width_mm,
-                height_mm,
+                orientation_variants,
                 is_new_layer=True,
                 budget=budget,
             )
@@ -329,7 +456,7 @@ class PalletModel:
                 return _build_preview(best)
 
         reason = "NO_SPACE"
-        if not self._can_open_new_layer(height_mm):
+        if not self._can_open_new_layer_for_orientations(orientation_variants):
             reason = "HEIGHT_LIMIT"
         if rejected_by_controls > 0:
             reason = "STABILITY"
@@ -404,6 +531,11 @@ class PalletModel:
     def _can_open_new_layer(self, next_height_mm: int) -> bool:
         return self.current_height_mm() + int(next_height_mm) <= self.spec.max_height_mm
 
+    def _can_open_new_layer_for_orientations(self, orientations: Iterable[_OrientationVariant]) -> bool:
+        current_height = self.current_height_mm()
+        max_height = int(self.spec.max_height_mm)
+        return any(current_height + int(variant.height_mm) <= max_height for variant in orientations)
+
     def _fits_in_bin(self, length_mm: int, width_mm: int, bin_l: int, bin_w: int) -> bool:
         return length_mm <= bin_l and width_mm <= bin_w
 
@@ -426,9 +558,7 @@ class PalletModel:
         self,
         layer: LayerState,
         box: Box,
-        length_mm: int,
-        width_mm: int,
-        height_mm: int,
+        orientations: list[_OrientationVariant],
         *,
         is_new_layer: bool,
         budget: _PreviewBudget | None = None,
@@ -438,8 +568,13 @@ class PalletModel:
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         if budget is not None and budget.should_stop():
             return candidates, rejected_by_controls, evaluated_candidates, True
-        for rot90, (l_mm, w_mm) in self._orientations(length_mm, width_mm):
-            next_height = max(layer.height_mm, height_mm)
+        for orientation in orientations:
+            l_mm = int(orientation.length_mm)
+            w_mm = int(orientation.width_mm)
+            h_mm = int(orientation.height_mm)
+            if not self._fits_in_bin(l_mm, w_mm, self.spec.bin_length_mm, self.spec.bin_width_mm):
+                continue
+            next_height = max(layer.height_mm, h_mm)
             if layer.z_mm + next_height > self.spec.max_height_mm:
                 continue
             base_candidates = list(
@@ -447,7 +582,7 @@ class PalletModel:
                     layer=layer,
                     length_mm=l_mm,
                     width_mm=w_mm,
-                    height_mm=height_mm,
+                    height_mm=h_mm,
                     is_new_layer=is_new_layer,
                 )
             )
@@ -493,15 +628,17 @@ class PalletModel:
                     x_mm=cand.x + self.spec.offset_mm,
                     y_mm=cand.y + self.spec.offset_mm,
                     z_mm=layer.z_mm,
-                    rot90=rot90,
+                    rot90=orientation.rot90,
                     layer_id=layer.layer_id,
                     length_mm=l_mm,
                     width_mm=w_mm,
-                    height_mm=height_mm,
+                    height_mm=h_mm,
                     box_id=box.box_id,
                     weight_kg=box.effective_weight_kg(),
                     loadbear=box.loadbear,
                     priority=box.priority,
+                    orientation_name=orientation.name,
+                    orientation_family=orientation.family,
                 )
                 adjusted = base_placement
                 score_delta = 0.0
@@ -548,7 +685,7 @@ class PalletModel:
                         layer_id=layer.layer_id,
                         is_new_layer=is_new_layer,
                         candidate=cand,
-                        rot90=rot90,
+                        rot90=orientation.rot90,
                         length_mm=l_mm,
                         width_mm=w_mm,
                         z_mm=adjusted.z_mm,
@@ -616,11 +753,23 @@ class PalletModel:
 
         return sorted(points, key=lambda pt: (pt[0], pt[1]))
 
-    def _orientations(self, length_mm: int, width_mm: int) -> list[tuple[bool, tuple[int, int]]]:
-        orientations = [(False, (length_mm, width_mm))]
-        if self.spec.allow_rotate and length_mm != width_mm:
-            orientations.append((True, (width_mm, length_mm)))
-        return orientations
+    def _orientations(self, length_mm: int, width_mm: int, height_mm: int) -> list[_OrientationVariant]:
+        allow_stand_hw: bool | None = None
+        if self.orientation_mode == ORIENTATION_MODE_PLANAR_STAND_HW:
+            height_margin_mm = max(0, int(self.spec.max_height_mm) - int(self.current_height_mm()))
+            allow_stand_hw = should_allow_stand_hw(height_margin_mm, self.stand_hw_height_margin_gate_mm)
+            if allow_stand_hw:
+                self.stats.stand_hw_gate_allows_total += 1
+            else:
+                self.stats.stand_hw_gate_blocks_total += 1
+        return _orientation_variants_for_mode(
+            length_mm,
+            width_mm,
+            height_mm,
+            mode=self.orientation_mode,
+            allow_rotate=bool(self.spec.allow_rotate),
+            allow_stand_hw=allow_stand_hw,
+        )
 
     def _best_by_maxrects_score(self, candidates: list[_LayerCandidate]) -> list[_LayerCandidate]:
         def _layer_key(cand: _LayerCandidate) -> tuple[float, ...]:
@@ -778,6 +927,8 @@ class PalletModel:
                 weight_kg=placement.weight_kg,
                 loadbear=placement.loadbear,
                 priority=placement.priority,
+                orientation_name=placement.orientation_name,
+                orientation_family=placement.orientation_family,
             )
             if not self._collides(tentative, eps_mm=eps_mm):
                 chosen_z = int(z)
@@ -804,6 +955,8 @@ class PalletModel:
             weight_kg=placement.weight_kg,
             loadbear=placement.loadbear,
             priority=placement.priority,
+            orientation_name=placement.orientation_name,
+            orientation_family=placement.orientation_family,
         )
         return adjusted, float(placement.z_mm - chosen_z)
 
