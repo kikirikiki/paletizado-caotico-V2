@@ -18,6 +18,7 @@ class DecisionContext:
     consec_ok: int
     consec_fail: int
     pick_index: int
+    height_margin_mm: int | None = None
 
 
 @dataclass(frozen=True)

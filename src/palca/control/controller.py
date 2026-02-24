@@ -4,6 +4,8 @@ from .types import ControllerEvent, ControllerMode, DecisionContext, Overrides
 
 
 class OnlineController:
+    DEFAULT_ANTI_HEIGHT_THRESHOLD_MM = 200
+
     def __init__(
         self,
         *,
@@ -26,6 +28,7 @@ class OnlineController:
         enter_rescue_fail: int = 2,
         enter_push_ok: int = 6,
         allow_rescue_early_exit: bool = True,
+        anti_height_threshold_mm: int = DEFAULT_ANTI_HEIGHT_THRESHOLD_MM,
     ) -> None:
         self.mode = ControllerMode.NORMAL
         self.push_picks = max(1, int(push_picks))
@@ -40,6 +43,10 @@ class OnlineController:
         self.cooldown_remaining = 0
         self.rescue_picks = 0
         self.rescue_ok_streak = 0
+        self.anti_height_threshold_mm = max(0, int(anti_height_threshold_mm))
+        self.anti_height_picks_total = 0
+        self.anti_height_entries_total = 0
+        self._anti_height_active_prev = False
 
         if rescue_time_budget_ms is None:
             # Si la base ya usa 3000ms (tuning estable), mantener 3000 en RESCUE
@@ -67,6 +74,12 @@ class OnlineController:
         from_mode = self.mode
         trigger: str | None = None
         note: str | None = None
+        anti_height_active = self._is_anti_height_active(ctx)
+        if anti_height_active:
+            self.anti_height_picks_total += 1
+            if not self._anti_height_active_prev:
+                self.anti_height_entries_total += 1
+        self._anti_height_active_prev = anti_height_active
 
         if self.mode == ControllerMode.PUSH and self.push_remaining <= 0:
             self.mode = ControllerMode.NORMAL
@@ -91,12 +104,18 @@ class OnlineController:
                 self.rescue_picks = 0
                 trigger = f"exit_rescue_consec_ok>={self.rescue_exit_ok}"
         elif self.mode == ControllerMode.NORMAL:
-            if self.cooldown_remaining <= 0 and int(ctx.consec_ok) >= self.enter_push_ok:
+            if (
+                not anti_height_active
+                and self.cooldown_remaining <= 0
+                and int(ctx.consec_ok) >= self.enter_push_ok
+            ):
                 self.mode = ControllerMode.PUSH
                 self.push_remaining = self.push_picks
                 trigger = f"enter_push_consec_ok>={self.enter_push_ok}"
 
         overrides = self._overrides_for_mode(self.mode)
+        if anti_height_active:
+            overrides = self._with_anti_height_overrides(overrides)
         changed_mode = self.mode != from_mode
 
         event: ControllerEvent | None = None
@@ -137,3 +156,23 @@ class OnlineController:
                 time_budget_ms=int(self._rescue_values["time_budget_ms"]),
             )
         return Overrides()
+
+    def _is_anti_height_active(self, ctx: DecisionContext) -> bool:
+        if ctx.height_margin_mm is None:
+            return False
+        try:
+            return int(ctx.height_margin_mm) <= self.anti_height_threshold_mm
+        except (TypeError, ValueError):
+            return False
+
+    def _with_anti_height_overrides(self, base: Overrides) -> Overrides:
+        baseline_micro_depth = int(self._baseline["micro_depth"])
+        anti_micro_depth = 8 if baseline_micro_depth < 8 else None
+        return Overrides(
+            score_mode="min_height_then_gain",
+            height_slack_mm=0,
+            micro_depth=anti_micro_depth if anti_micro_depth is not None else base.micro_depth,
+            micro_width=base.micro_width,
+            micro_topk=base.micro_topk,
+            time_budget_ms=base.time_budget_ms,
+        )
