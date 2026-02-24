@@ -18,6 +18,8 @@ class Placement:
     weight_kg: float | None = None
     loadbear: float | None = None
     priority: float | None = None
+    orientation_name: str | None = None
+    orientation_family: str | None = None
 
 
 @dataclass(frozen=True)
