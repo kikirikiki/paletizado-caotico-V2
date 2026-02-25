@@ -38,6 +38,8 @@ class SchedulerConfig:
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    fill_gate: float = 0.60
+    open_layer_penalty: float = 5.0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -67,6 +69,8 @@ class SchedulerConfig:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
         object.__setattr__(self, "score_mode", mode)
         object.__setattr__(self, "height_slack_mm", max(0, int(self.height_slack_mm)))
+        object.__setattr__(self, "fill_gate", max(0.0, min(1.0, float(self.fill_gate))))
+        object.__setattr__(self, "open_layer_penalty", max(0.0, float(self.open_layer_penalty)))
 
 
 @dataclass(frozen=True)
@@ -383,6 +387,7 @@ class SchedulerV1:
                     box=box,
                     idx=idx,
                     preview=preview,
+                    pallet=pallet,
                     max_priority=max_priority,
                     height_after_mm=height_after_mm,
                 )
@@ -741,6 +746,7 @@ class SchedulerV1:
             box=box,
             idx=idx,
             preview=preview,
+            pallet=pallet,
             max_priority=float(action.max_priority),
             height_after_mm=height_after_mm,
         )
@@ -815,6 +821,7 @@ class SchedulerV1:
         box: Box,
         idx: int,
         preview: PlacementPreview,
+        pallet: PalletModel,
         max_priority: float,
         height_after_mm: int,
     ) -> _ScoreTerms:
@@ -834,6 +841,34 @@ class SchedulerV1:
             - starv_cost
             + priority_score
         )
+        if self.config.score_mode == ScoreMode.FILL_FIRST_THEN_HEIGHT.value:
+            layers = getattr(pallet, "layers", []) or []
+            placement = getattr(preview, "placement", None)
+            opens_new_layer = False
+            if placement is not None:
+                try:
+                    opens_new_layer = int(getattr(placement, "layer_id", -1)) == int(len(layers))
+                except Exception:
+                    opens_new_layer = False
+            active_fill = 1.0
+            if layers:
+                active_layer = layers[-1]
+                layer_bin = getattr(active_layer, "bin", None)
+                if layer_bin is not None:
+                    try:
+                        layer_area = float(getattr(layer_bin, "area", 0.0) or 0.0)
+                        if layer_area > 0.0:
+                            used_area = float(getattr(layer_bin, "used_area", 0.0) or 0.0)
+                            active_fill = used_area / layer_area
+                    except Exception:
+                        active_fill = 1.0
+            open_penalty = self._fill_first_open_layer_penalty(
+                opens_new_layer=opens_new_layer,
+                active_fill=active_fill,
+                fill_gate=float(self.config.fill_gate),
+                open_layer_penalty=float(self.config.open_layer_penalty),
+            )
+            score -= float(open_penalty)
         return _ScoreTerms(
             packing_gain=float(preview.packing_gain),
             fragmentation=float(preview.fragmentation),
@@ -845,6 +880,23 @@ class SchedulerV1:
             scalar_score=float(score),
             height_after_mm=int(height_after_mm),
         )
+
+    @staticmethod
+    def _fill_first_open_layer_penalty(
+        *,
+        opens_new_layer: bool,
+        active_fill: float,
+        fill_gate: float,
+        open_layer_penalty: float,
+    ) -> float:
+        if not bool(opens_new_layer):
+            return 0.0
+        fill_gate_norm = max(0.0, min(1.0, float(fill_gate)))
+        active_fill_norm = max(0.0, min(1.0, float(active_fill)))
+        penalty_weight = max(0.0, float(open_layer_penalty))
+        if active_fill_norm >= fill_gate_norm:
+            return 0.0
+        return float(penalty_weight * (fill_gate_norm - active_fill_norm))
 
     @staticmethod
     def _gain_frag_sort_key(terms: _ScoreTerms, box: Box) -> tuple[Any, ...]:

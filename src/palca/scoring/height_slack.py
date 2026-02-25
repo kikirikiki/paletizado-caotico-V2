@@ -12,6 +12,7 @@ class ScoreMode(str, Enum):
     GAIN_FRAG = "gain_frag"
     MIN_HEIGHT_THEN_GAIN = "min_height_then_gain"
     MIN_HEIGHT_SLACK_THEN_GAIN = "min_height_slack_then_gain"
+    FILL_FIRST_THEN_HEIGHT = "fill_first_then_height"
 
     @classmethod
     def parse(cls, value: str | "ScoreMode" | None) -> "ScoreMode":
