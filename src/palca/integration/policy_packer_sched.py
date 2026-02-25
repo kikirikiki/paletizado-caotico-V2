@@ -42,6 +42,8 @@ class PolicyConfig:
     balance_weight: float = 0.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    fill_gate: float = 0.60
+    open_layer_penalty: float = 5.0
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -147,6 +149,8 @@ class PolicyPackerScheduler:
         balance_weight: float = 0.0,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
+        fill_gate: float = 0.60,
+        open_layer_penalty: float = 5.0,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -176,6 +180,8 @@ class PolicyPackerScheduler:
             priority_weight=priority_weight,
             score_mode=score_mode,
             height_slack_mm=height_slack_mm,
+            fill_gate=fill_gate,
+            open_layer_penalty=open_layer_penalty,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -201,6 +207,8 @@ class PolicyPackerScheduler:
             balance_weight=balance_weight,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            fill_gate=max(0.0, min(1.0, float(fill_gate))),
+            open_layer_penalty=max(0.0, float(open_layer_penalty)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -587,9 +595,13 @@ class PolicyPackerScheduler:
         slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
         slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
         height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
+        fill_gate = float(getattr(self._scheduler.config, "fill_gate", 0.60) or 0.60)
+        open_layer_penalty = float(getattr(self._scheduler.config, "open_layer_penalty", 5.0) or 5.0)
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["fill_gate"] = float(fill_gate)
+        kpis["open_layer_penalty"] = float(open_layer_penalty)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min

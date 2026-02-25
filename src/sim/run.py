@@ -107,11 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument(
         "--score-mode",
-        choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"],
+        choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain", "fill_first_then_height"],
         default="gain_frag",
         help=(
             "gain_frag=score actual; min_height_then_gain=prioriza menor altura final, luego gain/frag; "
-            "min_height_slack_then_gain=prioriza altura con slack, luego gain/frag"
+            "min_height_slack_then_gain=prioriza altura con slack, luego gain/frag; "
+            "fill_first_then_height=penaliza abrir capa si la capa activa aun esta poco llena"
         ),
     )
     parser.add_argument(
@@ -119,6 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Slack de altura para min_height_slack_then_gain (mm)",
+    )
+    parser.add_argument(
+        "--fill-gate",
+        type=float,
+        default=0.60,
+        help="Umbral de llenado [0..1] para penalizar apertura de capa nueva en fill_first_then_height",
+    )
+    parser.add_argument(
+        "--open-layer-penalty",
+        type=float,
+        default=5.0,
+        help="Peso de penalizacion por abrir nueva capa con bajo llenado activo",
     )
     parser.add_argument(
         "--orientation-mode",
@@ -312,6 +325,8 @@ def run_simulation(
     balance_weight: float = 0.0,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
+    fill_gate: float = 0.60,
+    open_layer_penalty: float = 5.0,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -479,6 +494,8 @@ def run_simulation(
             balance_weight=balance_weight,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            fill_gate=float(fill_gate),
+            open_layer_penalty=float(open_layer_penalty),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -572,6 +589,8 @@ def run_simulation(
             "balance_weight": balance_weight,
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
+            "fill_gate": float(fill_gate),
+            "open_layer_penalty": float(open_layer_penalty),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -648,6 +667,8 @@ def main() -> None:
         balance_weight=args.balance_weight,
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
+        fill_gate=float(args.fill_gate),
+        open_layer_penalty=float(args.open_layer_penalty),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
