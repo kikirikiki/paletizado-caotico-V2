@@ -40,6 +40,7 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
     parser = sim_run.build_parser()
     default_args = parser.parse_args(["--excel", "dummy.xlsx"])
     assert str(default_args.orientation_mode) == ORIENTATION_MODE_PLANAR
+    assert int(default_args.stand_hw_height_margin_gate_mm) == 250
 
     args = parser.parse_args(
         [
@@ -49,6 +50,8 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
             "palca",
             "--orientation-mode",
             ORIENTATION_MODE_PLANAR_STAND_HW,
+            "--stand-hw-height-margin-gate-mm",
+            "375",
         ]
     )
 
@@ -81,10 +84,13 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
         policy=str(args.policy),
         lookahead_k=1,
         orientation_mode=str(args.orientation_mode),
+        stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
     )
 
     assert captured.get("orientation_mode") == ORIENTATION_MODE_PLANAR_STAND_HW
+    assert int(captured.get("stand_hw_height_margin_gate_mm", 0)) == 375
     assert payload["params"]["orientation_mode"] == ORIENTATION_MODE_PLANAR_STAND_HW
+    assert int(payload["params"]["stand_hw_height_margin_gate_mm"]) == 375
 
 
 def test_orientation_mode_stand_hw_metrics() -> None:
