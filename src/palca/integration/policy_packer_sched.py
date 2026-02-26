@@ -145,6 +145,7 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        largest_free_rect_weight: float = 0.0,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
         orientation_mode: str = "planar",
@@ -188,6 +189,7 @@ class PolicyPackerScheduler:
         config = PolicyConfig(
             pallet_spec=pallet_spec,
             heuristic=heuristic,
+            scoring_weights=ScoringWeights(largest_free_rect_weight=float(largest_free_rect_weight)),
             scheduler=scheduler,
             stability_mode=stability_mode,
             min_support_ratio=min_support_ratio,
@@ -539,6 +541,9 @@ class PolicyPackerScheduler:
             "dt_extra_non_head_total": float(self.dt_extra_non_head_total),
             "dt_extra_avg_non_head": float(self.dt_extra_non_head_total / max(1, non_head)),
             "deadline_cutoffs_count": deadline_cutoffs,
+            "largest_free_rect_weight": float(
+                getattr(self.config.scoring_weights, "largest_free_rect_weight", 0.0) or 0.0
+            ),
         }
         micro_count = int(getattr(self._scheduler, "micro_plan_time_ms_count", 0) or 0)
         micro_sum = float(getattr(self._scheduler, "micro_plan_time_ms_sum", 0.0) or 0.0)
@@ -564,6 +569,12 @@ class PolicyPackerScheduler:
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)
         height_count = len(height_hist_sorted)
+        largest_rect_ratio_hist = [
+            float(v)
+            for v in list(getattr(self._scheduler, "selected_largest_free_rect_ratio_after_hist", []) or [])
+        ]
+        largest_rect_ratio_hist_sorted = sorted(largest_rect_ratio_hist)
+        largest_rect_ratio_count = len(largest_rect_ratio_hist_sorted)
 
         def _percentile(values: list[int], q: float) -> float:
             if not values:
@@ -587,9 +598,11 @@ class PolicyPackerScheduler:
         slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
         slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
         height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
+        largest_free_rect_weight = float(getattr(self.config.scoring_weights, "largest_free_rect_weight", 0.0) or 0.0)
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["largest_free_rect_weight"] = float(largest_free_rect_weight)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
@@ -602,6 +615,21 @@ class PolicyPackerScheduler:
         kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
         kpis["selected_height_slack_filtered_rate"] = float(slack_filtered_count / max(1, slack_decisions_count))
         kpis["selected_height_slack_set_size_mean"] = float(slack_set_size_sum / max(1, slack_decisions_count))
+        kpis["selected_largest_free_rect_ratio_after_count"] = int(largest_rect_ratio_count)
+        kpis["selected_largest_free_rect_ratio_after_min"] = (
+            float(largest_rect_ratio_hist_sorted[0]) if largest_rect_ratio_hist_sorted else 0.0
+        )
+        kpis["selected_largest_free_rect_ratio_after_mean"] = float(
+            sum(largest_rect_ratio_hist_sorted) / max(1, largest_rect_ratio_count)
+        )
+        kpis["selected_largest_free_rect_ratio_after_p10"] = _percentile(largest_rect_ratio_hist_sorted, 0.10)
+        kpis["selected_largest_free_rect_ratio_after_p50"] = _percentile(largest_rect_ratio_hist_sorted, 0.50)
+        kpis["selected_largest_free_rect_ratio_after_p90"] = _percentile(largest_rect_ratio_hist_sorted, 0.90)
+        scheduler_kpis = kpis.get("scheduler_kpis")
+        if isinstance(scheduler_kpis, dict):
+            scheduler_kpis["selected_largest_free_rect_ratio_after_mean"] = kpis[
+                "selected_largest_free_rect_ratio_after_mean"
+            ]
         return kpis
 
     def collect_controller_metrics(self) -> dict[str, object]:

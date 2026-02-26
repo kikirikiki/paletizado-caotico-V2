@@ -10,6 +10,8 @@ from .maxrects2d import Rect
 class ScoringWeights:
     packing_gain_weight: float = 1.0
     fragmentation_weight: float = 1.0
+    # Additional penalty for fragmented free area after a placement.
+    largest_free_rect_weight: float = 0.0
     tower_penalty_ratio: float = 0.1
     # Penalty applied when opening a new layer instead of placing on an existing one.
     new_layer_penalty_ratio: float = 0.0

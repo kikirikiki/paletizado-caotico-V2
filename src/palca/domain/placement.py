@@ -29,6 +29,9 @@ class PlacementPreview:
     packing_gain: float
     fragmentation: float
     height_after_mm: int | None = None
+    free_rects_after_n: int | None = None
+    largest_free_rect_area_after_mm2: int | None = None
+    free_area_after_mm2: int | None = None
     infeasible_reason: str | None = None
     score_adjustment: float = 0.0
     debug: dict[str, Any] | None = None

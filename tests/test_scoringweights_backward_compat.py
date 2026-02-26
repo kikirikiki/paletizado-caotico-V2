@@ -42,3 +42,8 @@ def test_scoringweights_height_increase_is_preserved() -> None:
 def test_legacy_scoringweights_without_height_increase_uses_default() -> None:
     model = PalletModel(scoring_weights=_LegacyScoringWeights())
     assert model.scoring_weights.height_increase_penalty_ratio == 0.0
+
+
+def test_legacy_scoringweights_without_largest_free_rect_uses_default() -> None:
+    model = PalletModel(scoring_weights=_LegacyScoringWeights())
+    assert model.scoring_weights.largest_free_rect_weight == 0.0

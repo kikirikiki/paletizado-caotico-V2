@@ -24,6 +24,9 @@ class _LayerCandidate:
     z_mm: int
     next_height_mm: int
     height_after_mm: int
+    free_rects_after_n: int
+    largest_free_rect_area_after_mm2: int
+    free_area_after_mm2: int
     packing_gain: float
     fragmentation: float
     score_delta: float
@@ -224,6 +227,10 @@ def _normalize_scoring_weights(scoring_weights: Any | None) -> ScoringWeights:
             getattr(scoring_weights, "fragmentation_weight", ScoringWeights.fragmentation_weight),
             default=ScoringWeights.fragmentation_weight,
         ),
+        largest_free_rect_weight=_coerce_weight(
+            getattr(scoring_weights, "largest_free_rect_weight", ScoringWeights.largest_free_rect_weight),
+            default=ScoringWeights.largest_free_rect_weight,
+        ),
         tower_penalty_ratio=_coerce_weight(
             getattr(scoring_weights, "tower_penalty_ratio", ScoringWeights.tower_penalty_ratio),
             default=ScoringWeights.tower_penalty_ratio,
@@ -402,6 +409,10 @@ class PalletModel:
             placement = best.placement
             debug = dict(best.debug)
             debug["rejected_by_controls"] = rejected_by_controls
+            free_area_after = int(best.free_area_after_mm2)
+            largest_after = int(best.largest_free_rect_area_after_mm2)
+            largest_ratio_after = float(largest_after / max(1, free_area_after)) if free_area_after > 0 else 1.0
+            debug["largest_free_rect_ratio_after"] = float(largest_ratio_after)
             if budget is not None:
                 debug["candidates_evaluated"] = int(budget.candidates_checked)
                 if budget.limit_hit:
@@ -414,6 +425,9 @@ class PalletModel:
                 packing_gain=best.packing_gain,
                 fragmentation=best.fragmentation,
                 height_after_mm=int(best.height_after_mm),
+                free_rects_after_n=int(best.free_rects_after_n),
+                largest_free_rect_area_after_mm2=int(best.largest_free_rect_area_after_mm2),
+                free_area_after_mm2=int(best.free_area_after_mm2),
                 score_adjustment=best.score_delta,
                 infeasible_reason=None,
                 debug=debug,
@@ -613,6 +627,9 @@ class PalletModel:
                 if budget is not None:
                     budget.candidates_checked += 1
                 free_after = layer.bin.simulate_place(cand)
+                free_rects_after_n = len(free_after)
+                free_area_after = sum(rect.area for rect in free_after)
+                largest_free_rect_area_after = max((rect.area for rect in free_after), default=0)
                 gain = packing_gain(l_mm * w_mm, self.bin_area_mm2)
                 frag = fragmentation(free_after)
                 weighted_gain = self.scoring_weights.packing_gain_weight * gain
@@ -622,7 +639,13 @@ class PalletModel:
                     "is_new_layer": is_new_layer,
                     "free_rects": len(layer.bin.free_rects),
                     "free_rects_after": len(free_after),
+                    "free_area_after_mm2": int(free_area_after),
+                    "largest_free_rect_area_after_mm2": int(largest_free_rect_area_after),
                 }
+                if free_area_after > 0:
+                    debug["largest_free_rect_ratio_after"] = float(
+                        float(largest_free_rect_area_after) / float(free_area_after)
+                    )
 
                 base_placement = Placement(
                     x_mm=cand.x + self.spec.offset_mm,
@@ -691,6 +714,9 @@ class PalletModel:
                         z_mm=adjusted.z_mm,
                         next_height_mm=next_height,
                         height_after_mm=int(layer.z_mm + next_height),
+                        free_rects_after_n=int(free_rects_after_n),
+                        largest_free_rect_area_after_mm2=int(largest_free_rect_area_after),
+                        free_area_after_mm2=int(free_area_after),
                         packing_gain=weighted_gain,
                         fragmentation=weighted_frag,
                         score_delta=score_delta,
