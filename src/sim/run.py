@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Modo continuo: cierra pallet por DEADLOCK y sigue con uno nuevo",
     )
+    parser.add_argument(
+        "--max-pallets",
+        type=int,
+        default=0,
+        help="Si >0, la simulación se detiene tras cerrar este número de pallets (por destino forzado o destino activo).",
+    )
 
     parser.add_argument(
         "--arrival-mode",
@@ -328,6 +334,7 @@ def run_simulation(
     watchdog_heartbeat_sec: float = 1.0,
     force_destination: int | None = None,
     continuous_pallets: bool = False,
+    max_pallets: int = 0,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -350,6 +357,8 @@ def run_simulation(
 
     if force_destination is not None and not (1 <= int(force_destination) <= 6):
         raise ValueError("force_destination debe estar entre 1 y 6")
+    if int(max_pallets) < 0:
+        raise ValueError("max_pallets debe ser >= 0")
 
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
@@ -440,6 +449,8 @@ def run_simulation(
         t_pick_place=t_pick_place,
         t_stage=t_stage,
         t_unstage=t_unstage,
+        force_destination=(int(force_destination) if force_destination is not None else None),
+        max_pallets=int(max_pallets),
     )
 
     decision_policy = None
@@ -588,6 +599,7 @@ def run_simulation(
             "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
             "force_destination": force_destination,
             "continuous_pallets": continuous_pallets,
+            "max_pallets": int(max_pallets),
             "viz_dest": viz_dest,
         },
         "metrics": metrics_payload,
@@ -666,6 +678,7 @@ def main() -> None:
             int(args.force_destination) if args.force_destination is not None else None
         ),
         continuous_pallets=bool(args.continuous_pallets),
+        max_pallets=int(args.max_pallets),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),

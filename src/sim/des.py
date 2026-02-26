@@ -89,6 +89,8 @@ class SimConfig:
     t_pick_place: float = 14.0
     t_stage: float = 6.0
     t_unstage: float = 10.0
+    force_destination: int | None = None
+    max_pallets: int = 0
     logger: logging.Logger | None = None
     decision_policy: Any | None = None
 
@@ -293,6 +295,24 @@ def simulate(
     destinations = {dest: DestinationState(destination=dest) for dest in range(1, 7)}
     closed_pallets: dict[int, list[int]] = {dest: [] for dest in destinations}
     closures_by_reason: dict[int, dict[str, int]] = {dest: {} for dest in destinations}
+    max_pallets_limit = max(0, int(getattr(config, "max_pallets", 0) or 0))
+    forced_target_dest = getattr(config, "force_destination", None)
+    target_dest: int
+    try:
+        maybe_target = int(forced_target_dest) if forced_target_dest is not None else None
+    except (TypeError, ValueError):
+        maybe_target = None
+    if maybe_target is not None and maybe_target in destinations:
+        target_dest = int(maybe_target)
+    else:
+        detected_destinations = sorted(
+            {
+                int(item.destination)
+                for item in arrival_list
+                if int(item.destination) in destinations
+            }
+        )
+        target_dest = int(detected_destinations[0]) if detected_destinations else int(min(destinations))
 
     scheduler = Scheduler()
     events: list[tuple[float, int, Event]] = []
@@ -391,12 +411,19 @@ def simulate(
         heapq.heappush(events, (event.time, event.seq, event))
 
     def start_changeover(destination: int, time: float, reason: str = "COUNT") -> None:
+        nonlocal stop_reason
         dest_state = destinations[destination]
         if dest_state.state == "CHANGEOVER":
             return
         if dest_state.count > 0:
             closed_pallets[destination].append(int(dest_state.count))
             dest_state.count = 0
+            if (
+                max_pallets_limit > 0
+                and int(destination) == int(target_dest)
+                and len(closed_pallets[target_dest]) >= max_pallets_limit
+            ):
+                stop_reason = "MAX_PALLETS"
         reason_key = str(reason).strip() or "UNKNOWN"
         by_reason = closures_by_reason.setdefault(destination, {})
         by_reason[reason_key] = int(by_reason.get(reason_key, 0)) + 1
@@ -659,6 +686,10 @@ def simulate(
             elif event.kind == "CHANGEOVER_DONE":
                 handle_changeover_done(event)
 
+        if stop_reason is not None:
+            update_flags()
+            break
+
         for rid, ramp in ramps.items():
             fill_ramp_from_upstream(ramp, current_time)
             fill_ramp_from_arrivals(ramp, pending_arrivals[rid], current_time)
@@ -720,6 +751,8 @@ def simulate(
                             if dest_key in destinations and destinations[dest_key].state == "ACTIVE":
                                 start_changeover(dest_key, current_time, reason=map_policy_reason(str(reason)))
                                 closures_started = True
+                    if stop_reason is not None:
+                        break
                     policy_stop = getattr(policy, "stop_reason", None)
                     policy_details = getattr(policy, "stop_details", {}) or {}
                     if policy_stop == "DEADLOCK":
@@ -746,6 +779,8 @@ def simulate(
                             if close_continuous_deadlock(str(details.get("reason", "UNKNOWN")), details):
                                 clear_policy_deadlock_state()
                                 update_flags()
+                                if stop_reason is not None:
+                                    break
                                 continue
                         stop_reason = "DEADLOCK"
                         break
@@ -755,6 +790,8 @@ def simulate(
                             if close_continuous_deadlock("STRUCTURAL"):
                                 clear_policy_deadlock_state()
                                 update_flags()
+                                if stop_reason is not None:
+                                    break
                                 continue
                         stop_reason = "DEADLOCK"
                         logger.error(
@@ -829,6 +866,10 @@ def simulate(
     pallet_kpis["continuous_closures_by_reason"] = {
         dest: dict(reasons) for dest, reasons in closures_by_reason.items()
     }
+    target_sequence = list(closed_pallets.get(target_dest, []))
+    pallet_kpis["target_destination"] = int(target_dest)
+    pallet_kpis["first_pallet_boxes"] = int(target_sequence[0]) if target_sequence else 0
+    pallet_kpis["pallets_closed"] = int(len(target_sequence))
 
     if window_n_decisions > 0:
         window_stats = {
