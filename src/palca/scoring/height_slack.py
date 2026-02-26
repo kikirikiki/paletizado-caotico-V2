@@ -109,7 +109,9 @@ def _choose_and_rank_candidates(
         feasible_n=len(feasible),
         min_height_after_mm=int(min_height_after_mm),
         slack_set_n=len(slack_set),
-        slack_set_used=(mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN and bool(slack_set)),
+        slack_set_used=(
+            mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN and len(slack_set) < len(feasible)
+        ),
         slack_mm=slack_mm,
         score_mode=mode.value,
     )
