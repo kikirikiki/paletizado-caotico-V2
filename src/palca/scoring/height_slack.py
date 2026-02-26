@@ -65,6 +65,45 @@ def rank_for_expansion_with_height_slack(
     return ordered
 
 
+def rank_for_expansion_with_height_buckets(
+    candidates: Sequence[T],
+    height_slack_mm: int,
+    height_bucket_mm: int,
+    height_after_mm_fn: Callable[[T], int],
+    gain_frag_key_fn: Callable[[T], Any],
+) -> list[T]:
+    feasible = list(candidates)
+    if not feasible:
+        return []
+
+    slack_mm = max(0, int(height_slack_mm))
+    bucket_mm = max(1, int(height_bucket_mm))
+
+    indexed = [
+        (idx, candidate, int(height_after_mm_fn(candidate)), gain_frag_key_fn(candidate))
+        for idx, candidate in enumerate(feasible)
+    ]
+    min_height_after_mm = min(height for _idx, _candidate, height, _gain_key in indexed)
+    slack_limit = int(min_height_after_mm) + int(slack_mm)
+
+    eligible = [
+        (
+            idx,
+            candidate,
+            (int(height) - int(min_height_after_mm)) // int(bucket_mm),
+            gain_key,
+        )
+        for idx, candidate, height, gain_key in indexed
+        if int(height) <= int(slack_limit)
+    ]
+
+    # Orden determinista: bucket asc, gain_frag desc, luego índice original.
+    eligible.sort(key=lambda rec: int(rec[0]))
+    eligible.sort(key=lambda rec: rec[3], reverse=True)
+    eligible.sort(key=lambda rec: int(rec[2]))
+    return [candidate for _idx, candidate, _bucket, _gain_key in eligible]
+
+
 def _choose_and_rank_candidates(
     *,
     candidates: Sequence[T],

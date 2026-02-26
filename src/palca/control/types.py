@@ -24,6 +24,7 @@ class DecisionContext:
 class Overrides:
     score_mode: str | None = None
     height_slack_mm: int | None = None
+    height_bucket_mm: int | None = None
     micro_depth: int | None = None
     micro_width: int | None = None
     micro_topk: int | None = None
@@ -33,6 +34,7 @@ class Overrides:
         raw = {
             "score_mode": self.score_mode,
             "height_slack_mm": self.height_slack_mm,
+            "height_bucket_mm": self.height_bucket_mm,
             "micro_depth": self.micro_depth,
             "micro_width": self.micro_width,
             "micro_topk": self.micro_topk,

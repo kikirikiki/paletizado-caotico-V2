@@ -14,7 +14,7 @@ from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
     choose_with_height_slack,
-    rank_for_expansion_with_height_slack,
+    rank_for_expansion_with_height_buckets,
 )
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
@@ -38,6 +38,7 @@ class SchedulerConfig:
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    height_bucket_mm: int = 80
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -67,6 +68,7 @@ class SchedulerConfig:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
         object.__setattr__(self, "score_mode", mode)
         object.__setattr__(self, "height_slack_mm", max(0, int(self.height_slack_mm)))
+        object.__setattr__(self, "height_bucket_mm", max(1, int(self.height_bucket_mm)))
 
 
 @dataclass(frozen=True)
@@ -543,10 +545,10 @@ class SchedulerV1:
 
                 if expansions:
                     if self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
-                        ordered_expansions = rank_for_expansion_with_height_slack(
+                        ordered_expansions = rank_for_expansion_with_height_buckets(
                             candidates=expansions,
-                            score_mode=self.config.score_mode,
                             height_slack_mm=int(self.config.height_slack_mm),
+                            height_bucket_mm=int(self.config.height_bucket_mm),
                             height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
                             gain_frag_key_fn=self._beam_expansion_gain_frag_key,
                         )
@@ -596,6 +598,7 @@ class SchedulerV1:
                 else None
             ),
             "height_slack_mm": int(self.config.height_slack_mm),
+            "height_bucket_mm": int(self.config.height_bucket_mm),
             "cutoff": bool(cutoff),
             "cutoff_reason": str(cutoff_reason),
         }
@@ -615,6 +618,14 @@ class SchedulerV1:
                 -float(node.starv_cost_sum),
                 float(node.priority_sum),
                 float(node.score_adjustment_sum),
+                float(node.score_sum),
+            )
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
+            bucket_mm = max(1, int(self.config.height_bucket_mm))
+            bucket = int(node.height_after_mm) // bucket_mm
+            return (
+                int(node.placed_count),
+                -int(bucket),
                 float(node.score_sum),
             )
         return (int(node.placed_count), float(node.score_sum))
