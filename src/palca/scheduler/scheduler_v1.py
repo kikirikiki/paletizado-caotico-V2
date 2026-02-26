@@ -123,6 +123,8 @@ class _ScoreTerms:
     priority_score: float
     scalar_score: float
     height_after_mm: int
+    largest_free_rect_penalty: float = 0.0
+    largest_free_rect_ratio_after: float | None = None
 
 
 @dataclass
@@ -183,6 +185,7 @@ class SchedulerV1:
         self.selected_height_slack_decisions_count = 0
         self.selected_height_slack_filtered_count = 0
         self.selected_height_slack_set_size_sum = 0.0
+        self.selected_largest_free_rect_ratio_after_hist: list[float] = []
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -222,6 +225,9 @@ class SchedulerV1:
                 self._record_height_decision(
                     selected_height=micro_stats.get("selected_height_after_mm"),
                     min_feasible_height=micro_stats.get("feasible_first_min_height_mm"),
+                )
+                self._record_largest_free_rect_ratio_decision(
+                    self._preview_largest_free_rect_ratio(micro_plan.preview)
                 )
                 self._record_slack_decision(micro_slack_stats)
                 self.last_eval_stats = {
@@ -383,6 +389,7 @@ class SchedulerV1:
                     box=box,
                     idx=idx,
                     preview=preview,
+                    pallet=pallet,
                     max_priority=max_priority,
                     height_after_mm=height_after_mm,
                 )
@@ -444,6 +451,7 @@ class SchedulerV1:
                     selected_height=selected.terms.height_after_mm,
                     min_feasible_height=slack_stats.min_height_after_mm,
                 )
+                self._record_largest_free_rect_ratio_decision(selected.terms.largest_free_rect_ratio_after)
                 self._record_slack_decision(slack_stats)
 
         if items_evaluated > 0 and items_feasible == 0 and not cutoff and not self.last_blocked_pallets:
@@ -741,6 +749,7 @@ class SchedulerV1:
             box=box,
             idx=idx,
             preview=preview,
+            pallet=pallet,
             max_priority=float(action.max_priority),
             height_after_mm=height_after_mm,
         )
@@ -815,6 +824,7 @@ class SchedulerV1:
         box: Box,
         idx: int,
         preview: PlacementPreview,
+        pallet: PalletModel,
         max_priority: float,
         height_after_mm: int,
     ) -> _ScoreTerms:
@@ -825,10 +835,16 @@ class SchedulerV1:
         priority_val = float(getattr(box, "priority", 0.0) or 0.0)
         priority_norm = (priority_val / max_priority) if max_priority > 0 else 0.0
         priority_score = priority_bonus(priority_norm, self.config.priority_weight)
+        largest_free_rect_ratio_after = self._preview_largest_free_rect_ratio(preview)
+        largest_free_rect_weight = self._largest_free_rect_weight(pallet)
+        largest_free_rect_penalty = 0.0
+        if largest_free_rect_ratio_after is not None and largest_free_rect_weight > 0.0:
+            largest_free_rect_penalty = float(largest_free_rect_weight) * float(1.0 - largest_free_rect_ratio_after)
 
         score = (
             float(preview.packing_gain)
             - float(preview.fragmentation)
+            - float(largest_free_rect_penalty)
             + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
             - time_cost
             - starv_cost
@@ -844,6 +860,8 @@ class SchedulerV1:
             priority_score=float(priority_score),
             scalar_score=float(score),
             height_after_mm=int(height_after_mm),
+            largest_free_rect_penalty=float(largest_free_rect_penalty),
+            largest_free_rect_ratio_after=largest_free_rect_ratio_after,
         )
 
     @staticmethod
@@ -868,6 +886,7 @@ class SchedulerV1:
             int(terms.height_after_mm),
             -float(terms.packing_gain),
             float(terms.fragmentation),
+            float(terms.largest_free_rect_penalty),
             -float(terms.score_adjustment),
             float(terms.time_cost),
             float(terms.starv_cost),
@@ -901,6 +920,32 @@ class SchedulerV1:
         return 0
 
     @staticmethod
+    def _preview_largest_free_rect_ratio(preview: PlacementPreview) -> float | None:
+        free_area_after = getattr(preview, "free_area_after_mm2", None)
+        largest_after = getattr(preview, "largest_free_rect_area_after_mm2", None)
+        try:
+            free_area_int = int(free_area_after) if free_area_after is not None else None
+            largest_int = int(largest_after) if largest_after is not None else None
+        except (TypeError, ValueError):
+            return None
+        if free_area_int is None or largest_int is None:
+            return None
+        if free_area_int <= 0:
+            return 1.0
+        ratio = float(largest_int) / float(max(1, free_area_int))
+        return float(min(1.0, max(0.0, ratio)))
+
+    @staticmethod
+    def _largest_free_rect_weight(pallet: PalletModel | None) -> float:
+        if pallet is None:
+            return 0.0
+        scoring_weights = getattr(pallet, "scoring_weights", None)
+        try:
+            return float(getattr(scoring_weights, "largest_free_rect_weight", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
     def _state_height_after_mm(pallets: Mapping[int | str, PalletModel]) -> int:
         if not pallets:
             return 0
@@ -931,6 +976,17 @@ class SchedulerV1:
             return
         if selected > min_height:
             self.selected_height_above_min_feasible_count += 1
+
+    def _record_largest_free_rect_ratio_decision(self, ratio_after: float | None) -> None:
+        if ratio_after is None:
+            return
+        try:
+            ratio = float(ratio_after)
+        except (TypeError, ValueError):
+            return
+        if ratio < 0.0 or ratio > 1.0:
+            ratio = min(1.0, max(0.0, ratio))
+        self.selected_largest_free_rect_ratio_after_hist.append(float(ratio))
 
     def _record_slack_decision(self, stats: SlackDecisionStats | None) -> None:
         if stats is None:

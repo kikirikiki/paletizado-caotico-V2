@@ -106,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument(
+        "--largest-free-rect-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Peso (penalizacion) para placements que reducen el mayor rectangulo libre tras la colocacion "
+            "(mejora relleno homogeneo)."
+        ),
+    )
+    parser.add_argument(
         "--score-mode",
         choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"],
         default="gain_frag",
@@ -310,6 +319,7 @@ def run_simulation(
     priority_mode: str = "none",
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
+    largest_free_rect_weight: float = 0.0,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
     orientation_mode: str = "planar",
@@ -477,6 +487,7 @@ def run_simulation(
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            largest_free_rect_weight=largest_free_rect_weight,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
@@ -570,6 +581,7 @@ def run_simulation(
             "priority_mode": priority_mode,
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
+            "largest_free_rect_weight": largest_free_rect_weight,
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
             "orientation_mode": str(orientation_mode),
@@ -646,6 +658,7 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        largest_free_rect_weight=float(args.largest_free_rect_weight),
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
         orientation_mode=str(args.orientation_mode),
