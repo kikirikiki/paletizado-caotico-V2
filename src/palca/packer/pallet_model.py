@@ -27,6 +27,7 @@ class _LayerCandidate:
     packing_gain: float
     fragmentation: float
     score_delta: float
+    spread_reward: float
     placement: Placement
     debug: dict[str, Any]
 
@@ -365,7 +366,7 @@ class PalletModel:
         objective_eps = 2e-3
 
         def _objective(cand: _LayerCandidate) -> float:
-            return cand.packing_gain - cand.fragmentation + cand.score_delta
+            return cand.packing_gain - cand.fragmentation + cand.score_delta + cand.spread_reward
 
         def _tie_key(cand: _LayerCandidate, objective: float) -> tuple[tuple[int, ...], int, int, int, int, int]:
             inv_score = _inv_maxrects_score(cand, objective)
@@ -657,7 +658,18 @@ class PalletModel:
                         feasible = False
                         break
 
-                objective = weighted_gain - weighted_frag + score_delta
+                cx = float(cand.x) + (float(cand.w) / 2.0)
+                cy = float(cand.y) + (float(cand.h) / 2.0)
+                bx = float(layer.bin.width) / 2.0
+                by = float(layer.bin.height) / 2.0
+                dx = abs(cx - bx) / max(1.0, bx)
+                dy = abs(cy - by) / max(1.0, by)
+                dist = float(dx + dy)
+                spread_reward = float(self.scoring_weights.spread_weight) * dist
+                debug["spread_dist"] = dist
+                debug["spread_reward"] = float(spread_reward)
+
+                objective = weighted_gain - weighted_frag + score_delta + spread_reward
                 if feasible:
                     tower_penalty = self._tower_penalty(adjusted, weighted_gain)
                     if tower_penalty:
@@ -694,6 +706,7 @@ class PalletModel:
                         packing_gain=weighted_gain,
                         fragmentation=weighted_frag,
                         score_delta=score_delta,
+                        spread_reward=spread_reward,
                         placement=adjusted,
                         debug=debug,
                     )
@@ -775,7 +788,7 @@ class PalletModel:
         def _layer_key(cand: _LayerCandidate) -> tuple[float, ...]:
             score = getattr(cand.candidate, "score", None)
             if score is None:
-                objective = cand.packing_gain - cand.fragmentation + cand.score_delta
+                objective = cand.packing_gain - cand.fragmentation + cand.score_delta + cand.spread_reward
                 return (
                     -(objective),
                     cand.candidate.x,
