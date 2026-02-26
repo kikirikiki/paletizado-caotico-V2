@@ -145,6 +145,7 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        spread_weight: float = 0.0,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
         orientation_mode: str = "planar",
@@ -160,6 +161,7 @@ class PolicyPackerScheduler:
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
+        scoring_weights: ScoringWeights | None = None,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -185,6 +187,11 @@ class PolicyPackerScheduler:
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
         )
+        base_scoring_weights = scoring_weights or PolicyConfig().scoring_weights
+        effective_scoring_weights = replace(
+            base_scoring_weights,
+            spread_weight=float(spread_weight),
+        )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
             heuristic=heuristic,
@@ -199,6 +206,7 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            scoring_weights=effective_scoring_weights,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
@@ -590,6 +598,7 @@ class PolicyPackerScheduler:
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["spread_weight"] = float(self.config.scoring_weights.spread_weight)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
