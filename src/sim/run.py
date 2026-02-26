@@ -121,6 +121,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Slack de altura para min_height_slack_then_gain (mm)",
     )
     parser.add_argument(
+        "--height-bucket-mm",
+        type=int,
+        default=80,
+        help=(
+            "Tamaño de bucket de altura (mm) para ordenar expansiones del micro-planner en "
+            "min_height_slack_then_gain"
+        ),
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -312,6 +321,7 @@ def run_simulation(
     balance_weight: float = 0.0,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
+    height_bucket_mm: int = 80,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -479,6 +489,7 @@ def run_simulation(
             balance_weight=balance_weight,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            height_bucket_mm=max(1, int(height_bucket_mm)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -572,6 +583,7 @@ def run_simulation(
             "balance_weight": balance_weight,
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
+            "height_bucket_mm": int(max(1, int(height_bucket_mm))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -648,6 +660,7 @@ def main() -> None:
         balance_weight=args.balance_weight,
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
+        height_bucket_mm=int(args.height_bucket_mm),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
