@@ -27,6 +27,9 @@ class _LayerCandidate:
     packing_gain: float
     fragmentation: float
     score_delta: float
+    spread_reward: float
+    new_layer_penalty: float
+    height_increase_penalty: float
     placement: Placement
     debug: dict[str, Any]
 
@@ -236,6 +239,14 @@ def _normalize_scoring_weights(scoring_weights: Any | None) -> ScoringWeights:
             ),
             default=ScoringWeights.new_layer_penalty_ratio,
         ),
+        height_increase_penalty_ratio=_coerce_weight(
+            getattr(
+                scoring_weights,
+                "height_increase_penalty_ratio",
+                ScoringWeights.height_increase_penalty_ratio,
+            ),
+            default=ScoringWeights.height_increase_penalty_ratio,
+        ),
     )
 
 
@@ -365,7 +376,7 @@ class PalletModel:
         objective_eps = 2e-3
 
         def _objective(cand: _LayerCandidate) -> float:
-            return cand.packing_gain - cand.fragmentation + cand.score_delta
+            return self._candidate_objective(cand)
 
         def _tie_key(cand: _LayerCandidate, objective: float) -> tuple[tuple[int, ...], int, int, int, int, int]:
             inv_score = _inv_maxrects_score(cand, objective)
@@ -554,6 +565,16 @@ class PalletModel:
                 return -float(self.scoring_weights.tower_penalty_ratio) * float(packing_gain)
         return 0.0
 
+    def _candidate_objective(self, cand: _LayerCandidate) -> float:
+        return (
+            float(cand.packing_gain)
+            - float(cand.fragmentation)
+            + float(cand.score_delta)
+            + float(cand.spread_reward)
+            - float(cand.new_layer_penalty)
+            - float(cand.height_increase_penalty)
+        )
+
     def _preview_in_layer(
         self,
         layer: LayerState,
@@ -617,11 +638,19 @@ class PalletModel:
                 frag = fragmentation(free_after)
                 weighted_gain = self.scoring_weights.packing_gain_weight * gain
                 weighted_frag = self.scoring_weights.fragmentation_weight * frag
+                new_layer_pen = float(self.scoring_weights.new_layer_penalty_ratio) if is_new_layer else 0.0
+                height_inc_mm = max(0, int(next_height) - int(layer.height_mm))
+                height_inc_pen = float(self.scoring_weights.height_increase_penalty_ratio) * (
+                    float(height_inc_mm) / float(max(1, int(self.spec.max_height_mm)))
+                )
                 debug = {
                     "layer_id": layer.layer_id,
                     "is_new_layer": is_new_layer,
                     "free_rects": len(layer.bin.free_rects),
                     "free_rects_after": len(free_after),
+                    "new_layer_penalty": float(new_layer_pen),
+                    "height_increase_mm": int(height_inc_mm),
+                    "height_increase_penalty": float(height_inc_pen),
                 }
 
                 base_placement = Placement(
@@ -657,12 +686,30 @@ class PalletModel:
                         feasible = False
                         break
 
-                objective = weighted_gain - weighted_frag + score_delta
+                cx = float(adjusted.x_mm) + (float(adjusted.length_mm) / 2.0)
+                cy = float(adjusted.y_mm) + (float(adjusted.width_mm) / 2.0)
+                bx = float(self.spec.offset_mm) + (float(self.spec.bin_length_mm) / 2.0)
+                by = float(self.spec.offset_mm) + (float(self.spec.bin_width_mm) / 2.0)
+                dx = abs(cx - bx) / max(1.0, (float(self.spec.bin_length_mm) / 2.0))
+                dy = abs(cy - by) / max(1.0, (float(self.spec.bin_width_mm) / 2.0))
+                dist = float(dx + dy)
+                spread_reward = float(self.scoring_weights.spread_weight) * dist
+                debug["spread_dist"] = float(dist)
+                debug["spread_reward"] = float(spread_reward)
+
+                objective = weighted_gain - weighted_frag + score_delta + spread_reward - new_layer_pen - height_inc_pen
                 if feasible:
                     tower_penalty = self._tower_penalty(adjusted, weighted_gain)
                     if tower_penalty:
                         score_delta += tower_penalty
-                        objective += tower_penalty
+                        objective = (
+                            weighted_gain
+                            - weighted_frag
+                            + score_delta
+                            + spread_reward
+                            - new_layer_pen
+                            - height_inc_pen
+                        )
                         debug["tower_penalty"] = float(tower_penalty)
 
                 candidate_info: dict[str, Any] = {
@@ -694,6 +741,9 @@ class PalletModel:
                         packing_gain=weighted_gain,
                         fragmentation=weighted_frag,
                         score_delta=score_delta,
+                        spread_reward=spread_reward,
+                        new_layer_penalty=new_layer_pen,
+                        height_increase_penalty=height_inc_pen,
                         placement=adjusted,
                         debug=debug,
                     )

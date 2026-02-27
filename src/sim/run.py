@@ -105,6 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
+    parser.add_argument("--spread-weight", type=float, default=0.0, help="Peso del reward de spread")
+    parser.add_argument(
+        "--new-layer-penalty-ratio",
+        type=float,
+        default=0.0,
+        help="Penalizacion al abrir nueva capa (ratio)",
+    )
+    parser.add_argument(
+        "--height-increase-penalty-ratio",
+        type=float,
+        default=0.0,
+        help="Penalizacion por incremento de altura (ratio normalizado)",
+    )
     parser.add_argument(
         "--score-mode",
         choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"],
@@ -310,6 +323,9 @@ def run_simulation(
     priority_mode: str = "none",
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
+    spread_weight: float = 0.0,
+    new_layer_penalty_ratio: float = 0.0,
+    height_increase_penalty_ratio: float = 0.0,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
     orientation_mode: str = "planar",
@@ -477,6 +493,9 @@ def run_simulation(
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            spread_weight=spread_weight,
+            new_layer_penalty_ratio=new_layer_penalty_ratio,
+            height_increase_penalty_ratio=height_increase_penalty_ratio,
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
@@ -570,6 +589,9 @@ def run_simulation(
             "priority_mode": priority_mode,
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
+            "spread_weight": float(spread_weight),
+            "new_layer_penalty_ratio": float(new_layer_penalty_ratio),
+            "height_increase_penalty_ratio": float(height_increase_penalty_ratio),
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
             "orientation_mode": str(orientation_mode),
@@ -646,6 +668,9 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        spread_weight=float(args.spread_weight),
+        new_layer_penalty_ratio=float(args.new_layer_penalty_ratio),
+        height_increase_penalty_ratio=float(args.height_increase_penalty_ratio),
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
         orientation_mode=str(args.orientation_mode),

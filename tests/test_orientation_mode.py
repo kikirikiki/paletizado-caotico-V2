@@ -49,6 +49,12 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
             "palca",
             "--orientation-mode",
             ORIENTATION_MODE_PLANAR_STAND_HW,
+            "--spread-weight",
+            "0.3",
+            "--new-layer-penalty-ratio",
+            "0.2",
+            "--height-increase-penalty-ratio",
+            "0.1",
         ]
     )
 
@@ -81,10 +87,19 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
         policy=str(args.policy),
         lookahead_k=1,
         orientation_mode=str(args.orientation_mode),
+        spread_weight=float(args.spread_weight),
+        new_layer_penalty_ratio=float(args.new_layer_penalty_ratio),
+        height_increase_penalty_ratio=float(args.height_increase_penalty_ratio),
     )
 
     assert captured.get("orientation_mode") == ORIENTATION_MODE_PLANAR_STAND_HW
+    assert float(captured.get("spread_weight", -1.0)) == 0.3
+    assert float(captured.get("new_layer_penalty_ratio", -1.0)) == 0.2
+    assert float(captured.get("height_increase_penalty_ratio", -1.0)) == 0.1
     assert payload["params"]["orientation_mode"] == ORIENTATION_MODE_PLANAR_STAND_HW
+    assert float(payload["params"]["spread_weight"]) == 0.3
+    assert float(payload["params"]["new_layer_penalty_ratio"]) == 0.2
+    assert float(payload["params"]["height_increase_penalty_ratio"]) == 0.1
 
 
 def test_orientation_mode_stand_hw_metrics() -> None:
