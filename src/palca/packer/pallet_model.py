@@ -103,7 +103,7 @@ def normalize_orientation_mode(mode: str | None) -> str:
 
 
 def should_allow_stand_hw(height_margin_mm: int, gate_mm: int) -> bool:
-    return int(height_margin_mm) <= max(0, int(gate_mm))
+    return int(height_margin_mm) >= max(0, int(gate_mm))
 
 
 def orientation_dims_for_mode(
@@ -772,10 +772,23 @@ class PalletModel:
         )
 
     def _best_by_maxrects_score(self, candidates: list[_LayerCandidate]) -> list[_LayerCandidate]:
+        use_objective = (
+            self.scoring_weights.spread_weight != 0
+            or self.scoring_weights.new_layer_penalty_ratio != 0
+            or self.scoring_weights.height_increase_penalty_ratio != 0
+        )
+
         def _layer_key(cand: _LayerCandidate) -> tuple[float, ...]:
             score = getattr(cand.candidate, "score", None)
+            objective = self._candidate_objective(cand)
+            if use_objective:
+                return (-(objective),) + (tuple(score) if score is not None else ()) + (
+                    cand.candidate.x,
+                    cand.candidate.y,
+                    cand.candidate.w,
+                    cand.candidate.h,
+                )
             if score is None:
-                objective = cand.packing_gain - cand.fragmentation + cand.score_delta
                 return (
                     -(objective),
                     cand.candidate.x,

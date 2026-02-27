@@ -106,7 +106,7 @@ def test_orientation_mode_stand_hw_metrics() -> None:
     extended_model = PalletModel(
         spec=spec,
         orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW,
-        stand_hw_height_margin_gate_mm=3000,
+        stand_hw_height_margin_gate_mm=0,
     )
     preview = extended_model.preview_place(box)
     assert preview.feasible
@@ -124,7 +124,7 @@ def test_orientation_mode_stand_hw_metrics() -> None:
     assert int(orientation_counts.get("planar", 0)) == 0
     assert int(kpis.get("stand_hw_used_total", 0)) == 1
     assert int(stand_hw_used_by_dest.get(1, 0)) == 1
-    assert int(kpis.get("stand_hw_gate_mm", 0)) == 3000
+    assert int(kpis.get("stand_hw_gate_mm", 0)) == 0
     assert int(kpis.get("stand_hw_gate_allows_total", 0)) == 1
     assert int(kpis.get("stand_hw_gate_blocks_total", 0)) == 0
 
@@ -142,9 +142,9 @@ def test_stand_hw_height_margin_gating() -> None:
         variant.family
         for variant in high_margin_model._orientations(400, 300, 200)  # noqa: SLF001
     }
-    assert high_margin_families == {"planar"}
-    assert high_margin_model.stats.stand_hw_gate_blocks_total == 1
-    assert high_margin_model.stats.stand_hw_gate_allows_total == 0
+    assert "stand_hw" in high_margin_families
+    assert high_margin_model.stats.stand_hw_gate_blocks_total == 0
+    assert high_margin_model.stats.stand_hw_gate_allows_total == 1
 
     low_margin_model = PalletModel(
         spec=spec,
@@ -163,6 +163,6 @@ def test_stand_hw_height_margin_gating() -> None:
         variant.family
         for variant in low_margin_model._orientations(400, 300, 200)  # noqa: SLF001
     }
-    assert "stand_hw" in low_margin_families
-    assert low_margin_model.stats.stand_hw_gate_blocks_total == 0
-    assert low_margin_model.stats.stand_hw_gate_allows_total == 1
+    assert "stand_hw" not in low_margin_families
+    assert low_margin_model.stats.stand_hw_gate_blocks_total == 1
+    assert low_margin_model.stats.stand_hw_gate_allows_total == 0
