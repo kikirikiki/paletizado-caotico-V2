@@ -35,3 +35,14 @@ El repo incluye `.vscode/` con:
 ## Reglas Git (resumen)
 - Cambios siempre en rama nueva: `feat/<tema>` o `fix/<tema>`
 - No commitear: `out/`, `outputs/`, `logs/`, `.venv/`, `__pycache__/`
+
+## Ablation runner
+Ejecuta variantes de orientación y resume KPIs sin `--print` gigante:
+```bash
+PYTHONPATH=src ./.venv/bin/python scripts/ablation_runner.py --excel "data/Flujo rampas - Editado.xlsx" --outdir /tmp/palca-ablation
+```
+El runner guarda `<variant>.json`, `<variant>.log`, `summary.csv` y `summary.json` en `--outdir` (recomendado fuera del repo, por ejemplo `/tmp/...`).
+Para resumir un JSON individual:
+```bash
+PYTHONPATH=src ./.venv/bin/python scripts/summarize_run.py --in /tmp/palca-ablation/gate400.json --csv /tmp/palca-ablation/gate400_summary.csv
+```
