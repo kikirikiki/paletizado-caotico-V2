@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+import heapq
 import time
 from typing import Any, Iterable
 
@@ -237,6 +238,50 @@ def _normalize_scoring_weights(scoring_weights: Any | None) -> ScoringWeights:
             default=ScoringWeights.new_layer_penalty_ratio,
         ),
     )
+
+
+def _free_rect_corner_candidates(
+    free_rects: Iterable[Rect],
+    length_mm: int,
+    width_mm: int,
+    *,
+    top_n: int = 16,
+) -> tuple[list[MaxRectsCandidate], set[tuple[int, int, int, int]]]:
+    box_w = int(length_mm)
+    box_h = int(width_mm)
+    limit = max(0, int(top_n))
+    if box_w <= 0 or box_h <= 0 or limit <= 0:
+        return [], set()
+
+    fitting_rects = [rect for rect in free_rects if box_w <= int(rect.w) and box_h <= int(rect.h)]
+    if not fitting_rects:
+        return [], set()
+
+    top_rects = heapq.nlargest(limit, fitting_rects, key=lambda rect: int(rect.area))
+    candidates: list[MaxRectsCandidate] = []
+    keys: set[tuple[int, int, int, int]] = set()
+
+    for rect in top_rects:
+        x0 = int(rect.x)
+        y0 = int(rect.y)
+        x1 = x0 + int(rect.w) - box_w
+        y1 = y0 + int(rect.h) - box_h
+        for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+            key = (int(x), int(y), box_w, box_h)
+            if key in keys:
+                continue
+            keys.add(key)
+            candidates.append(
+                MaxRectsCandidate(
+                    x=int(x),
+                    y=int(y),
+                    w=box_w,
+                    h=box_h,
+                    score=(0,),
+                )
+            )
+
+    return candidates, keys
 
 
 class PalletModel:
@@ -568,136 +613,198 @@ class PalletModel:
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         if budget is not None and budget.should_stop():
             return candidates, rejected_by_controls, evaluated_candidates, True
-        for orientation in orientations:
-            l_mm = int(orientation.length_mm)
-            w_mm = int(orientation.width_mm)
-            h_mm = int(orientation.height_mm)
-            if not self._fits_in_bin(l_mm, w_mm, self.spec.bin_length_mm, self.spec.bin_width_mm):
-                continue
-            next_height = max(layer.height_mm, h_mm)
-            if layer.z_mm + next_height > self.spec.max_height_mm:
-                continue
-            base_candidates = list(
-                self.controls.point.candidates(
-                    layer=layer,
-                    length_mm=l_mm,
-                    width_mm=w_mm,
-                    height_mm=h_mm,
-                    is_new_layer=is_new_layer,
-                )
-            )
-            if is_new_layer:
-                seeded_points = self._seed_new_layer_points(
-                    layer.z_mm,
-                    l_mm,
-                    w_mm,
-                    free_rects=layer.bin.free_rects,
-                )
-                if seeded_points:
-                    seeded = [
-                        MaxRectsCandidate(x, y, int(l_mm), int(w_mm), score=(0,))
-                        for x, y in seeded_points
-                    ]
-                    seen: set[tuple[int, int, int, int]] = set()
-                    merged: list[MaxRectsCandidate] = []
-                    for cand in base_candidates + seeded:
-                        key = (int(cand.x), int(cand.y), int(cand.w), int(cand.h))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        merged.append(cand)
-                    base_candidates = merged
-            for cand in base_candidates:
+        free_rect_corner_top_n = 16
+
+        def _evaluate_orientation_batch(
+            orientation_batch: list[_OrientationVariant],
+            *,
+            stand_hw_strict: bool,
+        ) -> bool:
+            nonlocal rejected_by_controls
+
+            for orientation in orientation_batch:
                 if budget is not None and budget.should_stop():
-                    return candidates, rejected_by_controls, evaluated_candidates, True
-                if budget is not None:
-                    budget.candidates_checked += 1
-                free_after = layer.bin.simulate_place(cand)
-                gain = packing_gain(l_mm * w_mm, self.bin_area_mm2)
-                frag = fragmentation(free_after)
-                weighted_gain = self.scoring_weights.packing_gain_weight * gain
-                weighted_frag = self.scoring_weights.fragmentation_weight * frag
-                debug = {
-                    "layer_id": layer.layer_id,
-                    "is_new_layer": is_new_layer,
-                    "free_rects": len(layer.bin.free_rects),
-                    "free_rects_after": len(free_after),
-                }
+                    return True
 
-                base_placement = Placement(
-                    x_mm=cand.x + self.spec.offset_mm,
-                    y_mm=cand.y + self.spec.offset_mm,
-                    z_mm=layer.z_mm,
-                    rot90=orientation.rot90,
-                    layer_id=layer.layer_id,
-                    length_mm=l_mm,
-                    width_mm=w_mm,
-                    height_mm=h_mm,
-                    box_id=box.box_id,
-                    weight_kg=box.effective_weight_kg(),
-                    loadbear=box.loadbear,
-                    priority=box.priority,
-                    orientation_name=orientation.name,
-                    orientation_family=orientation.family,
-                )
-                adjusted = base_placement
-                score_delta = 0.0
-                feasible = True
-                for control in self.controls.placement_controls:
-                    result = control.evaluate(
-                        pallet=self,
-                        box=box,
-                        placement=adjusted,
-                    )
-                    debug.update(result.debug)
-                    score_delta += float(result.score_delta)
-                    adjusted = result.placement
-                    if not result.feasible:
-                        rejected_by_controls += 1
-                        feasible = False
-                        break
-
-                objective = weighted_gain - weighted_frag + score_delta
-                if feasible:
-                    tower_penalty = self._tower_penalty(adjusted, weighted_gain)
-                    if tower_penalty:
-                        score_delta += tower_penalty
-                        objective += tower_penalty
-                        debug["tower_penalty"] = float(tower_penalty)
-
-                candidate_info: dict[str, Any] = {
-                    "x": int(adjusted.x_mm),
-                    "y": int(adjusted.y_mm),
-                    "w": int(adjusted.length_mm),
-                    "h": int(adjusted.width_mm),
-                }
-                if "support_ratio" in debug:
-                    candidate_info["support_ratio"] = float(debug["support_ratio"])
-                if "com_supported" in debug:
-                    candidate_info["com_supported"] = bool(debug["com_supported"])
-                evaluated_candidates.append((float(objective), candidate_info))
-
-                if not feasible:
+                l_mm = int(orientation.length_mm)
+                w_mm = int(orientation.width_mm)
+                h_mm = int(orientation.height_mm)
+                if not self._fits_in_bin(l_mm, w_mm, self.spec.bin_length_mm, self.spec.bin_width_mm):
+                    continue
+                next_height = max(layer.height_mm, h_mm)
+                if layer.z_mm + next_height > self.spec.max_height_mm:
                     continue
 
-                candidates.append(
-                    _LayerCandidate(
-                        layer_id=layer.layer_id,
-                        is_new_layer=is_new_layer,
-                        candidate=cand,
-                        rot90=orientation.rot90,
+                base_candidates = list(
+                    self.controls.point.candidates(
+                        layer=layer,
                         length_mm=l_mm,
                         width_mm=w_mm,
-                        z_mm=adjusted.z_mm,
-                        next_height_mm=next_height,
-                        height_after_mm=int(layer.z_mm + next_height),
-                        packing_gain=weighted_gain,
-                        fragmentation=weighted_frag,
-                        score_delta=score_delta,
-                        placement=adjusted,
-                        debug=debug,
+                        height_mm=h_mm,
+                        is_new_layer=is_new_layer,
                     )
                 )
+                free_rect_candidates, free_rect_keys = _free_rect_corner_candidates(
+                    layer.bin.free_rects,
+                    l_mm,
+                    w_mm,
+                    top_n=free_rect_corner_top_n,
+                )
+
+                candidate_pool = list(free_rect_candidates)
+                candidate_pool.extend(base_candidates)
+                if is_new_layer:
+                    seeded_points = self._seed_new_layer_points(
+                        layer.z_mm,
+                        l_mm,
+                        w_mm,
+                        free_rects=layer.bin.free_rects,
+                    )
+                    if seeded_points:
+                        candidate_pool.extend(
+                            [
+                                MaxRectsCandidate(x, y, int(l_mm), int(w_mm), score=(0,))
+                                for x, y in seeded_points
+                            ]
+                        )
+
+                seen: set[tuple[int, int, int, int]] = set()
+                merged_candidates: list[MaxRectsCandidate] = []
+                for cand in candidate_pool:
+                    key = (int(cand.x), int(cand.y), int(cand.w), int(cand.h))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged_candidates.append(cand)
+
+                for cand in merged_candidates:
+                    if budget is not None and budget.should_stop():
+                        return True
+                    if budget is not None:
+                        budget.candidates_checked += 1
+
+                    free_after = layer.bin.simulate_place(cand)
+                    gain = packing_gain(l_mm * w_mm, self.bin_area_mm2)
+                    frag = fragmentation(free_after)
+                    weighted_gain = self.scoring_weights.packing_gain_weight * gain
+                    weighted_frag = self.scoring_weights.fragmentation_weight * frag
+                    debug = {
+                        "layer_id": layer.layer_id,
+                        "is_new_layer": is_new_layer,
+                        "free_rects": len(layer.bin.free_rects),
+                        "free_rects_after": len(free_after),
+                    }
+                    cand_key = (int(cand.x), int(cand.y), int(cand.w), int(cand.h))
+                    if cand_key in free_rect_keys:
+                        debug["from_free_rect_corner"] = True
+                        debug["force_objective_ranking"] = True
+                        debug["free_rect_corner_top_n"] = free_rect_corner_top_n
+
+                    base_placement = Placement(
+                        x_mm=cand.x + self.spec.offset_mm,
+                        y_mm=cand.y + self.spec.offset_mm,
+                        z_mm=layer.z_mm,
+                        rot90=orientation.rot90,
+                        layer_id=layer.layer_id,
+                        length_mm=l_mm,
+                        width_mm=w_mm,
+                        height_mm=h_mm,
+                        box_id=box.box_id,
+                        weight_kg=box.effective_weight_kg(),
+                        loadbear=box.loadbear,
+                        priority=box.priority,
+                        orientation_name=orientation.name,
+                        orientation_family=orientation.family,
+                    )
+                    adjusted = base_placement
+                    score_delta = 0.0
+                    feasible = True
+                    for control in self.controls.placement_controls:
+                        result = control.evaluate(
+                            pallet=self,
+                            box=box,
+                            placement=adjusted,
+                        )
+                        debug.update(result.debug)
+                        score_delta += float(result.score_delta)
+                        adjusted = result.placement
+                        if not result.feasible:
+                            rejected_by_controls += 1
+                            feasible = False
+                            break
+
+                    objective = weighted_gain - weighted_frag + score_delta
+                    if feasible:
+                        tower_penalty = self._tower_penalty(adjusted, weighted_gain)
+                        if tower_penalty:
+                            score_delta += tower_penalty
+                            objective += tower_penalty
+                            debug["tower_penalty"] = float(tower_penalty)
+
+                    if feasible and stand_hw_strict:
+                        debug["stand_hw_strict_min_support"] = 0.95
+                        debug["stand_hw_corners_required"] = True
+                        strict_reject = False
+                        if "support_ratio" in debug:
+                            support_ratio = debug.get("support_ratio")
+                            try:
+                                strict_reject = float(support_ratio) + 1e-9 < 0.95
+                            except (TypeError, ValueError):
+                                strict_reject = True
+                        if "corners_supported" in debug and not bool(debug.get("corners_supported")):
+                            strict_reject = True
+                        if strict_reject:
+                            debug["stand_hw_strict_reject"] = True
+                            rejected_by_controls += 1
+                            feasible = False
+
+                    candidate_info: dict[str, Any] = {
+                        "x": int(adjusted.x_mm),
+                        "y": int(adjusted.y_mm),
+                        "w": int(adjusted.length_mm),
+                        "h": int(adjusted.width_mm),
+                    }
+                    if "support_ratio" in debug:
+                        candidate_info["support_ratio"] = float(debug["support_ratio"])
+                    if "com_supported" in debug:
+                        candidate_info["com_supported"] = bool(debug["com_supported"])
+                    evaluated_candidates.append((float(objective), candidate_info))
+
+                    if not feasible:
+                        continue
+
+                    candidates.append(
+                        _LayerCandidate(
+                            layer_id=layer.layer_id,
+                            is_new_layer=is_new_layer,
+                            candidate=cand,
+                            rot90=orientation.rot90,
+                            length_mm=l_mm,
+                            width_mm=w_mm,
+                            z_mm=adjusted.z_mm,
+                            next_height_mm=next_height,
+                            height_after_mm=int(layer.z_mm + next_height),
+                            packing_gain=weighted_gain,
+                            fragmentation=weighted_frag,
+                            score_delta=score_delta,
+                            placement=adjusted,
+                            debug=debug,
+                        )
+                    )
+
+            return False
+
+        stand_hw_orientations = [orientation for orientation in orientations if orientation.family == "stand_hw"]
+        if stand_hw_orientations:
+            planar_orientations = [orientation for orientation in orientations if orientation.family != "stand_hw"]
+            if _evaluate_orientation_batch(planar_orientations, stand_hw_strict=False):
+                return candidates, rejected_by_controls, evaluated_candidates, True
+            if not candidates and _evaluate_orientation_batch(stand_hw_orientations, stand_hw_strict=True):
+                return candidates, rejected_by_controls, evaluated_candidates, True
+        else:
+            if _evaluate_orientation_batch(orientations, stand_hw_strict=False):
+                return candidates, rejected_by_controls, evaluated_candidates, True
+
         return candidates, rejected_by_controls, evaluated_candidates, False
 
     def _seed_new_layer_points(
@@ -772,10 +879,38 @@ class PalletModel:
         )
 
     def _best_by_maxrects_score(self, candidates: list[_LayerCandidate]) -> list[_LayerCandidate]:
+        def _objective(cand: _LayerCandidate) -> float:
+            return cand.packing_gain - cand.fragmentation + cand.score_delta
+
+        def _debug_nonzero(cand: _LayerCandidate, key: str) -> bool:
+            value = cand.debug.get(key, 0.0)
+            try:
+                return abs(float(value)) > 0.0
+            except (TypeError, ValueError):
+                return False
+
+        use_objective = any(
+            _debug_nonzero(cand, "spread")
+            or _debug_nonzero(cand, "new_layer")
+            or _debug_nonzero(cand, "height_increase")
+            or bool(cand.debug.get("force_objective_ranking"))
+            for cand in candidates
+        )
+
         def _layer_key(cand: _LayerCandidate) -> tuple[float, ...]:
+            if use_objective:
+                objective = _objective(cand)
+                return (
+                    -(objective),
+                    cand.candidate.x,
+                    cand.candidate.y,
+                    cand.candidate.w,
+                    cand.candidate.h,
+                )
+
             score = getattr(cand.candidate, "score", None)
             if score is None:
-                objective = cand.packing_gain - cand.fragmentation + cand.score_delta
+                objective = _objective(cand)
                 return (
                     -(objective),
                     cand.candidate.x,
