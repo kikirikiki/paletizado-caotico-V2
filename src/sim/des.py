@@ -413,22 +413,37 @@ def simulate(
         dest_state = destinations[destination]
         if dest_state.state == "CHANGEOVER":
             return
+        max_pallets_reached = False
         if dest_state.count > 0:
             closed_pallets[destination].append(int(dest_state.count))
             register_closed_pallet(destination)
             dest_state.count = 0
+            max_pallets_reached = (
+                max_pallets_limit > 0
+                and max_pallets_dest is not None
+                and int(destination) == int(max_pallets_dest)
+                and closed_target_pallets >= max_pallets_limit
+            )
         reason_key = str(reason).strip() or "UNKNOWN"
         by_reason = closures_by_reason.setdefault(destination, {})
         by_reason[reason_key] = int(by_reason.get(reason_key, 0)) + 1
+        if policy is not None and hasattr(policy, "on_changeover_start"):
+            try:
+                policy.on_changeover_start(
+                    destination,
+                    reason,
+                    open_next_pallet=not max_pallets_reached,
+                )
+            except TypeError:
+                policy.on_changeover_start(destination, reason)
+            except Exception:
+                logger.exception("policy on_changeover_start failed dest=%s", destination)
+        if max_pallets_reached:
+            return
         dest_state.state = "CHANGEOVER"
         dest_state.changeovers += 1
         dest_state.changeover_time += config.t_changeover
         dest_state.changeover_until = time + config.t_changeover
-        if policy is not None and hasattr(policy, "on_changeover_start"):
-            try:
-                policy.on_changeover_start(destination, reason)
-            except Exception:
-                logger.exception("policy on_changeover_start failed dest=%s", destination)
         schedule_event(
             Event(
                 time=dest_state.changeover_until,

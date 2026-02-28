@@ -488,7 +488,7 @@ class PolicyPackerScheduler:
         self._pending_closures = {}
         return closures
 
-    def on_changeover_start(self, destination: int, reason: str) -> None:
+    def on_changeover_start(self, destination: int, reason: str, open_next_pallet: bool = True) -> None:
         pallet = self._pallets.get(destination)
         if pallet is not None:
             self._completed.setdefault(destination, []).append(pallet)
@@ -510,7 +510,10 @@ class PolicyPackerScheduler:
             except Exception:
                 self._logger.exception("viewer on_close failed for dest=%s", destination)
 
-        self._pallets[destination] = self._new_pallet()
+        if open_next_pallet:
+            self._pallets[destination] = self._new_pallet()
+        else:
+            self._pallets.pop(destination, None)
 
     def collect_kpis(self) -> dict[str, object]:
         pallets_by_dest: dict[int | str, Iterable[PalletModel]] = {}

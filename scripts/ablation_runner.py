@@ -17,9 +17,12 @@ from typing import Any
 class RunKpis:
     variant: str
     returncode: int
-    pallets: int | None
+    pallets_closed: int
+    pallets_created: int | None
     seq_len: int
     first_pallet_boxes: int | None
+    processed_boxes: int | None
+    stop_reason: str | None
     seq_sum: int
     seq_avg: float | None
     seq_min: int | None
@@ -50,17 +53,20 @@ def _safe_get(d: dict[str, Any], path: list[str], default: Any = None) -> Any:
 def extract_kpis(payload: dict[str, Any], *, dest: str = "1") -> dict[str, Any]:
     k = _safe_get(payload, ["metrics", "pallet_kpis"], default={}) or {}
 
-    pallets = _safe_get(k, ["pallets_count", dest], default=None)
+    pallets_created = _safe_get(k, ["pallets_count", dest], default=None)
 
     seq = _safe_get(k, ["continuous_pallet_sequence", dest], default=[]) or []
     if not isinstance(seq, list):
         seq = []
     seq_int = [int(x) for x in seq] if seq else []
     seq_len = len(seq_int)
+    pallets_closed = int(seq_len)
     first_pallet_boxes = int(seq_int[0]) if seq_len > 0 else None
     seq_sum = sum(seq_int)
     seq_avg = (seq_sum / seq_len) if seq_len > 0 else None
     seq_min = min(seq_int) if seq_len > 0 else None
+    processed_boxes = _safe_get(payload, ["metrics", "processed_boxes"], default=None)
+    stop_reason = _safe_get(payload, ["metrics", "stop_reason"], default=None)
 
     vol_util = _safe_get(k, ["pallet_volume_utilization", dest], default=None)
 
@@ -80,9 +86,12 @@ def extract_kpis(payload: dict[str, Any], *, dest: str = "1") -> dict[str, Any]:
     micro_plan_time_ms_mean = _safe_get(k, ["micro_plan_time_ms_mean"], default=None)
 
     return {
-        "pallets": int(pallets) if pallets is not None else None,
+        "pallets_closed": int(pallets_closed),
+        "pallets_created": int(pallets_created) if pallets_created is not None else None,
         "seq_len": int(seq_len),
         "first_pallet_boxes": int(first_pallet_boxes) if first_pallet_boxes is not None else None,
+        "processed_boxes": int(processed_boxes) if processed_boxes is not None else None,
+        "stop_reason": str(stop_reason) if stop_reason is not None else None,
         "seq_sum": int(seq_sum),
         "seq_avg": float(seq_avg) if seq_avg is not None else None,
         "seq_min": int(seq_min) if seq_min is not None else None,
@@ -104,6 +113,15 @@ def _fmt(v: Any, *, nd: int = 3) -> str:
     if isinstance(v, float):
         return f"{v:.{nd}f}"
     return str(v)
+
+
+def _short_stop_reason(value: str | None, *, max_len: int = 22) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len - 3]}..."
 
 
 def build_base_cmd(args: argparse.Namespace) -> list[str]:
@@ -166,9 +184,12 @@ def run_one(
         return RunKpis(
             variant=variant,
             returncode=0,
-            pallets=None,
+            pallets_closed=0,
+            pallets_created=None,
             seq_len=0,
             first_pallet_boxes=None,
+            processed_boxes=None,
+            stop_reason=None,
             seq_sum=0,
             seq_avg=None,
             seq_min=None,
@@ -199,9 +220,12 @@ def run_one(
             payload = {}
 
     k = extract_kpis(payload, dest=dest) if payload else {
-        "pallets": None,
+        "pallets_closed": 0,
+        "pallets_created": None,
         "seq_len": 0,
         "first_pallet_boxes": None,
+        "processed_boxes": None,
+        "stop_reason": None,
         "seq_sum": 0,
         "seq_avg": None,
         "seq_min": None,
@@ -219,9 +243,12 @@ def run_one(
     return RunKpis(
         variant=variant,
         returncode=rc,
-        pallets=k["pallets"],
+        pallets_closed=k["pallets_closed"],
+        pallets_created=k["pallets_created"],
         seq_len=k["seq_len"],
         first_pallet_boxes=k["first_pallet_boxes"],
+        processed_boxes=k["processed_boxes"],
+        stop_reason=k["stop_reason"],
         seq_sum=k["seq_sum"],
         seq_avg=k["seq_avg"],
         seq_min=k["seq_min"],
@@ -241,8 +268,8 @@ def run_one(
 
 def print_table(rows: list[RunKpis]) -> None:
     headers = [
-        "variant", "rc", "pallets",
-        "first_pal", "seq_avg", "seq_min", "seq_sum",
+        "variant", "rc", "pallets", "p_created",
+        "first_pal", "proc", "stop", "seq_avg", "seq_min", "seq_sum",
         "vol_util", "deadl", "hfull",
         "stand_used", "rej_sup%", "rej_cor%", "micro_ms",
     ]
@@ -254,8 +281,11 @@ def print_table(rows: list[RunKpis]) -> None:
                 [
                     r.variant,
                     str(r.returncode),
-                    _fmt(r.pallets, nd=0),
+                    _fmt(r.pallets_closed, nd=0),
+                    _fmt(r.pallets_created, nd=0),
                     _fmt(r.first_pallet_boxes, nd=0),
+                    _fmt(r.processed_boxes, nd=0),
+                    _short_stop_reason(r.stop_reason),
                     _fmt(r.seq_avg),
                     _fmt(r.seq_min, nd=0),
                     _fmt(r.seq_sum, nd=0),

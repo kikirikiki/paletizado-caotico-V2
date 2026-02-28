@@ -38,18 +38,37 @@ def test_build_base_cmd_skips_max_pallets_when_zero() -> None:
     assert "--max-pallets" not in cmd
 
 
-def test_extract_kpis_first_pallet_boxes() -> None:
+def test_extract_kpis_uses_closed_sequence_as_primary_pallet_count() -> None:
     payload = {
         "metrics": {
+            "processed_boxes": 14,
+            "stop_reason": "MAX_PALLETS_REACHED",
             "pallet_kpis": {
                 "continuous_pallet_sequence": {"1": [24, 21, 23]},
-                "pallets_count": {"1": 3},
+                "pallets_count": {"1": 99},
             }
         }
     }
     k = ablation_runner.extract_kpis(payload, dest="1")
+    assert k["pallets_closed"] == 3
+    assert k["pallets_created"] == 99
     assert k["seq_len"] == 3
     assert k["first_pallet_boxes"] == 24
+    assert k["processed_boxes"] == 14
+    assert k["stop_reason"] == "MAX_PALLETS_REACHED"
 
     empty = ablation_runner.extract_kpis({"metrics": {"pallet_kpis": {}}}, dest="1")
+    assert empty["pallets_closed"] == 0
+    assert empty["pallets_created"] is None
     assert empty["first_pallet_boxes"] is None
+    assert empty["processed_boxes"] is None
+    assert empty["stop_reason"] is None
+
+
+def test_extract_kpis_tolerates_missing_metrics_keys() -> None:
+    missing = ablation_runner.extract_kpis({}, dest="1")
+    assert missing["pallets_closed"] == 0
+    assert missing["pallets_created"] is None
+    assert missing["seq_len"] == 0
+    assert missing["processed_boxes"] is None
+    assert missing["stop_reason"] is None
