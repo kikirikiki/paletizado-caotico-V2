@@ -165,6 +165,9 @@ def build_base_cmd(args: argparse.Namespace) -> list[str]:
         "--score-mode", str(args.score_mode),
         "--height-slack-mm", str(args.height_slack_mm),
     ]
+    stacking_mode = str(getattr(args, "stacking_mode", "layers") or "layers")
+    if stacking_mode != "layers":
+        cmd.extend(["--stacking-mode", stacking_mode])
     if int(args.max_pallets) > 0:
         cmd.extend(["--max-pallets", str(int(args.max_pallets))])
     coverage_grid_x = int(getattr(args, "coverage_grid_x", 0) or 0)
@@ -407,6 +410,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--score-mode", dest="score_mode", default="min_height_slack_then_gain",
                    choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"])
     p.add_argument("--height-slack-mm", dest="height_slack_mm", default=120, type=int)
+    p.add_argument("--stacking-mode", dest="stacking_mode", default="layers", choices=["layers", "heightfield"])
     p.add_argument("--coverage-grid-x", dest="coverage_grid_x", default=0, type=int)
     p.add_argument("--coverage-grid-y", dest="coverage_grid_y", default=0, type=int)
     p.add_argument("--coverage-weight", dest="coverage_weight", default=0.0, type=float)

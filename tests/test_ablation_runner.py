@@ -22,6 +22,7 @@ def _make_args(*, max_pallets: int) -> Namespace:
         micro_topk=15,
         score_mode="min_height_slack_then_gain",
         height_slack_mm=120,
+        stacking_mode="layers",
     )
 
 
@@ -36,6 +37,15 @@ def test_build_base_cmd_propagates_max_pallets_when_enabled() -> None:
 def test_build_base_cmd_skips_max_pallets_when_zero() -> None:
     cmd = ablation_runner.build_base_cmd(_make_args(max_pallets=0))
     assert "--max-pallets" not in cmd
+
+
+def test_build_base_cmd_propagates_stacking_mode_when_non_default() -> None:
+    args = _make_args(max_pallets=0)
+    args.stacking_mode = "heightfield"
+    cmd = ablation_runner.build_base_cmd(args)
+    assert "--stacking-mode" in cmd
+    idx = cmd.index("--stacking-mode")
+    assert cmd[idx + 1] == "heightfield"
 
 
 def test_extract_kpis_uses_closed_sequence_as_primary_pallet_count() -> None:

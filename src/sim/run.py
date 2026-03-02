@@ -72,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
     parser.add_argument("--k", type=int, default=1, help="Lookahead K (1,3,5,10,15) para palca")
+    parser.add_argument(
+        "--stacking-mode",
+        choices=["layers", "heightfield"],
+        default="layers",
+        help="Modo de apilado: layers (legacy) o heightfield (2.5D).",
+    )
 
     # palca knobs (packer + scheduler)
     parser.add_argument("--overhang_mm", type=int, default=0, help="Overhang permitido (0/20/40...)")
@@ -336,6 +342,7 @@ def run_simulation(
     # palca
     overhang_mm: int = 0,
     heuristic: str = "baf",
+    stacking_mode: str = "layers",
     t_select_base: float = 0.0,
     t_select_step: float = 0.0,
     time_penalty_weight: float = 1.0,
@@ -511,6 +518,7 @@ def run_simulation(
             lookahead_k=lookahead_k,
             overhang_mm=overhang_mm,
             heuristic=heuristic,
+            stacking_mode=stacking_mode,
             t_select_base=t_select_base,
             t_select_step=t_select_step,
             time_penalty_weight=time_penalty_weight,
@@ -621,6 +629,7 @@ def run_simulation(
             "episode_id": episode_id,
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
+            "stacking_mode": stacking_mode,
             "t_select_base": t_select_base,
             "t_select_step": t_select_step,
             "time_penalty_weight": time_penalty_weight,
@@ -707,6 +716,7 @@ def main() -> None:
         episode_id=args.episode_id,
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
+        stacking_mode=str(args.stacking_mode),
         t_select_base=args.t_select_base,
         t_select_step=args.t_select_step,
         time_penalty_weight=args.time_penalty_weight,

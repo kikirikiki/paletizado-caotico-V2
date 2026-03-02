@@ -25,6 +25,7 @@ RESCUE_RETRY_REASONS = {"STABILITY", "NO_FEASIBLE"}
 class PolicyConfig:
     pallet_spec: PalletSpec = PalletSpec()
     heuristic: str = "baf"
+    stacking_mode: str = "layers"
     scoring_weights: ScoringWeights = ScoringWeights()
     scheduler: SchedulerConfig = SchedulerConfig()
     default_box_length_mm: int = 400
@@ -134,6 +135,7 @@ class PolicyPackerScheduler:
         lookahead_k: int = 1,
         overhang_mm: int = 0,
         heuristic: str = "baf",
+        stacking_mode: str = "layers",
         t_select_base: float = 0.0,
         t_select_step: float = 0.0,
         time_penalty_weight: float = 1.0,
@@ -206,6 +208,7 @@ class PolicyPackerScheduler:
         config = PolicyConfig(
             pallet_spec=pallet_spec,
             heuristic=heuristic,
+            stacking_mode=str(stacking_mode),
             scheduler=scheduler,
             stability_mode=stability_mode,
             min_support_ratio=min_support_ratio,
@@ -972,6 +975,7 @@ class PolicyPackerScheduler:
             spec=self.config.pallet_spec,
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,
+            stacking_mode=str(self.config.stacking_mode),
             control_config=control_config,
             orientation_mode=str(self.config.orientation_mode),
             stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
