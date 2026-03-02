@@ -170,6 +170,10 @@ class PolicyPackerScheduler:
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
+        batchfill_layer_starter: bool = False,
+        batchfill_starters_max: int = 6,
+        batchfill_budget_ms: int = 150,
+        batchfill_greedy_topk: int = 12,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -194,6 +198,10 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            batchfill_layer_starter=batchfill_layer_starter,
+            batchfill_starters_max=batchfill_starters_max,
+            batchfill_budget_ms=batchfill_budget_ms,
+            batchfill_greedy_topk=batchfill_greedy_topk,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -578,6 +586,13 @@ class PolicyPackerScheduler:
             int(k): int(v)
             for k, v in dict(getattr(self._scheduler, "micro_plan_best_seq_len_hist", {}) or {}).items()
         }
+        batchfill_selected_boxes_sum = int(getattr(self._scheduler, "batchfill_selected_boxes_sum", 0) or 0)
+        batchfill_selected_boxes_count = int(getattr(self._scheduler, "batchfill_selected_boxes_count", 0) or 0)
+        kpis["batchfill_calls"] = int(getattr(self._scheduler, "batchfill_calls", 0) or 0)
+        kpis["batchfill_applied"] = int(getattr(self._scheduler, "batchfill_applied", 0) or 0)
+        kpis["batchfill_selected_layer_boxes_mean"] = float(
+            float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
+        )
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)

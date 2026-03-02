@@ -38,6 +38,9 @@ class RunKpis:
     rejected_support_pct: float | None
     rejected_corner_pct: float | None
     micro_plan_time_ms_mean: float | None
+    bf_calls: int | None
+    bf_applied: int | None
+    bf_boxes_mean: float | None
     out_json: str
     out_log: str
 
@@ -90,6 +93,9 @@ def extract_kpis(payload: dict[str, Any], *, dest: str = "1") -> dict[str, Any]:
     rejected_corner_pct = _safe_get(k, ["rejected_by_corner_support_pct"], default=None)
 
     micro_plan_time_ms_mean = _safe_get(k, ["micro_plan_time_ms_mean"], default=None)
+    bf_calls = _safe_get(k, ["batchfill_calls"], default=None)
+    bf_applied = _safe_get(k, ["batchfill_applied"], default=None)
+    bf_boxes_mean = _safe_get(k, ["batchfill_selected_layer_boxes_mean"], default=None)
 
     return {
         "pallets_closed": int(pallets_closed),
@@ -113,6 +119,9 @@ def extract_kpis(payload: dict[str, Any], *, dest: str = "1") -> dict[str, Any]:
         "rejected_support_pct": float(rejected_support_pct) if rejected_support_pct is not None else None,
         "rejected_corner_pct": float(rejected_corner_pct) if rejected_corner_pct is not None else None,
         "micro_plan_time_ms_mean": float(micro_plan_time_ms_mean) if micro_plan_time_ms_mean is not None else None,
+        "bf_calls": int(bf_calls) if bf_calls is not None else None,
+        "bf_applied": int(bf_applied) if bf_applied is not None else None,
+        "bf_boxes_mean": float(bf_boxes_mean) if bf_boxes_mean is not None else None,
     }
 
 
@@ -176,6 +185,18 @@ def build_base_cmd(args: argparse.Namespace) -> list[str]:
         or dominant_free_rect_weight > 0.0
     ):
         cmd.extend(["--dominant-free-rect-ratio-gate", str(dominant_free_rect_ratio_gate)])
+    batchfill_layer_starter = bool(getattr(args, "batchfill_layer_starter", False))
+    batchfill_starters_max = int(getattr(args, "batchfill_starters_max", 6) or 6)
+    batchfill_budget_ms = int(getattr(args, "batchfill_budget_ms", 150) or 150)
+    batchfill_greedy_topk = int(getattr(args, "batchfill_greedy_topk", 12) or 12)
+    if batchfill_layer_starter:
+        cmd.append("--batchfill-layer-starter")
+    if batchfill_layer_starter or batchfill_starters_max != 6:
+        cmd.extend(["--batchfill-starters-max", str(batchfill_starters_max)])
+    if batchfill_layer_starter or batchfill_budget_ms != 150:
+        cmd.extend(["--batchfill-budget-ms", str(batchfill_budget_ms)])
+    if batchfill_layer_starter or batchfill_greedy_topk != 12:
+        cmd.extend(["--batchfill-greedy-topk", str(batchfill_greedy_topk)])
     return cmd
 
 
@@ -232,6 +253,9 @@ def run_one(
             rejected_support_pct=None,
             rejected_corner_pct=None,
             micro_plan_time_ms_mean=None,
+            bf_calls=None,
+            bf_applied=None,
+            bf_boxes_mean=None,
             out_json=str(out_json),
             out_log=str(out_log),
         )
@@ -271,6 +295,9 @@ def run_one(
         "rejected_support_pct": None,
         "rejected_corner_pct": None,
         "micro_plan_time_ms_mean": None,
+        "bf_calls": None,
+        "bf_applied": None,
+        "bf_boxes_mean": None,
     }
 
     return RunKpis(
@@ -297,6 +324,9 @@ def run_one(
         rejected_support_pct=k["rejected_support_pct"],
         rejected_corner_pct=k["rejected_corner_pct"],
         micro_plan_time_ms_mean=k["micro_plan_time_ms_mean"],
+        bf_calls=k["bf_calls"],
+        bf_applied=k["bf_applied"],
+        bf_boxes_mean=k["bf_boxes_mean"],
         out_json=str(out_json),
         out_log=str(out_log),
     )
@@ -307,7 +337,7 @@ def print_table(rows: list[RunKpis]) -> None:
         "variant", "rc", "pallets", "p_created",
         "first_pal", "proc", "stop", "seq_avg", "seq_min", "seq_sum",
         "vol_util", "zones0", "dom0", "tower0", "deadl", "hfull",
-        "stand_used", "rej_sup%", "rej_cor%", "micro_ms",
+        "stand_used", "rej_sup%", "rej_cor%", "micro_ms", "bf_calls", "bf_appl", "bf_bmean",
     ]
     print(" | ".join(headers))
     print("-" * (len(" | ".join(headers)) + 10))
@@ -335,6 +365,9 @@ def print_table(rows: list[RunKpis]) -> None:
                     _fmt(r.rejected_support_pct),
                     _fmt(r.rejected_corner_pct),
                     _fmt(r.micro_plan_time_ms_mean),
+                    _fmt(r.bf_calls, nd=0),
+                    _fmt(r.bf_applied, nd=0),
+                    _fmt(r.bf_boxes_mean),
                 ]
             )
         )
@@ -379,6 +412,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--coverage-weight", dest="coverage_weight", default=0.0, type=float)
     p.add_argument("--dominant-free-rect-weight", dest="dominant_free_rect_weight", default=0.0, type=float)
     p.add_argument("--dominant-free-rect-ratio-gate", dest="dominant_free_rect_ratio_gate", default=0.35, type=float)
+    p.add_argument("--batchfill-layer-starter", dest="batchfill_layer_starter", action="store_true")
+    p.add_argument("--batchfill-starters-max", dest="batchfill_starters_max", default=6, type=int)
+    p.add_argument("--batchfill-budget-ms", dest="batchfill_budget_ms", default=150, type=int)
+    p.add_argument("--batchfill-greedy-topk", dest="batchfill_greedy_topk", default=12, type=int)
 
     args = p.parse_args(argv)
 
