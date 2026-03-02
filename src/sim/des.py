@@ -221,6 +221,8 @@ def simulate(
     decision_policy: Any | None = None,
     continuous_pallets: bool = False,
     arrival_mode: str = "excel",
+    max_pallets: int = 0,
+    max_pallets_destination: int | None = None,
 ) -> SimulationResult:
     arrival_mode_key = str(arrival_mode).strip().lower()
     if arrival_mode_key not in ("excel", "immediate"):
@@ -319,6 +321,13 @@ def simulate(
     robot_busy_time = 0.0
     processed_boxes = 0
     stop_reason: str | None = None
+    max_pallets_limit = max(0, int(max_pallets))
+    max_pallets_dest: int | None = None
+    closed_target_pallets = 0
+    if max_pallets_limit > 0:
+        if max_pallets_destination is None:
+            raise ValueError("max_pallets_destination es requerido cuando max_pallets > 0")
+        max_pallets_dest = int(max_pallets_destination)
     deadlock_samples: list[dict[str, object]] = []
     window_n_decisions = 0
     window_total_min: int | None = None
@@ -390,25 +399,51 @@ def simulate(
     def schedule_event(event: Event) -> None:
         heapq.heappush(events, (event.time, event.seq, event))
 
+    def register_closed_pallet(destination: int) -> None:
+        nonlocal stop_reason, closed_target_pallets
+        if max_pallets_limit <= 0 or max_pallets_dest is None:
+            return
+        if int(destination) != int(max_pallets_dest):
+            return
+        closed_target_pallets += 1
+        if closed_target_pallets >= max_pallets_limit and stop_reason is None:
+            stop_reason = "MAX_PALLETS_REACHED"
+
     def start_changeover(destination: int, time: float, reason: str = "COUNT") -> None:
         dest_state = destinations[destination]
         if dest_state.state == "CHANGEOVER":
             return
+        max_pallets_reached = False
         if dest_state.count > 0:
             closed_pallets[destination].append(int(dest_state.count))
+            register_closed_pallet(destination)
             dest_state.count = 0
+            max_pallets_reached = (
+                max_pallets_limit > 0
+                and max_pallets_dest is not None
+                and int(destination) == int(max_pallets_dest)
+                and closed_target_pallets >= max_pallets_limit
+            )
         reason_key = str(reason).strip() or "UNKNOWN"
         by_reason = closures_by_reason.setdefault(destination, {})
         by_reason[reason_key] = int(by_reason.get(reason_key, 0)) + 1
+        if policy is not None and hasattr(policy, "on_changeover_start"):
+            try:
+                policy.on_changeover_start(
+                    destination,
+                    reason,
+                    open_next_pallet=not max_pallets_reached,
+                )
+            except TypeError:
+                policy.on_changeover_start(destination, reason)
+            except Exception:
+                logger.exception("policy on_changeover_start failed dest=%s", destination)
+        if max_pallets_reached:
+            return
         dest_state.state = "CHANGEOVER"
         dest_state.changeovers += 1
         dest_state.changeover_time += config.t_changeover
         dest_state.changeover_until = time + config.t_changeover
-        if policy is not None and hasattr(policy, "on_changeover_start"):
-            try:
-                policy.on_changeover_start(destination, reason)
-            except Exception:
-                logger.exception("policy on_changeover_start failed dest=%s", destination)
         schedule_event(
             Event(
                 time=dest_state.changeover_until,
@@ -663,7 +698,7 @@ def simulate(
             fill_ramp_from_upstream(ramp, current_time)
             fill_ramp_from_arrivals(ramp, pending_arrivals[rid], current_time)
 
-        if not robot_busy:
+        if stop_reason is None and not robot_busy:
             if policy is None:
                 action = decide_action(ramps, destinations, packer, scheduler, model, current_time)
                 if action is not None:
@@ -722,7 +757,7 @@ def simulate(
                                 closures_started = True
                     policy_stop = getattr(policy, "stop_reason", None)
                     policy_details = getattr(policy, "stop_details", {}) or {}
-                    if policy_stop == "DEADLOCK":
+                    if stop_reason is None and policy_stop == "DEADLOCK":
                         details = policy_details if isinstance(policy_details, dict) else {}
                         append_deadlock_sample(str(details.get("reason", "UNKNOWN")), details)
                         logger.error(
@@ -749,7 +784,7 @@ def simulate(
                                 continue
                         stop_reason = "DEADLOCK"
                         break
-                    if not events and not robot_busy and system_has_boxes():
+                    if stop_reason is None and not events and not robot_busy and system_has_boxes():
                         append_deadlock_sample("STRUCTURAL", {})
                         if continuous_pallets and not closures_started:
                             if close_continuous_deadlock("STRUCTURAL"):
@@ -813,6 +848,9 @@ def simulate(
     for dest, dest_state in destinations.items():
         if dest_state.state == "ACTIVE" and dest_state.count > 0:
             closed_pallets[dest].append(int(dest_state.count))
+            by_reason = closures_by_reason.setdefault(dest, {})
+            by_reason["END"] = int(by_reason.get("END", 0)) + 1
+            register_closed_pallet(dest)
 
     pallet_kpis: dict[str, object] = {}
     if policy is not None and hasattr(policy, "collect_kpis"):
