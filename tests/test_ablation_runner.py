@@ -23,6 +23,7 @@ def _make_args(*, max_pallets: int) -> Namespace:
         score_mode="min_height_slack_then_gain",
         height_slack_mm=120,
         stacking_mode="layers",
+        z_band_mm=None,
     )
 
 
@@ -46,6 +47,15 @@ def test_build_base_cmd_propagates_stacking_mode_when_non_default() -> None:
     assert "--stacking-mode" in cmd
     idx = cmd.index("--stacking-mode")
     assert cmd[idx + 1] == "heightfield"
+
+
+def test_build_base_cmd_propagates_z_band_when_set() -> None:
+    args = _make_args(max_pallets=0)
+    args.z_band_mm = 0
+    cmd = ablation_runner.build_base_cmd(args)
+    assert "--z-band-mm" in cmd
+    idx = cmd.index("--z-band-mm")
+    assert cmd[idx + 1] == "0"
 
 
 def test_extract_kpis_uses_closed_sequence_as_primary_pallet_count() -> None:
