@@ -44,6 +44,10 @@ class SchedulerConfig:
     micro_plan_topk_per_step: int = 15
     micro_plan_window_total: int = 15
     micro_plan_window_strategy: str = "fifo_ramp"
+    batchfill_layer_starter: bool = False
+    batchfill_starters_max: int = 6
+    batchfill_budget_ms: int = 150
+    batchfill_greedy_topk: int = 12
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -62,6 +66,9 @@ class SchedulerConfig:
         object.__setattr__(self, "micro_plan_width", max(1, int(self.micro_plan_width)))
         object.__setattr__(self, "micro_plan_topk_per_step", max(1, int(self.micro_plan_topk_per_step)))
         object.__setattr__(self, "micro_plan_window_total", int(self.micro_plan_window_total))
+        object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
+        object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
+        object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -183,6 +190,10 @@ class SchedulerV1:
         self.selected_height_slack_decisions_count = 0
         self.selected_height_slack_filtered_count = 0
         self.selected_height_slack_set_size_sum = 0.0
+        self.batchfill_calls = 0
+        self.batchfill_applied = 0
+        self.batchfill_selected_boxes_sum = 0
+        self.batchfill_selected_boxes_count = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -272,6 +283,7 @@ class SchedulerV1:
         items_evaluated = 0
         items_feasible = 0
         feasible_candidates: list[_ScoredCandidate] = []
+        window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
@@ -289,6 +301,9 @@ class SchedulerV1:
                     continue
 
             for idx, box in enumerate(ramp_items):
+                pallet_id = box.destination
+                if pallet_id is not None:
+                    window_boxes_by_pallet_id.setdefault(pallet_id, []).append(box)
                 if deadline is not None and time.perf_counter() >= deadline:
                     cutoff = True
                     cutoff_reason = "time_budget"
@@ -297,7 +312,6 @@ class SchedulerV1:
                     cutoff = True
                     cutoff_reason = "max_candidates"
                     break
-                pallet_id = box.destination
                 if pallet_id is None:
                     continue
                 if pallet_id in sim_state.pallet_blocked:
@@ -414,11 +428,27 @@ class SchedulerV1:
                 self.config.max_candidates,
             )
 
+        batchfill_stats = {
+            "batchfill_calls": 0,
+            "batchfill_applied": 0,
+            "batchfill_selected_layer_boxes_mean": 0.0,
+        }
+        if feasible_candidates and bool(self.config.batchfill_layer_starter):
+            feasible_candidates, batchfill_stats = self._apply_batchfill_on_scored_candidates(
+                feasible_candidates=feasible_candidates,
+                pallets=sim_state.pallets,
+                window_boxes_by_pallet_id=window_boxes_by_pallet_id,
+                deadline=deadline,
+            )
+
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
             "items_feasible": int(items_feasible),
             "cutoff": bool(cutoff),
             "cutoff_reason": cutoff_reason,
+            "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
+            "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
+            "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
         }
 
         best_plan: PickPlan | None = None
@@ -490,6 +520,10 @@ class SchedulerV1:
         depth_effective = 0
         cutoff = False
         cutoff_reason = ""
+        batchfill_calls_local = 0
+        batchfill_applied_local = 0
+        batchfill_selected_boxes_sum_local = 0
+        batchfill_selected_boxes_count_local = 0
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -523,6 +557,17 @@ class SchedulerV1:
                         continue
                     nodes_expanded += 1
                     expansions.append(expansion)
+
+                if depth == 0 and node.first_plan is None and expansions and bool(self.config.batchfill_layer_starter):
+                    expansions, batchfill_stats = self._apply_batchfill_on_beam_expansions(
+                        node=node,
+                        expansions=expansions,
+                        deadline=deadline,
+                    )
+                    batchfill_calls_local += int(batchfill_stats["batchfill_calls"])
+                    batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
+                    batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
+                    batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -598,6 +643,11 @@ class SchedulerV1:
             "height_slack_mm": int(self.config.height_slack_mm),
             "cutoff": bool(cutoff),
             "cutoff_reason": str(cutoff_reason),
+            "batchfill_calls": int(batchfill_calls_local),
+            "batchfill_applied": int(batchfill_applied_local),
+            "batchfill_selected_layer_boxes_mean": float(
+                float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
+            ),
         }
 
         if best_node.first_plan is None:
@@ -797,6 +847,370 @@ class SchedulerV1:
             queue.append(upstream.pop(0))
 
         return _BeamRampState(queue=queue, upstream=upstream, capacity=cap)
+
+    @staticmethod
+    def _preview_layer_id(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "layer_id"))
+        except (TypeError, ValueError):
+            return None
+
+    def _batchfill_deadline(self, deadline: float | None) -> float | None:
+        budget_ms = max(0, int(self.config.batchfill_budget_ms))
+        local_deadline = time.perf_counter() + (float(budget_ms) / 1000.0)
+        if deadline is None:
+            return local_deadline
+        return min(float(deadline), float(local_deadline))
+
+    def _simulate_batchfill_layer(
+        self,
+        *,
+        pallet: PalletModel,
+        starter_preview: PlacementPreview,
+        starter_box: Box,
+        pool_boxes: Sequence[Box],
+        deadline: float | None,
+    ) -> tuple[int, float, int] | None:
+        try:
+            pallet_clone = copy.deepcopy(pallet)
+        except Exception:
+            return None
+
+        try:
+            starter_preview_local = self._preview_place(pallet_clone, starter_box)
+            if not starter_preview_local.feasible:
+                return None
+            starter_placement = pallet_clone.commit_place(starter_preview_local)
+        except Exception:
+            return None
+
+        starter_layer_id = int(getattr(starter_placement, "layer_id", -1))
+        if starter_layer_id < 0:
+            return None
+
+        remaining_boxes = [box for box in list(pool_boxes) if box is not starter_box]
+        greedy_topk = max(1, int(self.config.batchfill_greedy_topk))
+
+        while remaining_boxes:
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+
+            feasible_fillers: list[tuple[float, int, PlacementPreview, Box]] = []
+            for box in remaining_boxes:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                preview = self._preview_place(pallet_clone, box)
+                if not preview.feasible:
+                    continue
+                preview_layer_id = self._preview_layer_id(preview)
+                if preview_layer_id != starter_layer_id:
+                    continue
+                rank_score = (
+                    float(preview.packing_gain)
+                    - float(preview.fragmentation)
+                    + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
+                )
+                height_after_mm = self._resolve_height_after_mm(preview, pallet_clone)
+                feasible_fillers.append((rank_score, -int(height_after_mm), preview, box))
+
+            if not feasible_fillers:
+                break
+
+            feasible_fillers.sort(key=lambda item: (float(item[0]), int(item[1])), reverse=True)
+            _score, _neg_height, chosen_preview, chosen_box = feasible_fillers[:greedy_topk][0]
+            try:
+                pallet_clone.commit_place(chosen_preview)
+            except Exception:
+                break
+
+            removed = False
+            for idx, queued_box in enumerate(remaining_boxes):
+                if queued_box is chosen_box:
+                    remaining_boxes.pop(idx)
+                    removed = True
+                    break
+            if not removed:
+                chosen_box_id = getattr(chosen_box, "box_id", None)
+                for idx, queued_box in enumerate(remaining_boxes):
+                    if getattr(queued_box, "box_id", None) == chosen_box_id:
+                        remaining_boxes.pop(idx)
+                        removed = True
+                        break
+            if not removed:
+                break
+
+        layer_placements = [
+            placement
+            for placement in list(getattr(pallet_clone, "placements", []) or [])
+            if int(getattr(placement, "layer_id", -1)) == starter_layer_id
+        ]
+        boxes_in_layer = int(len(layer_placements))
+        used_area = int(
+            sum(int(getattr(placement, "length_mm", 0)) * int(getattr(placement, "width_mm", 0)) for placement in layer_placements)
+        )
+        bin_area = max(1, int(getattr(pallet_clone, "bin_area_mm2", 1) or 1))
+        fill_ratio = float(used_area) / float(bin_area)
+
+        layer_height = 0
+        layers = list(getattr(pallet_clone, "layers", []) or [])
+        if 0 <= starter_layer_id < len(layers):
+            try:
+                layer_height = int(getattr(layers[starter_layer_id], "height_mm", 0))
+            except (TypeError, ValueError):
+                layer_height = 0
+
+        return boxes_in_layer, fill_ratio, layer_height
+
+    def _accumulate_batchfill_stats(
+        self,
+        *,
+        calls: int,
+        applied: int,
+        selected_boxes_sum: int,
+        selected_boxes_count: int,
+    ) -> None:
+        self.batchfill_calls += max(0, int(calls))
+        self.batchfill_applied += max(0, int(applied))
+        self.batchfill_selected_boxes_sum += max(0, int(selected_boxes_sum))
+        self.batchfill_selected_boxes_count += max(0, int(selected_boxes_count))
+
+    def _apply_batchfill_on_scored_candidates(
+        self,
+        *,
+        feasible_candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+        window_boxes_by_pallet_id: Mapping[int | str, Sequence[Box]],
+        deadline: float | None,
+    ) -> tuple[list[_ScoredCandidate], dict[str, float]]:
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        pallet_order: list[int | str] = []
+        for candidate in feasible_candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        batchfill_calls_local = 1 if grouped else 0
+        batchfill_applied_local = 0
+        batchfill_selected_boxes_sum_local = 0
+        batchfill_selected_boxes_count_local = 0
+        filtered_candidates: list[_ScoredCandidate] = []
+
+        for pallet_id in pallet_order:
+            group = grouped.get(pallet_id, [])
+            pallet = pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered_candidates.extend(group)
+                continue
+
+            layers = list(getattr(pallet, "layers", []) or [])
+            start_layer_id = len(layers)
+            if start_layer_id <= 0:
+                filtered_candidates.extend(group)
+                continue
+            active_layer_id = (start_layer_id - 1) if start_layer_id > 0 else None
+            has_active_layer_candidate = False
+            new_layer_candidates: list[_ScoredCandidate] = []
+            for candidate in group:
+                preview_layer_id = self._preview_layer_id(candidate.plan.preview)
+                if preview_layer_id is None:
+                    continue
+                if active_layer_id is not None and preview_layer_id == active_layer_id:
+                    has_active_layer_candidate = True
+                if preview_layer_id == start_layer_id:
+                    new_layer_candidates.append(candidate)
+
+            if has_active_layer_candidate or not new_layer_candidates:
+                filtered_candidates.extend(group)
+                continue
+
+            batchfill_applied_local += 1
+            starters_cap = max(1, int(self.config.batchfill_starters_max))
+            starters = sorted(
+                new_layer_candidates,
+                key=lambda candidate: float(candidate.terms.scalar_score),
+                reverse=True,
+            )[:starters_cap]
+            pool_boxes = list(window_boxes_by_pallet_id.get(pallet_id, []) or [])
+            if not pool_boxes:
+                pool_boxes = [candidate.box for candidate in group]
+
+            batchfill_deadline = self._batchfill_deadline(deadline)
+            best_candidate: _ScoredCandidate | None = None
+            best_key: tuple[Any, ...] | None = None
+            best_boxes_in_layer = 0
+
+            for starter in starters:
+                if batchfill_deadline is not None and time.perf_counter() >= batchfill_deadline:
+                    break
+                sim = self._simulate_batchfill_layer(
+                    pallet=pallet,
+                    starter_preview=starter.plan.preview,
+                    starter_box=starter.box,
+                    pool_boxes=pool_boxes,
+                    deadline=batchfill_deadline,
+                )
+                if sim is None:
+                    continue
+                boxes_in_layer, fill_ratio, layer_height = sim
+                key = (
+                    int(boxes_in_layer),
+                    float(fill_ratio),
+                    -int(layer_height),
+                    float(starter.terms.scalar_score),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_candidate = starter
+                    best_boxes_in_layer = int(boxes_in_layer)
+
+            if best_candidate is None:
+                filtered_candidates.extend(group)
+                continue
+
+            filtered_candidates.append(best_candidate)
+            batchfill_selected_boxes_sum_local += int(best_boxes_in_layer)
+            batchfill_selected_boxes_count_local += 1
+
+        self._accumulate_batchfill_stats(
+            calls=batchfill_calls_local,
+            applied=batchfill_applied_local,
+            selected_boxes_sum=batchfill_selected_boxes_sum_local,
+            selected_boxes_count=batchfill_selected_boxes_count_local,
+        )
+        return filtered_candidates, {
+            "batchfill_calls": int(batchfill_calls_local),
+            "batchfill_applied": int(batchfill_applied_local),
+            "batchfill_selected_layer_boxes_mean": float(
+                float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
+            ),
+        }
+
+    def _apply_batchfill_on_beam_expansions(
+        self,
+        *,
+        node: _BeamNode,
+        expansions: list[_BeamExpansion],
+        deadline: float | None,
+    ) -> tuple[list[_BeamExpansion], dict[str, int]]:
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        pallet_order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        batchfill_calls_local = 1 if grouped else 0
+        batchfill_applied_local = 0
+        batchfill_selected_boxes_sum_local = 0
+        batchfill_selected_boxes_count_local = 0
+        filtered: list[_BeamExpansion] = []
+        handled_pallets: set[int | str] = set()
+
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None or pallet_id in handled_pallets:
+                if pallet_id is None:
+                    filtered.append(expansion)
+                continue
+            handled_pallets.add(pallet_id)
+
+            group = grouped.get(pallet_id, [])
+            pallet = node.pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered.extend(group)
+                continue
+
+            layers = list(getattr(pallet, "layers", []) or [])
+            start_layer_id = len(layers)
+            if start_layer_id <= 0:
+                filtered.extend(group)
+                continue
+            active_layer_id = (start_layer_id - 1) if start_layer_id > 0 else None
+            has_active_layer_candidate = False
+            new_layer_starters: list[tuple[_BeamExpansion, PlacementPreview]] = []
+            for item in group:
+                first_plan = item.node.first_plan
+                starter_preview = first_plan.preview if first_plan is not None else None
+                preview_layer_id = self._preview_layer_id(starter_preview)
+                if preview_layer_id is None:
+                    continue
+                if active_layer_id is not None and preview_layer_id == active_layer_id:
+                    has_active_layer_candidate = True
+                if preview_layer_id == start_layer_id and starter_preview is not None:
+                    new_layer_starters.append((item, starter_preview))
+
+            if has_active_layer_candidate or not new_layer_starters:
+                filtered.extend(group)
+                continue
+
+            batchfill_applied_local += 1
+            starters_cap = max(1, int(self.config.batchfill_starters_max))
+            starters = sorted(
+                new_layer_starters,
+                key=lambda item: float(item[0].terms.scalar_score),
+                reverse=True,
+            )[:starters_cap]
+            pool_boxes = [item.box for item in group]
+            batchfill_deadline = self._batchfill_deadline(deadline)
+            best_expansion: _BeamExpansion | None = None
+            best_key: tuple[Any, ...] | None = None
+            best_boxes_in_layer = 0
+
+            for starter_expansion, starter_preview in starters:
+                if batchfill_deadline is not None and time.perf_counter() >= batchfill_deadline:
+                    break
+                sim = self._simulate_batchfill_layer(
+                    pallet=pallet,
+                    starter_preview=starter_preview,
+                    starter_box=starter_expansion.box,
+                    pool_boxes=pool_boxes,
+                    deadline=batchfill_deadline,
+                )
+                if sim is None:
+                    continue
+                boxes_in_layer, fill_ratio, layer_height = sim
+                key = (
+                    int(boxes_in_layer),
+                    float(fill_ratio),
+                    -int(layer_height),
+                    float(starter_expansion.terms.scalar_score),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_expansion = starter_expansion
+                    best_boxes_in_layer = int(boxes_in_layer)
+
+            if best_expansion is None:
+                filtered.extend(group)
+                continue
+
+            filtered.append(best_expansion)
+            batchfill_selected_boxes_sum_local += int(best_boxes_in_layer)
+            batchfill_selected_boxes_count_local += 1
+
+        self._accumulate_batchfill_stats(
+            calls=batchfill_calls_local,
+            applied=batchfill_applied_local,
+            selected_boxes_sum=batchfill_selected_boxes_sum_local,
+            selected_boxes_count=batchfill_selected_boxes_count_local,
+        )
+        return filtered, {
+            "batchfill_calls": int(batchfill_calls_local),
+            "batchfill_applied": int(batchfill_applied_local),
+            "selected_boxes_sum": int(batchfill_selected_boxes_sum_local),
+            "selected_boxes_count": int(batchfill_selected_boxes_count_local),
+        }
 
     @staticmethod
     def _max_priority(boxes: Sequence[Box]) -> float:

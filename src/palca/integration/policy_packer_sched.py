@@ -25,6 +25,7 @@ RESCUE_RETRY_REASONS = {"STABILITY", "NO_FEASIBLE"}
 class PolicyConfig:
     pallet_spec: PalletSpec = PalletSpec()
     heuristic: str = "baf"
+    stacking_mode: str = "layers"
     scoring_weights: ScoringWeights = ScoringWeights()
     scheduler: SchedulerConfig = SchedulerConfig()
     default_box_length_mm: int = 400
@@ -40,6 +41,11 @@ class PolicyConfig:
     loadbear_penalty_weight: float = 1.0
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
+    coverage_grid_x: int = 0
+    coverage_grid_y: int = 0
+    coverage_weight: float = 0.0
+    dominant_free_rect_weight: float = 0.0
+    dominant_free_rect_ratio_gate: float = 0.35
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
     orientation_mode: str = "planar"
@@ -129,6 +135,7 @@ class PolicyPackerScheduler:
         lookahead_k: int = 1,
         overhang_mm: int = 0,
         heuristic: str = "baf",
+        stacking_mode: str = "layers",
         t_select_base: float = 0.0,
         t_select_step: float = 0.0,
         time_penalty_weight: float = 1.0,
@@ -145,6 +152,11 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        coverage_grid_x: int = 0,
+        coverage_grid_y: int = 0,
+        coverage_weight: float = 0.0,
+        dominant_free_rect_weight: float = 0.0,
+        dominant_free_rect_ratio_gate: float = 0.35,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
         orientation_mode: str = "planar",
@@ -160,6 +172,10 @@ class PolicyPackerScheduler:
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
+        batchfill_layer_starter: bool = False,
+        batchfill_starters_max: int = 6,
+        batchfill_budget_ms: int = 150,
+        batchfill_greedy_topk: int = 12,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -184,10 +200,15 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            batchfill_layer_starter=batchfill_layer_starter,
+            batchfill_starters_max=batchfill_starters_max,
+            batchfill_budget_ms=batchfill_budget_ms,
+            batchfill_greedy_topk=batchfill_greedy_topk,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
             heuristic=heuristic,
+            stacking_mode=str(stacking_mode),
             scheduler=scheduler,
             stability_mode=stability_mode,
             min_support_ratio=min_support_ratio,
@@ -199,6 +220,11 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            coverage_grid_x=max(0, int(coverage_grid_x)),
+            coverage_grid_y=max(0, int(coverage_grid_y)),
+            coverage_weight=max(0.0, float(coverage_weight)),
+            dominant_free_rect_weight=max(0.0, float(dominant_free_rect_weight)),
+            dominant_free_rect_ratio_gate=max(0.0, float(dominant_free_rect_ratio_gate)),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
@@ -488,7 +514,7 @@ class PolicyPackerScheduler:
         self._pending_closures = {}
         return closures
 
-    def on_changeover_start(self, destination: int, reason: str) -> None:
+    def on_changeover_start(self, destination: int, reason: str, open_next_pallet: bool = True) -> None:
         pallet = self._pallets.get(destination)
         if pallet is not None:
             self._completed.setdefault(destination, []).append(pallet)
@@ -510,7 +536,10 @@ class PolicyPackerScheduler:
             except Exception:
                 self._logger.exception("viewer on_close failed for dest=%s", destination)
 
-        self._pallets[destination] = self._new_pallet()
+        if open_next_pallet:
+            self._pallets[destination] = self._new_pallet()
+        else:
+            self._pallets.pop(destination, None)
 
     def collect_kpis(self) -> dict[str, object]:
         pallets_by_dest: dict[int | str, Iterable[PalletModel]] = {}
@@ -560,6 +589,13 @@ class PolicyPackerScheduler:
             int(k): int(v)
             for k, v in dict(getattr(self._scheduler, "micro_plan_best_seq_len_hist", {}) or {}).items()
         }
+        batchfill_selected_boxes_sum = int(getattr(self._scheduler, "batchfill_selected_boxes_sum", 0) or 0)
+        batchfill_selected_boxes_count = int(getattr(self._scheduler, "batchfill_selected_boxes_count", 0) or 0)
+        kpis["batchfill_calls"] = int(getattr(self._scheduler, "batchfill_calls", 0) or 0)
+        kpis["batchfill_applied"] = int(getattr(self._scheduler, "batchfill_applied", 0) or 0)
+        kpis["batchfill_selected_layer_boxes_mean"] = float(
+            float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
+        )
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)
@@ -939,9 +975,15 @@ class PolicyPackerScheduler:
             spec=self.config.pallet_spec,
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,
+            stacking_mode=str(self.config.stacking_mode),
             control_config=control_config,
             orientation_mode=str(self.config.orientation_mode),
             stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
+            coverage_grid_x=max(0, int(self.config.coverage_grid_x)),
+            coverage_grid_y=max(0, int(self.config.coverage_grid_y)),
+            coverage_weight=max(0.0, float(self.config.coverage_weight)),
+            dominant_free_rect_weight=max(0.0, float(self.config.dominant_free_rect_weight)),
+            dominant_free_rect_ratio_gate=max(0.0, float(self.config.dominant_free_rect_ratio_gate)),
         )
 
     def _get_first_attr(self, obj: Any, names: tuple[str, ...]) -> Any:
