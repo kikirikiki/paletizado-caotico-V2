@@ -266,6 +266,7 @@ class PalletModel:
         coverage_weight: float = 0.0,
         dominant_free_rect_weight: float = 0.0,
         dominant_free_rect_ratio_gate: float = 0.35,
+        z_band_mm: int | None = None,
     ) -> None:
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
@@ -278,6 +279,7 @@ class PalletModel:
         self.coverage_weight = max(0.0, float(coverage_weight))
         self.dominant_free_rect_weight = max(0.0, float(dominant_free_rect_weight))
         self.dominant_free_rect_ratio_gate = max(0.0, float(dominant_free_rect_ratio_gate))
+        self.z_band_mm = None if z_band_mm is None else max(0, int(z_band_mm))
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -1187,10 +1189,31 @@ class PalletModel:
             if stop_search:
                 break
 
+        z_band_before: int | None = None
+        z_band_after: int | None = None
+        z_band_min_z: int | None = None
+        if candidates and self.z_band_mm is not None:
+            band = int(self.z_band_mm)
+            with_placement = [c for c in candidates if c.placement is not None]
+            if with_placement:
+                z_band_min_z = min(int(c.placement.z_mm) for c in with_placement)
+                z_band_before = len(candidates)
+                candidates = [
+                    c
+                    for c in candidates
+                    if c.placement is not None and int(c.placement.z_mm) <= z_band_min_z + band
+                ]
+                z_band_after = len(candidates)
+
         if candidates:
             best = _select_best(candidates)
             debug = dict(best.debug)
             debug["rejected_by_controls"] = rejected_by_controls
+            debug["z_band_enabled"] = self.z_band_mm is not None
+            debug["z_band_mm"] = self.z_band_mm
+            debug["z_band_min_z"] = z_band_min_z
+            debug["z_band_candidates_before"] = z_band_before
+            debug["z_band_candidates_after"] = z_band_after
             if budget is not None:
                 debug["candidates_evaluated"] = int(budget.candidates_checked)
                 if budget.limit_hit:
