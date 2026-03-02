@@ -32,6 +32,17 @@ El repo incluye `.vscode/` con:
 ./scripts/dev_shell_cmd.sh ./scripts/smoke_offline.sh
 ```
 
+## Experimentos (ablation runner)
+Para optimizar solo el PRIMER pallet, usa `--max-pallets 1` (requiere `--force-destination`, por defecto `1`).
+Ejemplo completo:
+```bash
+PYTHONPATH=src ./.venv/bin/python scripts/ablation_runner.py \
+  --excel "data/Flujo rampas - Editado.xlsx" \
+  --outdir /tmp/palca-ablation-1p \
+  --max-pallets 1 \
+  --variants planar gate0 gate400 gate2400
+```
+
 ## Reglas Git (resumen)
 - Cambios siempre en rama nueva: `feat/<tema>` o `fix/<tema>`
 - No commitear: `out/`, `outputs/`, `logs/`, `.venv/`, `__pycache__/`

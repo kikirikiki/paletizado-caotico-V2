@@ -40,6 +40,11 @@ class PolicyConfig:
     loadbear_penalty_weight: float = 1.0
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
+    coverage_grid_x: int = 0
+    coverage_grid_y: int = 0
+    coverage_weight: float = 0.0
+    dominant_free_rect_weight: float = 0.0
+    dominant_free_rect_ratio_gate: float = 0.35
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
     orientation_mode: str = "planar"
@@ -145,6 +150,11 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        coverage_grid_x: int = 0,
+        coverage_grid_y: int = 0,
+        coverage_weight: float = 0.0,
+        dominant_free_rect_weight: float = 0.0,
+        dominant_free_rect_ratio_gate: float = 0.35,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
         orientation_mode: str = "planar",
@@ -199,6 +209,11 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            coverage_grid_x=max(0, int(coverage_grid_x)),
+            coverage_grid_y=max(0, int(coverage_grid_y)),
+            coverage_weight=max(0.0, float(coverage_weight)),
+            dominant_free_rect_weight=max(0.0, float(dominant_free_rect_weight)),
+            dominant_free_rect_ratio_gate=max(0.0, float(dominant_free_rect_ratio_gate)),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
@@ -488,7 +503,7 @@ class PolicyPackerScheduler:
         self._pending_closures = {}
         return closures
 
-    def on_changeover_start(self, destination: int, reason: str) -> None:
+    def on_changeover_start(self, destination: int, reason: str, open_next_pallet: bool = True) -> None:
         pallet = self._pallets.get(destination)
         if pallet is not None:
             self._completed.setdefault(destination, []).append(pallet)
@@ -510,7 +525,10 @@ class PolicyPackerScheduler:
             except Exception:
                 self._logger.exception("viewer on_close failed for dest=%s", destination)
 
-        self._pallets[destination] = self._new_pallet()
+        if open_next_pallet:
+            self._pallets[destination] = self._new_pallet()
+        else:
+            self._pallets.pop(destination, None)
 
     def collect_kpis(self) -> dict[str, object]:
         pallets_by_dest: dict[int | str, Iterable[PalletModel]] = {}
@@ -942,6 +960,11 @@ class PolicyPackerScheduler:
             control_config=control_config,
             orientation_mode=str(self.config.orientation_mode),
             stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
+            coverage_grid_x=max(0, int(self.config.coverage_grid_x)),
+            coverage_grid_y=max(0, int(self.config.coverage_grid_y)),
+            coverage_weight=max(0.0, float(self.config.coverage_weight)),
+            dominant_free_rect_weight=max(0.0, float(self.config.dominant_free_rect_weight)),
+            dominant_free_rect_ratio_gate=max(0.0, float(self.config.dominant_free_rect_ratio_gate)),
         )
 
     def _get_first_attr(self, obj: Any, names: tuple[str, ...]) -> Any:

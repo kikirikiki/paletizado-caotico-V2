@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from palca.domain.box import Box
 from palca.domain.pallet_spec import PalletSpec
 from palca.integration.kpi_hooks import aggregate_pallet_kpis
@@ -40,6 +42,7 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
     parser = sim_run.build_parser()
     default_args = parser.parse_args(["--excel", "dummy.xlsx"])
     assert str(default_args.orientation_mode) == ORIENTATION_MODE_PLANAR
+    assert int(default_args.max_pallets) == 0
 
     args = parser.parse_args(
         [
@@ -49,6 +52,8 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
             "palca",
             "--orientation-mode",
             ORIENTATION_MODE_PLANAR_STAND_HW,
+            "--max-pallets",
+            "1",
         ]
     )
 
@@ -85,6 +90,19 @@ def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:
 
     assert captured.get("orientation_mode") == ORIENTATION_MODE_PLANAR_STAND_HW
     assert payload["params"]["orientation_mode"] == ORIENTATION_MODE_PLANAR_STAND_HW
+
+
+def test_max_pallets_requires_force_destination() -> None:
+    with pytest.raises(ValueError, match="max_pallets requiere force_destination"):
+        sim_run.run_simulation(
+            excel_path="dummy.xlsx",
+            model="M1",
+            n_per_pallet=24,
+            t_pick_place=14.0,
+            staging_cap=0,
+            out_path=None,
+            max_pallets=1,
+        )
 
 
 def test_orientation_mode_stand_hw_metrics() -> None:

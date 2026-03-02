@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Modo continuo: cierra pallet por DEADLOCK y sigue con uno nuevo",
     )
+    parser.add_argument(
+        "--max-pallets",
+        type=int,
+        default=0,
+        help="Si >0, detiene al cerrar N pallets del destino forzado (requiere --force-destination).",
+    )
 
     parser.add_argument(
         "--arrival-mode",
@@ -105,6 +111,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
+    parser.add_argument("--coverage-grid-x", type=int, default=0, help="Grid X para coverage control (0 deshabilita)")
+    parser.add_argument("--coverage-grid-y", type=int, default=0, help="Grid Y para coverage control (0 deshabilita)")
+    parser.add_argument("--coverage-weight", type=float, default=0.0, help="Peso coverage control (0 deshabilita)")
+    parser.add_argument(
+        "--dominant-free-rect-weight",
+        type=float,
+        default=0.0,
+        help="Peso dominant free-rect targeting (0 deshabilita)",
+    )
+    parser.add_argument(
+        "--dominant-free-rect-ratio-gate",
+        type=float,
+        default=0.35,
+        help="Gate de ratio para dominant free-rect targeting",
+    )
     parser.add_argument(
         "--score-mode",
         choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"],
@@ -310,6 +331,11 @@ def run_simulation(
     priority_mode: str = "none",
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
+    coverage_grid_x: int = 0,
+    coverage_grid_y: int = 0,
+    coverage_weight: float = 0.0,
+    dominant_free_rect_weight: float = 0.0,
+    dominant_free_rect_ratio_gate: float = 0.35,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
     orientation_mode: str = "planar",
@@ -328,6 +354,7 @@ def run_simulation(
     watchdog_heartbeat_sec: float = 1.0,
     force_destination: int | None = None,
     continuous_pallets: bool = False,
+    max_pallets: int = 0,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -346,13 +373,17 @@ def run_simulation(
         if len(parts) == 2 and parts[1].strip():
             priority_col = parts[1].strip()
 
-    arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
-
     if force_destination is not None and not (1 <= int(force_destination) <= 6):
         raise ValueError("force_destination debe estar entre 1 y 6")
-
+    max_pallets_value = int(max_pallets)
+    if max_pallets_value < 0:
+        raise ValueError("max_pallets debe ser >= 0")
+    if max_pallets_value > 0 and force_destination is None:
+        raise ValueError("max_pallets requiere force_destination (usa --force-destination)")
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
+
+    arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
     if time_scale != 1.0:
         arrivals = [
@@ -477,6 +508,11 @@ def run_simulation(
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            coverage_grid_x=int(coverage_grid_x),
+            coverage_grid_y=int(coverage_grid_y),
+            coverage_weight=float(coverage_weight),
+            dominant_free_rect_weight=float(dominant_free_rect_weight),
+            dominant_free_rect_ratio_gate=float(dominant_free_rect_ratio_gate),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
             orientation_mode=str(orientation_mode),
@@ -506,6 +542,8 @@ def run_simulation(
             decision_policy=decision_policy,
             continuous_pallets=continuous_pallets,
             arrival_mode=arrival_mode,
+            max_pallets=max_pallets_value,
+            max_pallets_destination=(int(force_destination) if max_pallets_value > 0 else None),
         )
     finally:
         if viewer is not None:
@@ -570,6 +608,11 @@ def run_simulation(
             "priority_mode": priority_mode,
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
+            "coverage_grid_x": int(coverage_grid_x),
+            "coverage_grid_y": int(coverage_grid_y),
+            "coverage_weight": float(coverage_weight),
+            "dominant_free_rect_weight": float(dominant_free_rect_weight),
+            "dominant_free_rect_ratio_gate": float(dominant_free_rect_ratio_gate),
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
             "orientation_mode": str(orientation_mode),
@@ -588,6 +631,7 @@ def run_simulation(
             "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
             "force_destination": force_destination,
             "continuous_pallets": continuous_pallets,
+            "max_pallets": int(max_pallets_value),
             "viz_dest": viz_dest,
         },
         "metrics": metrics_payload,
@@ -646,6 +690,11 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        coverage_grid_x=int(args.coverage_grid_x),
+        coverage_grid_y=int(args.coverage_grid_y),
+        coverage_weight=float(args.coverage_weight),
+        dominant_free_rect_weight=float(args.dominant_free_rect_weight),
+        dominant_free_rect_ratio_gate=float(args.dominant_free_rect_ratio_gate),
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
         orientation_mode=str(args.orientation_mode),
@@ -666,6 +715,7 @@ def main() -> None:
             int(args.force_destination) if args.force_destination is not None else None
         ),
         continuous_pallets=bool(args.continuous_pallets),
+        max_pallets=int(args.max_pallets),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
