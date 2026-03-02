@@ -250,12 +250,22 @@ class PalletModel:
         control_config: ControlConfig | None = None,
         orientation_mode: str = ORIENTATION_MODE_PLANAR,
         stand_hw_height_margin_gate_mm: int = DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM,
+        coverage_grid_x: int = 0,
+        coverage_grid_y: int = 0,
+        coverage_weight: float = 0.0,
+        dominant_free_rect_weight: float = 0.0,
+        dominant_free_rect_ratio_gate: float = 0.35,
     ) -> None:
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
         self.scoring_weights = _normalize_scoring_weights(scoring_weights)
         self.orientation_mode = normalize_orientation_mode(orientation_mode)
         self.stand_hw_height_margin_gate_mm = max(0, int(stand_hw_height_margin_gate_mm))
+        self.coverage_grid_x = max(0, int(coverage_grid_x))
+        self.coverage_grid_y = max(0, int(coverage_grid_y))
+        self.coverage_weight = max(0.0, float(coverage_weight))
+        self.dominant_free_rect_weight = max(0.0, float(dominant_free_rect_weight))
+        self.dominant_free_rect_ratio_gate = max(0.0, float(dominant_free_rect_ratio_gate))
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -539,6 +549,62 @@ class PalletModel:
     def _fits_in_bin(self, length_mm: int, width_mm: int, bin_l: int, bin_w: int) -> bool:
         return length_mm <= bin_l and width_mm <= bin_w
 
+    def _coverage_zone_id(
+        self,
+        x_mm: int,
+        y_mm: int,
+        l_mm: int,
+        w_mm: int,
+        *,
+        grid_x: int,
+        grid_y: int,
+    ) -> int | None:
+        gx = max(0, int(grid_x))
+        gy = max(0, int(grid_y))
+        if gx <= 0 or gy <= 0:
+            return None
+
+        bin_l = int(self.spec.bin_length_mm)
+        bin_w = int(self.spec.bin_width_mm)
+        if bin_l <= 0 or bin_w <= 0:
+            return None
+
+        offset = int(self.spec.offset_mm)
+        center_x = float(int(x_mm) - offset) + (float(int(l_mm)) / 2.0)
+        center_y = float(int(y_mm) - offset) + (float(int(w_mm)) / 2.0)
+        center_x = min(max(0.0, center_x), float(bin_l) - 1e-6)
+        center_y = min(max(0.0, center_y), float(bin_w) - 1e-6)
+        zone_x = min(gx - 1, max(0, int((center_x / float(bin_l)) * float(gx))))
+        zone_y = min(gy - 1, max(0, int((center_y / float(bin_w)) * float(gy))))
+        return int(zone_y * gx + zone_x)
+
+    def _layer_zone_fill_ratios(self, layer_id: int) -> list[float]:
+        gx = max(0, int(self.coverage_grid_x))
+        gy = max(0, int(self.coverage_grid_y))
+        zones = gx * gy
+        if zones <= 0:
+            return []
+
+        bin_area = float(max(1, int(self.spec.bin_area_mm2)))
+        zone_area = max(1.0, bin_area / float(zones))
+        ratios = [0.0 for _ in range(zones)]
+        for placement in self.placements:
+            if int(placement.layer_id) != int(layer_id):
+                continue
+            zone_id = self._coverage_zone_id(
+                int(placement.x_mm),
+                int(placement.y_mm),
+                int(placement.length_mm),
+                int(placement.width_mm),
+                grid_x=gx,
+                grid_y=gy,
+            )
+            if zone_id is None or not (0 <= int(zone_id) < zones):
+                continue
+            area = float(int(placement.length_mm) * int(placement.width_mm))
+            ratios[int(zone_id)] += area / zone_area
+        return ratios
+
     def _tower_penalty(self, placement: Placement, packing_gain: float) -> float:
         if packing_gain <= 0:
             return 0.0
@@ -566,6 +632,30 @@ class PalletModel:
         candidates: list[_LayerCandidate] = []
         rejected_by_controls = 0
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
+        coverage_enabled = (
+            int(self.coverage_grid_x) > 0
+            and int(self.coverage_grid_y) > 0
+            and float(self.coverage_weight) > 0.0
+        )
+        zone_fill: list[float] = []
+        max_fill = 0.0
+        if coverage_enabled:
+            zone_fill = self._layer_zone_fill_ratios(layer.layer_id)
+            max_fill = max(zone_fill) if zone_fill else 0.0
+
+        dominant_rect_enabled = float(self.dominant_free_rect_weight) > 0.0
+        dominant_rect: Rect | None = None
+        dominant_ratio = 0.0
+        if dominant_rect_enabled and layer.bin.free_rects:
+            dominant_rect = max(layer.bin.free_rects, key=lambda rect: int(rect.area))
+            used_area_layer = sum(
+                int(p.length_mm) * int(p.width_mm)
+                for p in self.placements
+                if int(p.layer_id) == int(layer.layer_id)
+            )
+            free_area_layer = max(1, int(self.bin_area_mm2) - int(used_area_layer))
+            dominant_ratio = float(int(dominant_rect.area)) / float(free_area_layer)
+
         if budget is not None and budget.should_stop():
             return candidates, rejected_by_controls, evaluated_candidates, True
         for orientation in orientations:
@@ -664,6 +754,48 @@ class PalletModel:
                         score_delta += tower_penalty
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
+
+                    if coverage_enabled and zone_fill:
+                        zone_id = self._coverage_zone_id(
+                            int(adjusted.x_mm),
+                            int(adjusted.y_mm),
+                            int(adjusted.length_mm),
+                            int(adjusted.width_mm),
+                            grid_x=int(self.coverage_grid_x),
+                            grid_y=int(self.coverage_grid_y),
+                        )
+                        if zone_id is not None and 0 <= int(zone_id) < len(zone_fill):
+                            cand_fill = float(zone_fill[int(zone_id)])
+                            coverage_bonus = (
+                                float(self.coverage_weight)
+                                * float(weighted_gain)
+                                * max(0.0, float(max_fill) - cand_fill)
+                            )
+                            score_delta += float(coverage_bonus)
+                            objective += float(coverage_bonus)
+                            debug["coverage_zone_id"] = int(zone_id)
+                            debug["coverage_zone_fill"] = float(cand_fill)
+                            debug["coverage_max_fill"] = float(max_fill)
+                            debug["coverage_bonus"] = float(coverage_bonus)
+
+                    if dominant_rect_enabled and dominant_rect is not None:
+                        candidate_rect = Rect(
+                            int(adjusted.x_mm) - int(self.spec.offset_mm),
+                            int(adjusted.y_mm) - int(self.spec.offset_mm),
+                            int(adjusted.length_mm),
+                            int(adjusted.width_mm),
+                        )
+                        in_dominant_rect = bool(dominant_rect.contains(candidate_rect))
+                        if float(dominant_ratio) >= float(self.dominant_free_rect_ratio_gate):
+                            sign = 1.0 if in_dominant_rect else -1.0
+                        else:
+                            sign = 1.0 if in_dominant_rect else 0.0
+                        dominant_delta = float(self.dominant_free_rect_weight) * float(dominant_ratio) * float(sign)
+                        score_delta += float(dominant_delta)
+                        objective += float(dominant_delta)
+                        debug["dominant_free_rect_ratio"] = float(dominant_ratio)
+                        debug["dominant_free_rect_in"] = bool(in_dominant_rect)
+                        debug["dominant_free_rect_delta"] = float(dominant_delta)
 
                 candidate_info: dict[str, Any] = {
                     "x": int(adjusted.x_mm),

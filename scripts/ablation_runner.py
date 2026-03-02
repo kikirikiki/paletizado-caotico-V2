@@ -27,6 +27,9 @@ class RunKpis:
     seq_avg: float | None
     seq_min: int | None
     vol_util: float | None
+    zones0: float | None
+    dom0: float | None
+    tower0: float | None
     deadlock_stability: int
     close_height_full: int
     planar_count: int | None
@@ -69,6 +72,9 @@ def extract_kpis(payload: dict[str, Any], *, dest: str = "1") -> dict[str, Any]:
     stop_reason = _safe_get(payload, ["metrics", "stop_reason"], default=None)
 
     vol_util = _safe_get(k, ["pallet_volume_utilization", dest], default=None)
+    zones0 = _safe_get(k, ["coverage_zones_touched_base", dest], default=None)
+    dom0 = _safe_get(k, ["coverage_dominant_free_rect_ratio_base", dest], default=None)
+    tower0 = _safe_get(k, ["coverage_tower_index_base", dest], default=None)
 
     closures = _safe_get(k, ["closures_by_reason"], default={}) or {}
     deadlock_stability = int(closures.get("DEADLOCK_STABILITY", 0) or 0)
@@ -96,6 +102,9 @@ def extract_kpis(payload: dict[str, Any], *, dest: str = "1") -> dict[str, Any]:
         "seq_avg": float(seq_avg) if seq_avg is not None else None,
         "seq_min": int(seq_min) if seq_min is not None else None,
         "vol_util": float(vol_util) if vol_util is not None else None,
+        "zones0": float(zones0) if zones0 is not None else None,
+        "dom0": float(dom0) if dom0 is not None else None,
+        "tower0": float(tower0) if tower0 is not None else None,
         "deadlock_stability": int(deadlock_stability),
         "close_height_full": int(close_height_full),
         "planar_count": int(planar_count) if planar_count is not None else None,
@@ -149,6 +158,24 @@ def build_base_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if int(args.max_pallets) > 0:
         cmd.extend(["--max-pallets", str(int(args.max_pallets))])
+    coverage_grid_x = int(getattr(args, "coverage_grid_x", 0) or 0)
+    coverage_grid_y = int(getattr(args, "coverage_grid_y", 0) or 0)
+    coverage_weight = float(getattr(args, "coverage_weight", 0.0) or 0.0)
+    dominant_free_rect_weight = float(getattr(args, "dominant_free_rect_weight", 0.0) or 0.0)
+    dominant_free_rect_ratio_gate = float(getattr(args, "dominant_free_rect_ratio_gate", 0.35) or 0.35)
+    if coverage_grid_x > 0:
+        cmd.extend(["--coverage-grid-x", str(coverage_grid_x)])
+    if coverage_grid_y > 0:
+        cmd.extend(["--coverage-grid-y", str(coverage_grid_y)])
+    if coverage_weight > 0.0:
+        cmd.extend(["--coverage-weight", str(coverage_weight)])
+    if dominant_free_rect_weight > 0.0:
+        cmd.extend(["--dominant-free-rect-weight", str(dominant_free_rect_weight)])
+    if (
+        dominant_free_rect_ratio_gate != 0.35
+        or dominant_free_rect_weight > 0.0
+    ):
+        cmd.extend(["--dominant-free-rect-ratio-gate", str(dominant_free_rect_ratio_gate)])
     return cmd
 
 
@@ -194,6 +221,9 @@ def run_one(
             seq_avg=None,
             seq_min=None,
             vol_util=None,
+            zones0=None,
+            dom0=None,
+            tower0=None,
             deadlock_stability=0,
             close_height_full=0,
             planar_count=None,
@@ -230,6 +260,9 @@ def run_one(
         "seq_avg": None,
         "seq_min": None,
         "vol_util": None,
+        "zones0": None,
+        "dom0": None,
+        "tower0": None,
         "deadlock_stability": 0,
         "close_height_full": 0,
         "planar_count": None,
@@ -253,6 +286,9 @@ def run_one(
         seq_avg=k["seq_avg"],
         seq_min=k["seq_min"],
         vol_util=k["vol_util"],
+        zones0=k["zones0"],
+        dom0=k["dom0"],
+        tower0=k["tower0"],
         deadlock_stability=k["deadlock_stability"],
         close_height_full=k["close_height_full"],
         planar_count=k["planar_count"],
@@ -270,7 +306,7 @@ def print_table(rows: list[RunKpis]) -> None:
     headers = [
         "variant", "rc", "pallets", "p_created",
         "first_pal", "proc", "stop", "seq_avg", "seq_min", "seq_sum",
-        "vol_util", "deadl", "hfull",
+        "vol_util", "zones0", "dom0", "tower0", "deadl", "hfull",
         "stand_used", "rej_sup%", "rej_cor%", "micro_ms",
     ]
     print(" | ".join(headers))
@@ -290,6 +326,9 @@ def print_table(rows: list[RunKpis]) -> None:
                     _fmt(r.seq_min, nd=0),
                     _fmt(r.seq_sum, nd=0),
                     _fmt(r.vol_util),
+                    _fmt(r.zones0),
+                    _fmt(r.dom0),
+                    _fmt(r.tower0),
                     _fmt(r.deadlock_stability, nd=0),
                     _fmt(r.close_height_full, nd=0),
                     _fmt(r.stand_hw_used_total, nd=0),
@@ -335,6 +374,11 @@ def main(argv: list[str]) -> int:
     p.add_argument("--score-mode", dest="score_mode", default="min_height_slack_then_gain",
                    choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"])
     p.add_argument("--height-slack-mm", dest="height_slack_mm", default=120, type=int)
+    p.add_argument("--coverage-grid-x", dest="coverage_grid_x", default=0, type=int)
+    p.add_argument("--coverage-grid-y", dest="coverage_grid_y", default=0, type=int)
+    p.add_argument("--coverage-weight", dest="coverage_weight", default=0.0, type=float)
+    p.add_argument("--dominant-free-rect-weight", dest="dominant_free_rect_weight", default=0.0, type=float)
+    p.add_argument("--dominant-free-rect-ratio-gate", dest="dominant_free_rect_ratio_gate", default=0.35, type=float)
 
     args = p.parse_args(argv)
 

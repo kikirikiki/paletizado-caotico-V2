@@ -6,6 +6,44 @@ from typing import Iterable
 from ..packer.pallet_model import PalletModel
 
 
+def _base_layer_coverage_metrics(pallet: PalletModel) -> tuple[int, float, float, int, int]:
+    grid_x = max(0, int(getattr(pallet, "coverage_grid_x", 0)))
+    grid_y = max(0, int(getattr(pallet, "coverage_grid_y", 0)))
+
+    base_layer_placements = [placement for placement in pallet.placements if int(placement.layer_id) == 0]
+    zone_counts: dict[int, int] = {}
+    if grid_x > 0 and grid_y > 0:
+        for placement in base_layer_placements:
+            zone_id = pallet._coverage_zone_id(  # noqa: SLF001
+                int(placement.x_mm),
+                int(placement.y_mm),
+                int(placement.length_mm),
+                int(placement.width_mm),
+                grid_x=grid_x,
+                grid_y=grid_y,
+            )
+            if zone_id is None:
+                continue
+            zone_counts[int(zone_id)] = int(zone_counts.get(int(zone_id), 0)) + 1
+
+    zones_touched = int(len(zone_counts))
+    total_placements = int(len(base_layer_placements))
+    tower_count = int(max(zone_counts.values())) if zone_counts else 0
+    tower_index = float(tower_count) / float(max(1, total_placements))
+
+    layer0 = next((layer for layer in pallet.layers if int(layer.layer_id) == 0), None)
+    dominant_area = 0
+    if layer0 is not None and getattr(layer0, "bin", None) is not None:
+        free_rects = list(getattr(layer0.bin, "free_rects", []) or [])
+        if free_rects:
+            dominant_area = max(int(getattr(rect, "area", 0)) for rect in free_rects)
+
+    used_area_base = sum(int(p.length_mm) * int(p.width_mm) for p in base_layer_placements)
+    free_area = max(1, int(pallet.bin_area_mm2) - int(used_area_base))
+    dominant_ratio = float(dominant_area) / float(free_area)
+    return zones_touched, tower_index, dominant_ratio, grid_x, grid_y
+
+
 def layer_utilization(pallet: PalletModel) -> dict[int, float]:
     used_area: dict[int, int] = {}
     for placement in pallet.placements:
@@ -49,6 +87,11 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     orientation_counts = {"planar": 0, "stand_hw": 0}
     stand_hw_used_by_dest: dict[int, int] = {}
     orientation_counts_by_dest: dict[int, dict[str, int]] = {}
+    coverage_zones_touched_base_by_dest: dict[int, float] = {}
+    coverage_tower_index_base_by_dest: dict[int, float] = {}
+    coverage_dominant_free_rect_ratio_base_by_dest: dict[int, float] = {}
+    coverage_grid_x_max = 0
+    coverage_grid_y_max = 0
     stand_hw_gate_mm = 0
     stand_hw_gate_blocks_total = 0
     stand_hw_gate_allows_total = 0
@@ -67,6 +110,9 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
 
         layer_accum: dict[int, list[float]] = {}
         dest_orientation_counts = {"planar": 0, "stand_hw": 0}
+        zones_touched_values: list[float] = []
+        tower_index_values: list[float] = []
+        dominant_ratio_values: list[float] = []
         for pallet in pallet_list:
             for placement in pallet.placements:
                 family = str(getattr(placement, "orientation_family", "planar") or "planar").strip().lower()
@@ -95,11 +141,22 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             balance_scores.append(float(metrics.balance_score))
             com_dx.append(float(metrics.com_offset_mm[0]))
             com_dy.append(float(metrics.com_offset_mm[1]))
+            zones_touched, tower_index, dominant_ratio, grid_x, grid_y = _base_layer_coverage_metrics(pallet)
+            zones_touched_values.append(float(zones_touched))
+            tower_index_values.append(float(tower_index))
+            dominant_ratio_values.append(float(dominant_ratio))
+            coverage_grid_x_max = max(int(coverage_grid_x_max), int(grid_x))
+            coverage_grid_y_max = max(int(coverage_grid_y_max), int(grid_y))
         layer_util_by_dest[dest] = {
             layer_id: mean(vals) if vals else 0.0 for layer_id, vals in layer_accum.items()
         }
         orientation_counts_by_dest[dest] = dict(dest_orientation_counts)
         stand_hw_used_by_dest[dest] = int(dest_orientation_counts.get("stand_hw", 0))
+        coverage_zones_touched_base_by_dest[dest] = mean(zones_touched_values) if zones_touched_values else 0.0
+        coverage_tower_index_base_by_dest[dest] = mean(tower_index_values) if tower_index_values else 0.0
+        coverage_dominant_free_rect_ratio_base_by_dest[dest] = (
+            mean(dominant_ratio_values) if dominant_ratio_values else 0.0
+        )
 
     support_pct = (100.0 * support_rejects / max(1, support_checks)) if support_checks else 0.0
     corner_pct = (100.0 * corner_rejects / max(1, corner_checks)) if corner_checks else 0.0
@@ -132,6 +189,16 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         },
         "stand_hw_used_total": int(orientation_counts.get("stand_hw", 0)),
         "stand_hw_used_by_dest": {int(dest): int(v) for dest, v in stand_hw_used_by_dest.items()},
+        "coverage_grid": {"x": int(coverage_grid_x_max), "y": int(coverage_grid_y_max)},
+        "coverage_zones_touched_base": {
+            int(dest): float(v) for dest, v in coverage_zones_touched_base_by_dest.items()
+        },
+        "coverage_tower_index_base": {
+            int(dest): float(v) for dest, v in coverage_tower_index_base_by_dest.items()
+        },
+        "coverage_dominant_free_rect_ratio_base": {
+            int(dest): float(v) for dest, v in coverage_dominant_free_rect_ratio_base_by_dest.items()
+        },
         "stand_hw_gate_mm": int(stand_hw_gate_mm),
         "stand_hw_gate_blocks_total": int(stand_hw_gate_blocks_total),
         "stand_hw_gate_allows_total": int(stand_hw_gate_allows_total),
