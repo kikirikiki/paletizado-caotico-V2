@@ -960,7 +960,19 @@ class PalletModel:
                 ):
                     _add_point(x, y)
 
-        ordered = sorted(points, key=lambda pt: (pt[0], pt[1]))
+        ordered = sorted(
+            points,
+            key=lambda pt: (
+                self._height_under_footprint_mm(
+                    x0_mm=int(pt[0]) + offset,
+                    y0_mm=int(pt[1]) + offset,
+                    l_mm=item_l,
+                    w_mm=item_w,
+                ),
+                int(pt[0]),
+                int(pt[1]),
+            ),
+        )
         limit = max(1, int(cap))
         if len(ordered) > limit:
             return ordered[:limit]
