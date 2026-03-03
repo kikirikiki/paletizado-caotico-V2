@@ -266,6 +266,7 @@ class PalletModel:
         coverage_weight: float = 0.0,
         dominant_free_rect_weight: float = 0.0,
         dominant_free_rect_ratio_gate: float = 0.35,
+        z_band_mm: int | None = None,
     ) -> None:
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
@@ -278,6 +279,7 @@ class PalletModel:
         self.coverage_weight = max(0.0, float(coverage_weight))
         self.dominant_free_rect_weight = max(0.0, float(dominant_free_rect_weight))
         self.dominant_free_rect_ratio_gate = max(0.0, float(dominant_free_rect_ratio_gate))
+        self.z_band_mm = None if z_band_mm is None else max(0, int(z_band_mm))
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -1268,8 +1270,37 @@ class PalletModel:
                 break
 
         if candidates:
-            best = _select_best(candidates)
+            filtered_candidates = candidates
+            z_band_min_z: int | None = None
+            z_band_candidates_before = int(len(candidates))
+            z_band_candidates_after = int(len(candidates))
+            if self.z_band_mm is not None:
+                candidate_z_values = [
+                    int(cand.placement.z_mm)
+                    for cand in candidates
+                    if getattr(cand, "placement", None) is not None
+                ]
+                if candidate_z_values:
+                    z_band_min_z = min(candidate_z_values)
+                    z_limit = int(z_band_min_z) + int(self.z_band_mm)
+                    filtered_candidates = [
+                        cand
+                        for cand in candidates
+                        if getattr(cand, "placement", None) is None
+                        or int(cand.placement.z_mm) <= int(z_limit)
+                    ]
+                    if not filtered_candidates:
+                        filtered_candidates = candidates
+                z_band_candidates_after = int(len(filtered_candidates))
+
+            best = _select_best(filtered_candidates)
             debug = dict(best.debug)
+            if self.z_band_mm is not None:
+                debug["z_band_enabled"] = True
+                debug["z_band_mm"] = int(self.z_band_mm)
+                debug["z_band_min_z"] = int(z_band_min_z) if z_band_min_z is not None else None
+                debug["z_band_candidates_before"] = int(z_band_candidates_before)
+                debug["z_band_candidates_after"] = int(z_band_candidates_after)
             debug["rejected_by_controls"] = rejected_by_controls
             if budget is not None:
                 debug["candidates_evaluated"] = int(budget.candidates_checked)
