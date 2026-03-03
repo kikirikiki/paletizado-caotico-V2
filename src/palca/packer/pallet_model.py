@@ -637,6 +637,33 @@ class PalletModel:
             ratios[int(zone_id)] += area / zone_area
         return ratios
 
+    def _heightfield_zone_fill_ratios_floor(self) -> list[float]:
+        gx = max(0, int(self.coverage_grid_x))
+        gy = max(0, int(self.coverage_grid_y))
+        zones = gx * gy
+        if zones <= 0:
+            return []
+
+        bin_area = float(max(1, int(self.spec.bin_area_mm2)))
+        zone_area = max(1.0, bin_area / float(zones))
+        ratios = [0.0 for _ in range(zones)]
+        for placement in self.placements:
+            if float(placement.z_mm) > 0.0:
+                continue
+            zone_id = self._coverage_zone_id(
+                int(placement.x_mm),
+                int(placement.y_mm),
+                int(placement.length_mm),
+                int(placement.width_mm),
+                grid_x=gx,
+                grid_y=gy,
+            )
+            if zone_id is None or not (0 <= int(zone_id) < zones):
+                continue
+            area = float(int(placement.length_mm) * int(placement.width_mm))
+            ratios[int(zone_id)] = min(1.0, ratios[int(zone_id)] + (area / zone_area))
+        return ratios
+
     def _tower_penalty(self, placement: Placement, packing_gain: float) -> float:
         if packing_gain <= 0:
             return 0.0
@@ -672,7 +699,10 @@ class PalletModel:
         zone_fill: list[float] = []
         max_fill = 0.0
         if coverage_enabled:
-            zone_fill = self._layer_zone_fill_ratios(layer.layer_id)
+            if self.stacking_mode == STACKING_MODE_HEIGHTFIELD:
+                zone_fill = self._heightfield_zone_fill_ratios_floor()
+            else:
+                zone_fill = self._layer_zone_fill_ratios(layer.layer_id)
             max_fill = max(zone_fill) if zone_fill else 0.0
 
         dominant_rect_enabled = float(self.dominant_free_rect_weight) > 0.0
@@ -992,6 +1022,25 @@ class PalletModel:
         rejected_by_height = 0
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         candidates: list[_LayerCandidate] = []
+        coverage_enabled = (
+            int(self.coverage_grid_x) > 0
+            and int(self.coverage_grid_y) > 0
+            and float(self.coverage_weight) > 0.0
+        )
+        zone_fill: list[float] = []
+        max_fill = 0.0
+        if coverage_enabled:
+            zone_fill = self._heightfield_zone_fill_ratios_floor()
+            max_fill = max(zone_fill) if zone_fill else 0.0
+
+        dominant_rect_enabled = float(self.dominant_free_rect_weight) > 0.0
+        dominant_rect: Rect | None = None
+        dominant_ratio = 0.0
+        if dominant_rect_enabled and projection_bin.free_rects:
+            dominant_rect = max(projection_bin.free_rects, key=lambda rect: int(rect.area))
+            used_area_proj = int(getattr(projection_bin, "used_area", 0))
+            free_area_proj = max(1, int(self.bin_area_mm2) - used_area_proj)
+            dominant_ratio = float(int(dominant_rect.area)) / float(free_area_proj)
 
         def _inv_maxrects_score(cand: _LayerCandidate, objective: float) -> tuple[int, ...]:
             score = getattr(cand.candidate, "score", None)
@@ -1134,6 +1183,49 @@ class PalletModel:
                         score_delta += tower_penalty
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
+
+                    is_floor = int(adjusted.z_mm) <= 0
+                    if is_floor and coverage_enabled and zone_fill:
+                        zone_id = self._coverage_zone_id(
+                            int(adjusted.x_mm),
+                            int(adjusted.y_mm),
+                            int(adjusted.length_mm),
+                            int(adjusted.width_mm),
+                            grid_x=int(self.coverage_grid_x),
+                            grid_y=int(self.coverage_grid_y),
+                        )
+                        if zone_id is not None and 0 <= int(zone_id) < len(zone_fill):
+                            cand_fill = float(zone_fill[int(zone_id)])
+                            coverage_bonus = (
+                                float(self.coverage_weight)
+                                * float(weighted_gain)
+                                * max(0.0, float(max_fill) - cand_fill)
+                            )
+                            score_delta += float(coverage_bonus)
+                            objective += float(coverage_bonus)
+                            debug["coverage_zone_id"] = int(zone_id)
+                            debug["coverage_zone_fill"] = float(cand_fill)
+                            debug["coverage_max_fill"] = float(max_fill)
+                            debug["coverage_bonus"] = float(coverage_bonus)
+
+                    if is_floor and dominant_rect_enabled and dominant_rect is not None:
+                        candidate_rect = Rect(
+                            int(adjusted.x_mm) - int(self.spec.offset_mm),
+                            int(adjusted.y_mm) - int(self.spec.offset_mm),
+                            int(adjusted.length_mm),
+                            int(adjusted.width_mm),
+                        )
+                        in_dominant_rect = bool(dominant_rect.contains(candidate_rect))
+                        if float(dominant_ratio) >= float(self.dominant_free_rect_ratio_gate):
+                            sign = 1.0 if in_dominant_rect else -1.0
+                        else:
+                            sign = 1.0 if in_dominant_rect else 0.0
+                        dominant_delta = float(self.dominant_free_rect_weight) * float(dominant_ratio) * float(sign)
+                        score_delta += float(dominant_delta)
+                        objective += float(dominant_delta)
+                        debug["dominant_free_rect_ratio"] = float(dominant_ratio)
+                        debug["dominant_free_rect_in"] = bool(in_dominant_rect)
+                        debug["dominant_free_rect_delta"] = float(dominant_delta)
 
                 candidate_info: dict[str, Any] = {
                     "x": int(adjusted.x_mm),
