@@ -26,6 +26,7 @@ class PolicyConfig:
     pallet_spec: PalletSpec = PalletSpec()
     heuristic: str = "baf"
     stacking_mode: str = "layers"
+    z_band_mm: int | None = None
     scoring_weights: ScoringWeights = ScoringWeights()
     scheduler: SchedulerConfig = SchedulerConfig()
     default_box_length_mm: int = 400
@@ -136,6 +137,7 @@ class PolicyPackerScheduler:
         overhang_mm: int = 0,
         heuristic: str = "baf",
         stacking_mode: str = "layers",
+        z_band_mm: int | None = None,
         t_select_base: float = 0.0,
         t_select_step: float = 0.0,
         time_penalty_weight: float = 1.0,
@@ -209,6 +211,7 @@ class PolicyPackerScheduler:
             pallet_spec=pallet_spec,
             heuristic=heuristic,
             stacking_mode=str(stacking_mode),
+            z_band_mm=(None if z_band_mm is None else max(0, int(z_band_mm))),
             scheduler=scheduler,
             stability_mode=stability_mode,
             min_support_ratio=min_support_ratio,
@@ -976,6 +979,7 @@ class PolicyPackerScheduler:
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,
             stacking_mode=str(self.config.stacking_mode),
+            z_band_mm=(None if self.config.z_band_mm is None else max(0, int(self.config.z_band_mm))),
             control_config=control_config,
             orientation_mode=str(self.config.orientation_mode),
             stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
