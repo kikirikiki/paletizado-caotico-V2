@@ -159,6 +159,7 @@ class PolicyPackerScheduler:
         dominant_free_rect_ratio_gate: float = 0.35,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
+        z_band_mm: int | None = None,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -192,6 +193,7 @@ class PolicyPackerScheduler:
             priority_weight=priority_weight,
             score_mode=score_mode,
             height_slack_mm=height_slack_mm,
+            z_band_mm=z_band_mm,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -638,6 +640,19 @@ class PolicyPackerScheduler:
         kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
         kpis["selected_height_slack_filtered_rate"] = float(slack_filtered_count / max(1, slack_decisions_count))
         kpis["selected_height_slack_set_size_mean"] = float(slack_set_size_sum / max(1, slack_decisions_count))
+        eval_stats = dict(getattr(self._scheduler, "last_eval_stats", {}) or {})
+        z_band_source = eval_stats
+        micro_plan_stats = eval_stats.get("micro_plan")
+        if (
+            str(eval_stats.get("mode", "")).lower() == "micro"
+            and isinstance(micro_plan_stats, dict)
+            and "z_band_enabled" in micro_plan_stats
+        ):
+            z_band_source = micro_plan_stats
+        if "z_band_enabled" in z_band_source:
+            kpis["z_band_enabled"] = bool(z_band_source.get("z_band_enabled", False))
+            kpis["z_band_mm"] = z_band_source.get("z_band_mm")
+            kpis["z_band_removed"] = int(z_band_source.get("z_band_removed", 0) or 0)
         return kpis
 
     def collect_controller_metrics(self) -> dict[str, object]:
@@ -984,6 +999,7 @@ class PolicyPackerScheduler:
             coverage_weight=max(0.0, float(self.config.coverage_weight)),
             dominant_free_rect_weight=max(0.0, float(self.config.dominant_free_rect_weight)),
             dominant_free_rect_ratio_gate=max(0.0, float(self.config.dominant_free_rect_ratio_gate)),
+            z_band_mm=getattr(self.config.scheduler, "z_band_mm", None),
         )
 
     def _get_first_attr(self, obj: Any, names: tuple[str, ...]) -> Any:

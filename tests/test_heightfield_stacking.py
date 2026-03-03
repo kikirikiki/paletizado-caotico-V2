@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from palca.domain.box import Box
+from palca.domain.placement import Placement
 from palca.domain.pallet_spec import PalletSpec
 from palca.packer.controls import ControlConfig, StabilityConfig
 from palca.packer.pallet_model import PalletModel
@@ -58,3 +59,33 @@ def test_heightfield_bridge_commit_does_not_consume_projection_bin_area() -> Non
 
     assert model.current_height_mm() == 20
     assert model.layers[0].bin.used_area == used_area_base
+
+
+def test_heightfield_xy_candidates_prioritize_low_z_before_xy_cap() -> None:
+    spec = PalletSpec(length_mm=1200, width_mm=800, max_height_mm=2400, overhang_mm=0)
+    model = PalletModel(spec=spec, stacking_mode="heightfield")
+
+    # Fill low-x region with tall columns so early (x, y) candidates are all high-z.
+    for box_id, x_mm in enumerate(range(0, 80), start=1):
+        model.placements.append(
+            Placement(
+                x_mm=x_mm,
+                y_mm=0,
+                z_mm=0,
+                rot90=False,
+                layer_id=0,
+                length_mm=2,
+                width_mm=800,
+                height_mm=200,
+                box_id=box_id,
+            )
+        )
+
+    candidates = model._heightfield_xy_candidates(l_mm=1, w_mm=1, cap=120)  # noqa: SLF001
+    assert len(candidates) == 120
+
+    min_candidate_z = min(
+        model._height_under_footprint_mm(x0_mm=x_mm, y0_mm=y_mm, l_mm=1, w_mm=1)  # noqa: SLF001
+        for x_mm, y_mm in candidates
+    )
+    assert min_candidate_z == 0

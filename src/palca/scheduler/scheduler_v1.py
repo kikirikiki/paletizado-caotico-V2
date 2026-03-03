@@ -38,6 +38,7 @@ class SchedulerConfig:
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    z_band_mm: int | None = None
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -74,6 +75,11 @@ class SchedulerConfig:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
         object.__setattr__(self, "score_mode", mode)
         object.__setattr__(self, "height_slack_mm", max(0, int(self.height_slack_mm)))
+        z_band = self.z_band_mm
+        if z_band is None:
+            object.__setattr__(self, "z_band_mm", None)
+        else:
+            object.__setattr__(self, "z_band_mm", max(0, int(z_band)))
 
 
 @dataclass(frozen=True)
@@ -240,6 +246,9 @@ class SchedulerV1:
                     "items_feasible": 0,
                     "cutoff": bool(micro_stats.get("cutoff", False)),
                     "cutoff_reason": str(micro_stats.get("cutoff_reason", "")),
+                    "z_band_enabled": bool(micro_stats.get("z_band_enabled", False)),
+                    "z_band_mm": micro_stats.get("z_band_mm"),
+                    "z_band_removed": int(micro_stats.get("z_band_removed", 0) or 0),
                     "micro_plan": dict(micro_stats),
                     "mode": "micro",
                 }
@@ -441,6 +450,14 @@ class SchedulerV1:
                 deadline=deadline,
             )
 
+        z_band_enabled = self.config.z_band_mm is not None
+        z_band_removed = 0
+        if feasible_candidates and z_band_enabled:
+            feasible_candidates, z_band_removed = self._filter_by_z_band_scored(
+                feasible_candidates=feasible_candidates,
+                z_band_mm=int(self.config.z_band_mm or 0),
+            )
+
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
             "items_feasible": int(items_feasible),
@@ -449,6 +466,10 @@ class SchedulerV1:
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
             "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
             "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
+            "z_band_enabled": bool(z_band_enabled),
+            "z_band_mm": (int(self.config.z_band_mm) if self.config.z_band_mm is not None else None),
+            "z_band_removed": int(z_band_removed),
+            "mode": "greedy",
         }
 
         best_plan: PickPlan | None = None
@@ -524,6 +545,7 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        z_band_removed_local = 0
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -570,6 +592,12 @@ class SchedulerV1:
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
 
                 if depth == 0:
+                    if expansions and self.config.z_band_mm is not None:
+                        expansions, z_removed = self._filter_by_z_band_expansions(
+                            expansions=expansions,
+                            z_band_mm=int(self.config.z_band_mm),
+                        )
+                        z_band_removed_local += int(z_removed)
                     feasible_first_candidates += len(expansions)
                     for expansion in expansions:
                         feasible_first_min_height = (
@@ -648,6 +676,9 @@ class SchedulerV1:
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
             ),
+            "z_band_enabled": bool(self.config.z_band_mm is not None),
+            "z_band_mm": (int(self.config.z_band_mm) if self.config.z_band_mm is not None else None),
+            "z_band_removed": int(z_band_removed_local),
         }
 
         if best_node.first_plan is None:
@@ -847,6 +878,89 @@ class SchedulerV1:
             queue.append(upstream.pop(0))
 
         return _BeamRampState(queue=queue, upstream=upstream, capacity=cap)
+
+    @staticmethod
+    def _placement_z_mm(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm"))
+        except (TypeError, ValueError):
+            return None
+
+    def _filter_by_z_band_scored(
+        self,
+        feasible_candidates: list[_ScoredCandidate],
+        z_band_mm: int,
+    ) -> tuple[list[_ScoredCandidate], int]:
+        band = max(0, int(z_band_mm))
+        min_z_by_pallet: dict[int | str, int] = {}
+        for candidate in feasible_candidates:
+            pallet_id = candidate.plan.pallet_id
+            z_mm = self._placement_z_mm(candidate.plan.preview)
+            if z_mm is None:
+                continue
+            prev = min_z_by_pallet.get(pallet_id)
+            if prev is None or int(z_mm) < int(prev):
+                min_z_by_pallet[pallet_id] = int(z_mm)
+
+        if not min_z_by_pallet:
+            return feasible_candidates, 0
+
+        filtered: list[_ScoredCandidate] = []
+        removed = 0
+        for candidate in feasible_candidates:
+            pallet_id = candidate.plan.pallet_id
+            z_mm = self._placement_z_mm(candidate.plan.preview)
+            min_z = min_z_by_pallet.get(pallet_id)
+            if z_mm is None or min_z is None or int(z_mm) <= int(min_z) + band:
+                filtered.append(candidate)
+            else:
+                removed += 1
+        return filtered, int(removed)
+
+    def _filter_by_z_band_expansions(
+        self,
+        expansions: list[_BeamExpansion],
+        z_band_mm: int,
+    ) -> tuple[list[_BeamExpansion], int]:
+        band = max(0, int(z_band_mm))
+        min_z_by_pallet: dict[int | str, int] = {}
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            first_plan = expansion.node.first_plan
+            preview = first_plan.preview if first_plan is not None else None
+            z_mm = self._placement_z_mm(preview)
+            if z_mm is None:
+                continue
+            prev = min_z_by_pallet.get(pallet_id)
+            if prev is None or int(z_mm) < int(prev):
+                min_z_by_pallet[pallet_id] = int(z_mm)
+
+        if not min_z_by_pallet:
+            return expansions, 0
+
+        filtered: list[_BeamExpansion] = []
+        removed = 0
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                filtered.append(expansion)
+                continue
+            min_z = min_z_by_pallet.get(pallet_id)
+            first_plan = expansion.node.first_plan
+            preview = first_plan.preview if first_plan is not None else None
+            z_mm = self._placement_z_mm(preview)
+            if z_mm is None or min_z is None or int(z_mm) <= int(min_z) + band:
+                filtered.append(expansion)
+            else:
+                removed += 1
+        return filtered, int(removed)
 
     @staticmethod
     def _preview_layer_id(preview: PlacementPreview | None) -> int | None:
