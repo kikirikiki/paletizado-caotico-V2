@@ -155,6 +155,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Slack de altura para min_height_slack_then_gain (mm)",
     )
     parser.add_argument(
+        "--tower-z-band-mm",
+        type=int,
+        default=0,
+        help="Banda (mm) para penalización tower-z respecto al mínimo factible (0 = solo por encima del mínimo).",
+    )
+    parser.add_argument(
+        "--tower-z-penalty-weight",
+        type=float,
+        default=0.0,
+        help="Peso de penalización tower-z (0 deshabilita).",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -382,6 +394,8 @@ def run_simulation(
     dominant_free_rect_ratio_gate: float = 0.35,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
+    tower_z_band_mm: int = 0,
+    tower_z_penalty_weight: float = 0.0,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -570,6 +584,8 @@ def run_simulation(
             dominant_free_rect_ratio_gate=float(dominant_free_rect_ratio_gate),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            tower_z_band_mm=max(0, int(tower_z_band_mm)),
+            tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -672,6 +688,8 @@ def run_simulation(
             "dominant_free_rect_ratio_gate": float(dominant_free_rect_ratio_gate),
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
+            "tower_z_band_mm": int(max(0, int(tower_z_band_mm))),
+            "tower_z_penalty_weight": float(max(0.0, float(tower_z_penalty_weight))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -765,6 +783,8 @@ def main() -> None:
         dominant_free_rect_ratio_gate=float(args.dominant_free_rect_ratio_gate),
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
+        tower_z_band_mm=int(args.tower_z_band_mm),
+        tower_z_penalty_weight=float(args.tower_z_penalty_weight),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
