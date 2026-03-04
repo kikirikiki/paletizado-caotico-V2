@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -230,6 +231,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Output
     parser.add_argument("--out", type=str, default=None, help="Ruta de salida .json o .csv (opcional)")
+    parser.add_argument(
+        "--dump-placements",
+        type=str,
+        default=None,
+        help="Si se define, vuelca la secuencia real de placements commitados a este JSON (opcional).",
+    )
     parser.add_argument("--print", action="store_true", help="Imprime el JSON aunque uses --out")
 
     # Visualization
@@ -389,6 +396,7 @@ def run_simulation(
     force_destination: int | None = None,
     continuous_pallets: bool = False,
     max_pallets: int = 0,
+    dump_placements_path: str | None = None,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -681,6 +689,11 @@ def run_simulation(
         "metrics": metrics_payload,
     }
 
+    if dump_placements_path:
+        resolved_dump = resolve_repo_path(dump_placements_path)
+        dump_payload = _build_placements_dump(decision_policy=decision_policy, params=payload.get("params", {}))
+        _write_json(resolved_dump, dump_payload)
+
     if out_path:
         resolved = resolve_repo_path(out_path)
         if resolved.suffix.lower() == ".csv":
@@ -765,6 +778,7 @@ def main() -> None:
         ),
         continuous_pallets=bool(args.continuous_pallets),
         max_pallets=int(args.max_pallets),
+        dump_placements_path=args.dump_placements,
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
@@ -807,6 +821,30 @@ def _print_continuous_summary(payload: dict[str, Any], forced_destination: int |
     print(f"continuous dest={destination} pallets={pallets_total} boxes_total={boxes_total}")
     print(f"sequence: {sequence} (len={len(sequence)} sum={boxes_total})")
     print(f"closures_by_reason: {closures}")
+
+def _git_head() -> str | None:
+    try:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        return head or None
+    except Exception:
+        return None
+
+
+def _build_placements_dump(*, decision_policy: Any | None, params: dict[str, Any]) -> dict[str, Any]:
+    pallets: dict[str, Any] = {}
+    if decision_policy is not None and hasattr(decision_policy, "export_committed_placements"):
+        try:
+            exported = decision_policy.export_committed_placements()  # type: ignore[attr-defined]
+            if isinstance(exported, dict):
+                pallets = dict(exported)
+        except Exception:
+            pallets = {}
+    return {
+        "schema_version": 1,
+        "git_head": _git_head(),
+        "params": dict(params),
+        "pallets": pallets,
+    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
