@@ -78,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="layers",
         help="Modo de apilado: layers (legacy) o heightfield (2.5D).",
     )
+    parser.add_argument(
+        "--z-band-mm",
+        type=int,
+        default=None,
+        help="Banda de Z para heightfield: limita candidatos a z <= min_z + banda (None deshabilita).",
+    )
 
     # palca knobs (packer + scheduler)
     parser.add_argument("--overhang_mm", type=int, default=0, help="Overhang permitido (0/20/40...)")
@@ -343,6 +349,7 @@ def run_simulation(
     overhang_mm: int = 0,
     heuristic: str = "baf",
     stacking_mode: str = "layers",
+    z_band_mm: int | None = None,
     t_select_base: float = 0.0,
     t_select_step: float = 0.0,
     time_penalty_weight: float = 1.0,
@@ -519,6 +526,7 @@ def run_simulation(
             overhang_mm=overhang_mm,
             heuristic=heuristic,
             stacking_mode=stacking_mode,
+            z_band_mm=(None if z_band_mm is None else int(z_band_mm)),
             t_select_base=t_select_base,
             t_select_step=t_select_step,
             time_penalty_weight=time_penalty_weight,
@@ -630,6 +638,7 @@ def run_simulation(
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
             "stacking_mode": stacking_mode,
+            "z_band_mm": (None if z_band_mm is None else int(z_band_mm)),
             "t_select_base": t_select_base,
             "t_select_step": t_select_step,
             "time_penalty_weight": time_penalty_weight,
@@ -717,6 +726,7 @@ def main() -> None:
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
         stacking_mode=str(args.stacking_mode),
+        z_band_mm=(None if args.z_band_mm is None else int(args.z_band_mm)),
         t_select_base=args.t_select_base,
         t_select_step=args.t_select_step,
         time_penalty_weight=args.time_penalty_weight,

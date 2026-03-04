@@ -259,6 +259,7 @@ class PalletModel:
         controls: ControlStack | None = None,
         control_config: ControlConfig | None = None,
         stacking_mode: str = STACKING_MODE_LAYERS,
+        z_band_mm: int | None = None,
         orientation_mode: str = ORIENTATION_MODE_PLANAR,
         stand_hw_height_margin_gate_mm: int = DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM,
         coverage_grid_x: int = 0,
@@ -271,6 +272,7 @@ class PalletModel:
         self.heuristic = heuristic
         self.scoring_weights = _normalize_scoring_weights(scoring_weights)
         self.stacking_mode = normalize_stacking_mode(stacking_mode)
+        self.z_band_mm = None if z_band_mm is None else max(0, int(z_band_mm))
         self.orientation_mode = normalize_orientation_mode(orientation_mode)
         self.stand_hw_height_margin_gate_mm = max(0, int(stand_hw_height_margin_gate_mm))
         self.coverage_grid_x = max(0, int(coverage_grid_x))
@@ -1267,10 +1269,32 @@ class PalletModel:
             if stop_search:
                 break
 
+        z_band_min_z: int | None = None
+        z_band_candidates_before = 0
+        z_band_candidates_after = 0
+        if candidates and self.z_band_mm is not None:
+            z_band_candidates_before = len(candidates)
+            candidates_with_placement = [cand for cand in candidates if cand.placement is not None]
+            if candidates_with_placement:
+                z_band_min_z = min(int(cand.placement.z_mm) for cand in candidates_with_placement)
+                z_limit = int(z_band_min_z) + int(self.z_band_mm)
+                z_band_filtered = [
+                    cand for cand in candidates_with_placement if int(cand.placement.z_mm) <= int(z_limit)
+                ]
+                if z_band_filtered:
+                    candidates = z_band_filtered
+            z_band_candidates_after = len(candidates)
+
         if candidates:
             best = _select_best(candidates)
             debug = dict(best.debug)
             debug["rejected_by_controls"] = rejected_by_controls
+            if self.z_band_mm is not None:
+                debug["z_band_enabled"] = True
+                debug["z_band_mm"] = int(self.z_band_mm)
+                debug["z_band_min_z"] = z_band_min_z
+                debug["z_band_candidates_before"] = int(z_band_candidates_before)
+                debug["z_band_candidates_after"] = int(z_band_candidates_after)
             if budget is not None:
                 debug["candidates_evaluated"] = int(budget.candidates_checked)
                 if budget.limit_hit:
@@ -1300,6 +1324,12 @@ class PalletModel:
                 reason = "CANDIDATE_LIMIT"
 
         debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
+        if self.z_band_mm is not None:
+            debug["z_band_enabled"] = True
+            debug["z_band_mm"] = int(self.z_band_mm)
+            debug["z_band_min_z"] = z_band_min_z
+            debug["z_band_candidates_before"] = int(z_band_candidates_before)
+            debug["z_band_candidates_after"] = int(z_band_candidates_after)
         if budget is not None:
             debug["candidates_evaluated"] = int(budget.candidates_checked)
             if budget.limit_hit:
