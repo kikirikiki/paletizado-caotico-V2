@@ -75,6 +75,7 @@ class PolicyPackerScheduler:
         self._pallets: dict[int | str, PalletModel] = {}
         self._completed: dict[int | str, list[PalletModel]] = {}
         self._pending_closures: dict[int | str, str] = {}
+        self._committed_placements: dict[int | str, list[dict[str, object]]] = {}
         self._viewer = None
         self._viewer_rect_cls = None
         self._viewer_event_count = 0
@@ -442,6 +443,47 @@ class PolicyPackerScheduler:
 
         if placement is None:
             return
+
+        # Record the *committed* placement sequence (not previews) for offline analysis.
+        # Best-effort: must never affect packing decisions.
+        pid = getattr(plan, "pallet_id", None)
+        try:
+            if pid is not None:
+                seq = self._committed_placements.setdefault(pid, [])
+                step_index = int(len(seq))
+                entry: dict[str, object] = {
+                    "pallet_id": pid,
+                    "step_index": step_index,
+                    "box_id": getattr(placement, "box_id", None),
+                    "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                    "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                    "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                    "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                    "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                    "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                    "rot90": bool(getattr(placement, "rot90", False)),
+                    "layer_id": int(getattr(placement, "layer_id", 0) or 0),
+                    "orientation_family": getattr(placement, "orientation_family", None),
+                    "orientation_name": getattr(placement, "orientation_name", None),
+                }
+                if time is not None:
+                    entry["timestamp"] = float(time)
+
+                weight_kg = getattr(placement, "weight_kg", None)
+                if weight_kg is not None:
+                    entry["weight_kg"] = float(weight_kg)
+
+                loadbear = getattr(placement, "loadbear", None)
+                if loadbear is not None:
+                    entry["loadbear"] = float(loadbear)
+
+                priority = getattr(placement, "priority", None)
+                if priority is not None:
+                    entry["priority"] = float(priority)
+
+                seq.append(entry)
+        except Exception:
+            self._logger.exception("record committed placement failed pid=%s", pid)
 
         viewer = self._viewer
         if viewer is None:
@@ -995,6 +1037,13 @@ class PolicyPackerScheduler:
             if hasattr(obj, n):
                 return getattr(obj, n)
         return None
+
+    def export_committed_placements(self) -> dict[str, list[dict[str, object]]]:
+        """Return committed placements grouped by pallet_id (keys are strings for JSON)."""
+        out: dict[str, list[dict[str, object]]] = {}
+        for pid, seq in self._committed_placements.items():
+            out[str(pid)] = [dict(item) for item in seq]
+        return out
 
     def _extract_rect_xywh(self, obj: Any) -> tuple[float | None, float | None, float | None, float | None]:
         """Try to extract (x,y,w,h) in mm from a placement-like object."""
