@@ -49,6 +49,8 @@ class PolicyConfig:
     dominant_free_rect_ratio_gate: float = 0.35
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    tower_z_band_mm: int = 0
+    tower_z_penalty_weight: float = 0.0
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -162,6 +164,8 @@ class PolicyPackerScheduler:
         dominant_free_rect_ratio_gate: float = 0.35,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
+        tower_z_band_mm: int = 0,
+        tower_z_penalty_weight: float = 0.0,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -195,6 +199,8 @@ class PolicyPackerScheduler:
             priority_weight=priority_weight,
             score_mode=score_mode,
             height_slack_mm=height_slack_mm,
+            tower_z_band_mm=tower_z_band_mm,
+            tower_z_penalty_weight=tower_z_penalty_weight,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -231,6 +237,8 @@ class PolicyPackerScheduler:
             dominant_free_rect_ratio_gate=max(0.0, float(dominant_free_rect_ratio_gate)),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            tower_z_band_mm=max(0, int(tower_z_band_mm)),
+            tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -668,9 +676,25 @@ class PolicyPackerScheduler:
         slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
         slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
         height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
+        tower_z_penalty_weight = float(getattr(self._scheduler.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        tower_z_band_mm = int(getattr(self._scheduler.config, "tower_z_band_mm", 0) or 0)
+        tower_z_penalty_applied_count = int(getattr(self._scheduler, "tower_z_penalty_applied_count", 0) or 0)
+        tower_z_penalty_sum = float(getattr(self._scheduler, "tower_z_penalty_sum", 0.0) or 0.0)
+        tower_z_delta_mm_sum = float(getattr(self._scheduler, "tower_z_delta_mm_sum", 0.0) or 0.0)
+        tower_z_selected_count = int(getattr(self._scheduler, "tower_z_selected_count", 0) or 0)
+        tower_z_selected_delta_mm_sum = float(getattr(self._scheduler, "tower_z_selected_delta_mm_sum", 0.0) or 0.0)
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)
+        kpis["tower_z_band_mm"] = int(tower_z_band_mm)
+        kpis["tower_z_penalty_applied_count"] = int(tower_z_penalty_applied_count)
+        kpis["tower_z_penalty_sum"] = float(tower_z_penalty_sum)
+        kpis["tower_z_delta_mm_mean"] = float(tower_z_delta_mm_sum / max(1, tower_z_penalty_applied_count))
+        kpis["tower_z_selected_count"] = int(tower_z_selected_count)
+        kpis["tower_z_selected_delta_mm_mean"] = float(
+            tower_z_selected_delta_mm_sum / max(1, tower_z_selected_count)
+        )
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min

@@ -39,6 +39,21 @@ def _percentile(xs: List[float], p: float) -> float:
     return float(d0 + d1)
 
 
+def _gini(xs: List[int]) -> float:
+    vals = [float(x) for x in xs if float(x) >= 0.0]
+    n = len(vals)
+    if n == 0:
+        return 0.0
+    total = float(sum(vals))
+    if total <= 0.0:
+        return 0.0
+    diff_sum = 0.0
+    for xi in vals:
+        for xj in vals:
+            diff_sum += abs(xi - xj)
+    return float(diff_sum / (2.0 * float(n) * total))
+
+
 @dataclass
 class SegmentStats:
     step_from: int
@@ -72,6 +87,7 @@ def analyze_pallet(
     *,
     band_mm: int,
     hist_bin_mm: int,
+    xy_bin_mm: int,
 ) -> dict[str, Any]:
     # sort by step_index if present
     def key(p: dict[str, Any]) -> int:
@@ -93,8 +109,43 @@ def analyze_pallet(
         families.append(str(fam))
 
     n = len(seq)
+
+    xy_bin = max(1, int(xy_bin_mm))
+    by_xy_bin: Dict[Tuple[int, int], int] = {}
+    xy_n = 0
+    for p in seq:
+        try:
+            x_mm = float(p["x_mm"])
+            y_mm = float(p["y_mm"])
+        except Exception:
+            continue
+        bx = int(x_mm // xy_bin)
+        by = int(y_mm // xy_bin)
+        by_xy_bin[(bx, by)] = int(by_xy_bin.get((bx, by), 0) + 1)
+        xy_n += 1
+
+    xy_sorted = sorted(by_xy_bin.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+    xy_counts = [int(count) for _, count in xy_sorted]
+    xy_bins_hist: Dict[str, int] = {}
+    for count in xy_counts:
+        key_s = str(int(count))
+        xy_bins_hist[key_s] = int(xy_bins_hist.get(key_s, 0) + 1)
+    xy_bins_topk = [
+        {"bx": int(bx), "by": int(by), "count": int(count)}
+        for (bx, by), count in xy_sorted[:10]
+    ]
+
     if n == 0:
-        return {"n": 0}
+        return {
+            "n": 0,
+            "xy_bin_mm": int(xy_bin),
+            "xy_bins_total": 0,
+            "xy_bins_max_boxes": 0,
+            "xy_bins_top3_boxes_percent": 0.0,
+            "xy_bins_hist": {},
+            "xy_bins_topk": [],
+            "xy_bins_gini": 0.0,
+        }
 
     z_min = int(min(zs))
     z_max = int(max(zs))
@@ -192,6 +243,13 @@ def analyze_pallet(
         "layerliness_score": float(layerliness_score),
         "family_by_step_segments": segments,
         "family_by_zbin": by_zbin_sorted,
+        "xy_bin_mm": int(xy_bin),
+        "xy_bins_total": int(len(xy_counts)),
+        "xy_bins_max_boxes": int(max(xy_counts)) if xy_counts else 0,
+        "xy_bins_top3_boxes_percent": float(sum(xy_counts[:3]) / float(xy_n)) if xy_n else 0.0,
+        "xy_bins_hist": dict(sorted(xy_bins_hist.items(), key=lambda kv: int(kv[0]))),
+        "xy_bins_topk": xy_bins_topk,
+        "xy_bins_gini": float(_gini(xy_counts)),
     }
 
 
@@ -200,6 +258,7 @@ def main() -> None:
     ap.add_argument("placements_json", type=str, help="Path to placements.json (from --dump-placements).")
     ap.add_argument("--band-mm", type=int, default=20, help="Band (mm) for 'near-min-z' and jump detection.")
     ap.add_argument("--hist-bin-mm", type=int, default=100, help="Histogram bucket size for z (mm).")
+    ap.add_argument("--xy-bin-mm", type=int, default=150, help="Bin size for x/y spatial concentration (mm).")
     ap.add_argument("--pallet-id", type=str, default=None, help="Analyze only this pallet_id (optional).")
     ap.add_argument("--out", type=str, default=None, help="Write summary JSON to this path (optional).")
     args = ap.parse_args()
@@ -230,7 +289,10 @@ def main() -> None:
             continue
         seq2 = [p for p in seq if isinstance(p, dict)]
         out["pallets"][str(pid)] = analyze_pallet(
-            seq2, band_mm=int(args.band_mm), hist_bin_mm=int(args.hist_bin_mm)
+            seq2,
+            band_mm=int(args.band_mm),
+            hist_bin_mm=int(args.hist_bin_mm),
+            xy_bin_mm=int(args.xy_bin_mm),
         )
 
     text = json.dumps(out, indent=2, ensure_ascii=True)

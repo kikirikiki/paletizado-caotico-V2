@@ -38,6 +38,8 @@ class SchedulerConfig:
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    tower_z_band_mm: int = 0
+    tower_z_penalty_weight: float = 0.0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -74,6 +76,8 @@ class SchedulerConfig:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
         object.__setattr__(self, "score_mode", mode)
         object.__setattr__(self, "height_slack_mm", max(0, int(self.height_slack_mm)))
+        object.__setattr__(self, "tower_z_band_mm", max(0, int(self.tower_z_band_mm)))
+        object.__setattr__(self, "tower_z_penalty_weight", max(0.0, float(self.tower_z_penalty_weight)))
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,8 @@ class _ScoreTerms:
     priority_score: float
     scalar_score: float
     height_after_mm: int
+    tower_z_delta_mm: int = 0
+    tower_z_penalty: float = 0.0
 
 
 @dataclass
@@ -190,6 +196,11 @@ class SchedulerV1:
         self.selected_height_slack_decisions_count = 0
         self.selected_height_slack_filtered_count = 0
         self.selected_height_slack_set_size_sum = 0.0
+        self.tower_z_penalty_applied_count = 0
+        self.tower_z_penalty_sum = 0.0
+        self.tower_z_delta_mm_sum = 0
+        self.tower_z_selected_count = 0
+        self.tower_z_selected_delta_mm_sum = 0
         self.batchfill_calls = 0
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
@@ -453,6 +464,11 @@ class SchedulerV1:
 
         best_plan: PickPlan | None = None
         if feasible_candidates:
+            min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
+            feasible_candidates = self._apply_tower_z_penalty_scored_candidates(
+                candidates=feasible_candidates,
+                min_feasible_height_after_mm=int(min_feasible_height_after_mm),
+            )
             best_by_slack, slack_stats = choose_with_height_slack(
                 candidates=feasible_candidates,
                 score_mode=self.config.score_mode,
@@ -557,6 +573,14 @@ class SchedulerV1:
                         continue
                     nodes_expanded += 1
                     expansions.append(expansion)
+
+                if expansions:
+                    min_h = min(int(e.terms.height_after_mm) for e in expansions)
+                    expansions = self._apply_tower_z_penalty_expansions(
+                        expansions=expansions,
+                        min_feasible_height_after_mm=int(min_h),
+                        adjust_first_plan=bool(depth == 0 and node.first_plan is None),
+                    )
 
                 if depth == 0 and node.first_plan is None and expansions and bool(self.config.batchfill_layer_starter):
                     expansions, batchfill_stats = self._apply_batchfill_on_beam_expansions(
@@ -1221,6 +1245,81 @@ class SchedulerV1:
             except Exception:
                 continue
         return float(max_priority)
+
+
+    def _apply_tower_z_penalty_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        min_feasible_height_after_mm: int,
+    ) -> list[_ScoredCandidate]:
+        weight = float(getattr(self.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        if weight <= 0.0:
+            return candidates
+        band = max(0, int(getattr(self.config, "tower_z_band_mm", 0) or 0))
+        base = int(min_feasible_height_after_mm)
+
+        out: list[_ScoredCandidate] = []
+        for cand in candidates:
+            h = int(cand.terms.height_after_mm)
+            delta = max(0, h - (base + band))
+            penalty = float(weight) * (float(delta) / 1000.0) if delta > 0 else 0.0
+            if penalty > 0.0:
+                self.tower_z_penalty_applied_count += 1
+                self.tower_z_penalty_sum += float(penalty)
+                self.tower_z_delta_mm_sum += int(delta)
+            new_terms = cand.terms
+            new_plan = cand.plan
+            if penalty > 0.0:
+                from dataclasses import replace
+                new_terms = replace(
+                    cand.terms,
+                    scalar_score=float(cand.terms.scalar_score) - float(penalty),
+                    tower_z_delta_mm=int(delta),
+                    tower_z_penalty=float(penalty),
+                )
+                new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
+            out.append(_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms))
+        return out
+
+    def _apply_tower_z_penalty_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        min_feasible_height_after_mm: int,
+        adjust_first_plan: bool,
+    ) -> list[_BeamExpansion]:
+        weight = float(getattr(self.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        if weight <= 0.0:
+            return expansions
+        band = max(0, int(getattr(self.config, "tower_z_band_mm", 0) or 0))
+        base = int(min_feasible_height_after_mm)
+
+        out: list[_BeamExpansion] = []
+        for exp in expansions:
+            h = int(exp.terms.height_after_mm)
+            delta = max(0, h - (base + band))
+            penalty = float(weight) * (float(delta) / 1000.0) if delta > 0 else 0.0
+            if penalty > 0.0:
+                self.tower_z_penalty_applied_count += 1
+                self.tower_z_penalty_sum += float(penalty)
+                self.tower_z_delta_mm_sum += int(delta)
+                # Important: keep node.score_sum consistent with penalized scalar_score
+                exp.node.score_sum = float(exp.node.score_sum) - float(penalty)
+                if adjust_first_plan and exp.node.first_plan is not None:
+                    from dataclasses import replace
+                    exp.node.first_plan = replace(exp.node.first_plan, score=float(exp.node.first_plan.score) - float(penalty))
+            new_terms = exp.terms
+            if penalty > 0.0:
+                from dataclasses import replace
+                new_terms = replace(
+                    exp.terms,
+                    scalar_score=float(exp.terms.scalar_score) - float(penalty),
+                    tower_z_delta_mm=int(delta),
+                    tower_z_penalty=float(penalty),
+                )
+            out.append(_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms))
+        return out
 
     def _score_candidate(
         self,
