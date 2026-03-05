@@ -88,6 +88,8 @@ def analyze_pallet(
     band_mm: int,
     hist_bin_mm: int,
     xy_bin_mm: int,
+    tower_slope_window: int,
+    tower_early_end_step: int,
 ) -> dict[str, Any]:
     seq_steps = list(placements)
 
@@ -114,11 +116,13 @@ def analyze_pallet(
 
     xy_bin = max(1, int(xy_bin_mm))
     by_xy_bin: Dict[Tuple[int, int], int] = {}
+    by_xy_bin_top_z_max: Dict[Tuple[int, int], float] = {}
     xy_n = 0
     xy_bins_top1_count_by_step: List[int] = []
     xy_bins_top1_bin_by_step: List[dict[str, int] | None] = []
     xy_bins_top3_boxes_percent_by_step: List[float] = []
     xy_bins_gini_by_step: List[float] = []
+    xy_bins_top_z_max_by_step: List[float] = []
     for i, p in enumerate(seq_steps):
         try:
             x_mm = float(p["x_mm"])
@@ -130,6 +134,18 @@ def analyze_pallet(
             by = int(y_mm // xy_bin)
             by_xy_bin[(bx, by)] = int(by_xy_bin.get((bx, by), 0) + 1)
             xy_n += 1
+            try:
+                z_mm = float(p.get("z_mm", 0) or 0.0)
+            except Exception:
+                z_mm = 0.0
+            try:
+                height_mm = float(p.get("height_mm", 0) or 0.0)
+            except Exception:
+                height_mm = 0.0
+            top_z = float(z_mm + height_mm)
+            prev_top_z = by_xy_bin_top_z_max.get((bx, by))
+            if prev_top_z is None or top_z > prev_top_z:
+                by_xy_bin_top_z_max[(bx, by)] = float(top_z)
 
         xy_sorted_step = sorted(by_xy_bin.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
         xy_counts_step = [int(count) for _, count in xy_sorted_step]
@@ -141,9 +157,14 @@ def analyze_pallet(
             xy_bins_top1_bin_by_step.append(None)
         xy_bins_top3_boxes_percent_by_step.append(float(sum(xy_counts_step[:3]) / float(i + 1)))
         xy_bins_gini_by_step.append(float(_gini(xy_counts_step)))
+        if by_xy_bin_top_z_max:
+            xy_bins_top_z_max_by_step.append(float(max(by_xy_bin_top_z_max.values())))
+        else:
+            xy_bins_top_z_max_by_step.append(0.0)
 
     xy_sorted = sorted(by_xy_bin.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
     xy_counts = [int(count) for _, count in xy_sorted]
+    xy_top_z_max_values = [float(v) for v in by_xy_bin_top_z_max.values()]
     xy_bins_hist: Dict[str, int] = {}
     for count in xy_counts:
         key_s = str(int(count))
@@ -158,6 +179,25 @@ def analyze_pallet(
         if int(c) == int(xy_bins_max_boxes):
             xy_bins_max_boxes_reached_step = int(i)
             break
+    xy_bins_top_z_max_mm = float(max(xy_top_z_max_values)) if xy_top_z_max_values else 0.0
+    xy_bins_top_z_p90_mm = float(_percentile(xy_top_z_max_values, 90))
+    xy_bins_top_z_p50_mm = float(_percentile(xy_top_z_max_values, 50))
+    xy_bins_top_z_p10_mm = float(_percentile(xy_top_z_max_values, 10))
+    xy_bins_top_z_roughness_mm = float(xy_bins_top_z_p90_mm - xy_bins_top_z_p10_mm)
+    xy_bins_top_z_max_reached_step = -1
+    for i, top_z_max_step in enumerate(xy_bins_top_z_max_by_step):
+        if float(top_z_max_step) >= float(xy_bins_top_z_max_mm):
+            xy_bins_top_z_max_reached_step = int(i)
+            break
+    slope_window = max(1, int(tower_slope_window))
+    early_end_step = max(0, int(tower_early_end_step))
+    xy_bins_top_z_growth_slope_max_early = 0.0
+    if xy_bins_top_z_max_by_step:
+        i_max = min(len(xy_bins_top_z_max_by_step) - 1, early_end_step)
+        for i in range(1, i_max + 1):
+            j = max(0, i - slope_window)
+            delta = float(xy_bins_top_z_max_by_step[i]) - float(xy_bins_top_z_max_by_step[j])
+            xy_bins_top_z_growth_slope_max_early = max(xy_bins_top_z_growth_slope_max_early, delta)
 
     if n == 0:
         return {
@@ -174,6 +214,14 @@ def analyze_pallet(
             "xy_bins_hist": {},
             "xy_bins_topk": [],
             "xy_bins_gini": 0.0,
+            "xy_bins_top_z_max_mm": 0.0,
+            "xy_bins_top_z_p90_mm": 0.0,
+            "xy_bins_top_z_p50_mm": 0.0,
+            "xy_bins_top_z_p10_mm": 0.0,
+            "xy_bins_top_z_roughness_mm": 0.0,
+            "xy_bins_top_z_max_by_step": [],
+            "xy_bins_top_z_max_reached_step": -1,
+            "xy_bins_top_z_growth_slope_max_early": 0.0,
         }
 
     z_min = int(min(zs))
@@ -284,6 +332,14 @@ def analyze_pallet(
         "xy_bins_hist": dict(sorted(xy_bins_hist.items(), key=lambda kv: int(kv[0]))),
         "xy_bins_topk": xy_bins_topk,
         "xy_bins_gini": float(_gini(xy_counts)),
+        "xy_bins_top_z_max_mm": float(xy_bins_top_z_max_mm),
+        "xy_bins_top_z_p90_mm": float(xy_bins_top_z_p90_mm),
+        "xy_bins_top_z_p50_mm": float(xy_bins_top_z_p50_mm),
+        "xy_bins_top_z_p10_mm": float(xy_bins_top_z_p10_mm),
+        "xy_bins_top_z_roughness_mm": float(xy_bins_top_z_roughness_mm),
+        "xy_bins_top_z_max_by_step": xy_bins_top_z_max_by_step,
+        "xy_bins_top_z_max_reached_step": int(xy_bins_top_z_max_reached_step),
+        "xy_bins_top_z_growth_slope_max_early": float(xy_bins_top_z_growth_slope_max_early),
     }
 
 
@@ -293,6 +349,18 @@ def main() -> None:
     ap.add_argument("--band-mm", type=int, default=20, help="Band (mm) for 'near-min-z' and jump detection.")
     ap.add_argument("--hist-bin-mm", type=int, default=100, help="Histogram bucket size for z (mm).")
     ap.add_argument("--xy-bin-mm", type=int, default=150, help="Bin size for x/y spatial concentration (mm).")
+    ap.add_argument(
+        "--tower-slope-window",
+        type=int,
+        default=3,
+        help="Window (steps) for max early growth in xy_bins_top_z_max_by_step.",
+    )
+    ap.add_argument(
+        "--tower-early-end-step",
+        type=int,
+        default=14,
+        help="Last step (inclusive) for early growth slope calculation.",
+    )
     ap.add_argument("--pallet-id", type=str, default=None, help="Analyze only this pallet_id (optional).")
     ap.add_argument("--out", type=str, default=None, help="Write summary JSON to this path (optional).")
     args = ap.parse_args()
@@ -311,6 +379,8 @@ def main() -> None:
         "analysis": {
             "band_mm": int(args.band_mm),
             "hist_bin_mm": int(args.hist_bin_mm),
+            "tower_slope_window": int(args.tower_slope_window),
+            "tower_early_end_step": int(args.tower_early_end_step),
         },
         "pallets": {},
     }
@@ -327,6 +397,8 @@ def main() -> None:
             band_mm=int(args.band_mm),
             hist_bin_mm=int(args.hist_bin_mm),
             xy_bin_mm=int(args.xy_bin_mm),
+            tower_slope_window=int(args.tower_slope_window),
+            tower_early_end_step=int(args.tower_early_end_step),
         )
 
     text = json.dumps(out, indent=2, ensure_ascii=True)
