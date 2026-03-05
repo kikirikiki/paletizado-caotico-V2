@@ -49,6 +49,13 @@ class PolicyConfig:
     dominant_free_rect_ratio_gate: float = 0.35
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    tower_z_band_mm: int = 0
+    tower_z_penalty_weight: float = 0.0
+    spatial_xy_bin_mm: int = 150
+    spatial_tower_penalty_weight: float = 0.0
+    spatial_tower_penalty_end_step: int = 0
+    spatial_tower_target_base: int = 2
+    spatial_tower_target_step_div: int = 6
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -162,6 +169,13 @@ class PolicyPackerScheduler:
         dominant_free_rect_ratio_gate: float = 0.35,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
+        tower_z_band_mm: int = 0,
+        tower_z_penalty_weight: float = 0.0,
+        spatial_xy_bin_mm: int = 150,
+        spatial_tower_penalty_weight: float = 0.0,
+        spatial_tower_penalty_end_step: int = 0,
+        spatial_tower_target_base: int = 2,
+        spatial_tower_target_step_div: int = 6,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -195,6 +209,13 @@ class PolicyPackerScheduler:
             priority_weight=priority_weight,
             score_mode=score_mode,
             height_slack_mm=height_slack_mm,
+            tower_z_band_mm=tower_z_band_mm,
+            tower_z_penalty_weight=tower_z_penalty_weight,
+            spatial_xy_bin_mm=spatial_xy_bin_mm,
+            spatial_tower_penalty_weight=spatial_tower_penalty_weight,
+            spatial_tower_penalty_end_step=spatial_tower_penalty_end_step,
+            spatial_tower_target_base=spatial_tower_target_base,
+            spatial_tower_target_step_div=spatial_tower_target_step_div,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -231,6 +252,13 @@ class PolicyPackerScheduler:
             dominant_free_rect_ratio_gate=max(0.0, float(dominant_free_rect_ratio_gate)),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            tower_z_band_mm=max(0, int(tower_z_band_mm)),
+            tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
+            spatial_xy_bin_mm=max(1, int(spatial_xy_bin_mm)),
+            spatial_tower_penalty_weight=max(0.0, float(spatial_tower_penalty_weight)),
+            spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
+            spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
+            spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -668,9 +696,57 @@ class PolicyPackerScheduler:
         slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
         slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
         height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
+        tower_z_penalty_weight = float(getattr(self._scheduler.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        tower_z_band_mm = int(getattr(self._scheduler.config, "tower_z_band_mm", 0) or 0)
+        tower_z_penalty_applied_count = int(getattr(self._scheduler, "tower_z_penalty_applied_count", 0) or 0)
+        tower_z_penalty_sum = float(getattr(self._scheduler, "tower_z_penalty_sum", 0.0) or 0.0)
+        tower_z_delta_mm_sum = float(getattr(self._scheduler, "tower_z_delta_mm_sum", 0.0) or 0.0)
+        tower_z_selected_count = int(getattr(self._scheduler, "tower_z_selected_count", 0) or 0)
+        tower_z_selected_delta_mm_sum = float(getattr(self._scheduler, "tower_z_selected_delta_mm_sum", 0.0) or 0.0)
+        spatial_xy_bin_mm = int(getattr(self._scheduler.config, "spatial_xy_bin_mm", 150) or 150)
+        spatial_tower_penalty_weight = float(
+            getattr(self._scheduler.config, "spatial_tower_penalty_weight", 0.0) or 0.0
+        )
+        spatial_tower_penalty_end_step = int(
+            getattr(self._scheduler.config, "spatial_tower_penalty_end_step", 0) or 0
+        )
+        spatial_tower_target_base = int(getattr(self._scheduler.config, "spatial_tower_target_base", 2) or 2)
+        spatial_tower_target_step_div = int(
+            getattr(self._scheduler.config, "spatial_tower_target_step_div", 6) or 6
+        )
+        spatial_tower_penalty_applied_count = int(
+            getattr(self._scheduler, "spatial_tower_penalty_applied_count", 0) or 0
+        )
+        spatial_tower_penalty_sum = float(getattr(self._scheduler, "spatial_tower_penalty_sum", 0.0) or 0.0)
+        spatial_tower_selected_penalty_count = int(
+            getattr(self._scheduler, "spatial_tower_selected_penalty_count", 0) or 0
+        )
+        spatial_tower_selected_penalty_sum = float(
+            getattr(self._scheduler, "spatial_tower_selected_penalty_sum", 0.0) or 0.0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)
+        kpis["tower_z_band_mm"] = int(tower_z_band_mm)
+        kpis["tower_z_penalty_applied_count"] = int(tower_z_penalty_applied_count)
+        kpis["tower_z_penalty_sum"] = float(tower_z_penalty_sum)
+        kpis["tower_z_delta_mm_mean"] = float(tower_z_delta_mm_sum / max(1, tower_z_penalty_applied_count))
+        kpis["tower_z_selected_count"] = int(tower_z_selected_count)
+        kpis["tower_z_selected_delta_mm_mean"] = float(
+            tower_z_selected_delta_mm_sum / max(1, tower_z_selected_count)
+        )
+        kpis["spatial_xy_bin_mm"] = int(spatial_xy_bin_mm)
+        kpis["spatial_tower_penalty_weight"] = float(spatial_tower_penalty_weight)
+        kpis["spatial_tower_penalty_end_step"] = int(spatial_tower_penalty_end_step)
+        kpis["spatial_tower_target_base"] = int(spatial_tower_target_base)
+        kpis["spatial_tower_target_step_div"] = int(spatial_tower_target_step_div)
+        kpis["spatial_tower_penalty_applied_count"] = int(spatial_tower_penalty_applied_count)
+        kpis["spatial_tower_penalty_sum"] = float(spatial_tower_penalty_sum)
+        kpis["spatial_tower_selected_penalty_count"] = int(spatial_tower_selected_penalty_count)
+        kpis["spatial_tower_selected_penalty_mean"] = float(
+            spatial_tower_selected_penalty_sum / max(1, spatial_tower_selected_penalty_count)
+        )
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min

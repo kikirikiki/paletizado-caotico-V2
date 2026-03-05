@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import inspect
 import logging
 import time
@@ -38,6 +38,13 @@ class SchedulerConfig:
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    tower_z_band_mm: int = 0
+    tower_z_penalty_weight: float = 0.0
+    spatial_xy_bin_mm: int = 150
+    spatial_tower_penalty_weight: float = 0.0
+    spatial_tower_penalty_end_step: int = 0
+    spatial_tower_target_base: int = 2
+    spatial_tower_target_step_div: int = 6
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -74,6 +81,13 @@ class SchedulerConfig:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
         object.__setattr__(self, "score_mode", mode)
         object.__setattr__(self, "height_slack_mm", max(0, int(self.height_slack_mm)))
+        object.__setattr__(self, "tower_z_band_mm", max(0, int(self.tower_z_band_mm)))
+        object.__setattr__(self, "tower_z_penalty_weight", max(0.0, float(self.tower_z_penalty_weight)))
+        object.__setattr__(self, "spatial_xy_bin_mm", max(1, int(self.spatial_xy_bin_mm)))
+        object.__setattr__(self, "spatial_tower_penalty_weight", max(0.0, float(self.spatial_tower_penalty_weight)))
+        object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
+        object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
+        object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
 
 
 @dataclass(frozen=True)
@@ -130,6 +144,10 @@ class _ScoreTerms:
     priority_score: float
     scalar_score: float
     height_after_mm: int
+    tower_z_delta_mm: int = 0
+    tower_z_penalty: float = 0.0
+    spatial_tower_delta: int = 0
+    spatial_tower_penalty: float = 0.0
 
 
 @dataclass
@@ -190,6 +208,17 @@ class SchedulerV1:
         self.selected_height_slack_decisions_count = 0
         self.selected_height_slack_filtered_count = 0
         self.selected_height_slack_set_size_sum = 0.0
+        self.tower_z_penalty_applied_count = 0
+        self.tower_z_penalty_sum = 0.0
+        self.tower_z_delta_mm_sum = 0
+        self.tower_z_selected_count = 0
+        self.tower_z_selected_delta_mm_sum = 0
+        self.spatial_tower_penalty_applied_count = 0
+        self.spatial_tower_penalty_sum = 0.0
+        self.spatial_tower_selected_penalty_count = 0
+        self.spatial_tower_selected_penalty_sum = 0.0
+        self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
+        self._spatial_step_index_by_pallet: dict[int | str, int] = {}
         self.batchfill_calls = 0
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
@@ -202,6 +231,7 @@ class SchedulerV1:
         self.last_eval_stats = {}
         self.last_micro_plan_stats = {}
         self.last_micro_feasible_first_candidates = 0
+        self._rebuild_spatial_state(sim_state.pallets)
         k = max(1, int(self.config.lookahead_k))
 
         deadline = None
@@ -230,6 +260,8 @@ class SchedulerV1:
             ) + 1
 
             if micro_plan is not None:
+                self._record_selected_spatial_tower_penalty(micro_plan)
+                self._update_spatial_state_from_selected_plan(micro_plan)
                 self._record_height_decision(
                     selected_height=micro_stats.get("selected_height_after_mm"),
                     min_feasible_height=micro_stats.get("feasible_first_min_height_mm"),
@@ -255,6 +287,9 @@ class SchedulerV1:
             details["micro_plan_enabled"] = True
             details["micro_plan_feasible_first_candidates"] = int(self.last_micro_feasible_first_candidates)
             self.last_deadlock_item = details
+        if plan is not None:
+            self._record_selected_spatial_tower_penalty(plan)
+            self._update_spatial_state_from_selected_plan(plan)
         return plan
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
@@ -453,6 +488,12 @@ class SchedulerV1:
 
         best_plan: PickPlan | None = None
         if feasible_candidates:
+            feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
+            min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
+            feasible_candidates = self._apply_tower_z_penalty_scored_candidates(
+                candidates=feasible_candidates,
+                min_feasible_height_after_mm=int(min_feasible_height_after_mm),
+            )
             best_by_slack, slack_stats = choose_with_height_slack(
                 candidates=feasible_candidates,
                 score_mode=self.config.score_mode,
@@ -558,6 +599,14 @@ class SchedulerV1:
                     nodes_expanded += 1
                     expansions.append(expansion)
 
+                if expansions:
+                    min_h = min(int(e.terms.height_after_mm) for e in expansions)
+                    expansions = self._apply_tower_z_penalty_expansions(
+                        expansions=expansions,
+                        min_feasible_height_after_mm=int(min_h),
+                        adjust_first_plan=bool(depth == 0 and node.first_plan is None),
+                    )
+
                 if depth == 0 and node.first_plan is None and expansions and bool(self.config.batchfill_layer_starter):
                     expansions, batchfill_stats = self._apply_batchfill_on_beam_expansions(
                         node=node,
@@ -568,6 +617,12 @@ class SchedulerV1:
                     batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
                     batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
+
+                if depth == 0 and node.first_plan is None and expansions:
+                    expansions = self._apply_spatial_tower_penalty_to_expansions(
+                        expansions=expansions,
+                        adjust_first_plan=True,
+                    )
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -1221,6 +1276,253 @@ class SchedulerV1:
             except Exception:
                 continue
         return float(max_priority)
+
+    def _spatial_tower_penalty_for_after_count(
+        self,
+        *,
+        after_count: int,
+        step_idx: int,
+    ) -> tuple[int, float]:
+        weight = float(getattr(self.config, "spatial_tower_penalty_weight", 0.0) or 0.0)
+        end_step = int(getattr(self.config, "spatial_tower_penalty_end_step", 0) or 0)
+        if weight <= 0.0 or end_step <= 0 or int(step_idx) >= end_step:
+            return 0, 0.0
+        target_base = int(getattr(self.config, "spatial_tower_target_base", 2) or 2)
+        target_step_div = max(1, int(getattr(self.config, "spatial_tower_target_step_div", 6) or 6))
+        target = int(target_base) + (int(step_idx) // int(target_step_div))
+        delta = max(0, int(after_count) - int(target))
+        penalty = float(weight) * float(delta)
+        if penalty <= 0.0:
+            return 0, 0.0
+        return int(delta), float(penalty)
+
+    def _apply_spatial_tower_penalty_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        weight = float(getattr(self.config, "spatial_tower_penalty_weight", 0.0) or 0.0)
+        end_step = int(getattr(self.config, "spatial_tower_penalty_end_step", 0) or 0)
+        if weight <= 0.0 or end_step <= 0:
+            return candidates
+
+        out: list[_ScoredCandidate] = []
+        for cand in candidates:
+            pallet_id = cand.plan.pallet_id
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+            counts = self._spatial_bin_counts.get(pallet_id, {})
+            bx_by = self._placement_bin_xy(getattr(cand.plan.preview, "placement", None))
+            if bx_by is None:
+                out.append(cand)
+                continue
+            current_count = int(counts.get(bx_by, 0))
+            after_count = int(current_count) + 1
+            delta, penalty = self._spatial_tower_penalty_for_after_count(
+                after_count=after_count,
+                step_idx=step_idx,
+            )
+            if penalty > 0.0:
+                self.spatial_tower_penalty_applied_count += 1
+                self.spatial_tower_penalty_sum += float(penalty)
+                new_terms = replace(
+                    cand.terms,
+                    scalar_score=float(cand.terms.scalar_score) - float(penalty),
+                    spatial_tower_delta=int(delta),
+                    spatial_tower_penalty=float(penalty),
+                )
+                new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
+                out.append(_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms))
+                continue
+            out.append(cand)
+        return out
+
+    def _apply_spatial_tower_penalty_to_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        adjust_first_plan: bool,
+    ) -> list[_BeamExpansion]:
+        weight = float(getattr(self.config, "spatial_tower_penalty_weight", 0.0) or 0.0)
+        end_step = int(getattr(self.config, "spatial_tower_penalty_end_step", 0) or 0)
+        if weight <= 0.0 or end_step <= 0:
+            return expansions
+
+        out: list[_BeamExpansion] = []
+        for exp in expansions:
+            pallet_id = exp.box.destination
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+            counts = self._spatial_bin_counts.get(pallet_id, {})
+            placement = None
+            if exp.node.first_plan is not None:
+                placement = getattr(exp.node.first_plan.preview, "placement", None)
+            bx_by = self._placement_bin_xy(placement)
+            if bx_by is None:
+                out.append(exp)
+                continue
+            current_count = int(counts.get(bx_by, 0))
+            after_count = int(current_count) + 1
+            delta, penalty = self._spatial_tower_penalty_for_after_count(
+                after_count=after_count,
+                step_idx=step_idx,
+            )
+            if penalty > 0.0:
+                self.spatial_tower_penalty_applied_count += 1
+                self.spatial_tower_penalty_sum += float(penalty)
+                exp.node.score_sum = float(exp.node.score_sum) - float(penalty)
+                if adjust_first_plan and exp.node.first_plan is not None:
+                    exp.node.first_plan = replace(exp.node.first_plan, score=float(exp.node.first_plan.score) - float(penalty))
+                new_terms = replace(
+                    exp.terms,
+                    scalar_score=float(exp.terms.scalar_score) - float(penalty),
+                    spatial_tower_delta=int(delta),
+                    spatial_tower_penalty=float(penalty),
+                )
+                out.append(_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms))
+                continue
+            out.append(exp)
+        return out
+
+    def _rebuild_spatial_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
+        self._spatial_bin_counts = {}
+        self._spatial_step_index_by_pallet = {}
+        bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
+        for pallet_id, pallet in pallets.items():
+            counts: dict[tuple[int, int], int] = {}
+            step_idx = 0
+            for placement in list(getattr(pallet, "placements", []) or []):
+                step_idx += 1
+                xy = self._placement_xy_mm(placement)
+                if xy is None:
+                    continue
+                bx = int(xy[0]) // bin_mm
+                by = int(xy[1]) // bin_mm
+                key = (int(bx), int(by))
+                counts[key] = int(counts.get(key, 0)) + 1
+            self._spatial_bin_counts[pallet_id] = counts
+            self._spatial_step_index_by_pallet[pallet_id] = int(step_idx)
+
+    def _update_spatial_state_from_selected_plan(self, plan: PickPlan) -> None:
+        pallet_id = plan.pallet_id
+        current_step = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+        self._spatial_step_index_by_pallet[pallet_id] = current_step + 1
+
+        counts = self._spatial_bin_counts.setdefault(pallet_id, {})
+        placement = getattr(plan.preview, "placement", None)
+        bx_by = self._placement_bin_xy(placement)
+        if bx_by is None:
+            return
+        counts[bx_by] = int(counts.get(bx_by, 0)) + 1
+
+    def _record_selected_spatial_tower_penalty(self, plan: PickPlan) -> None:
+        pallet_id = plan.pallet_id
+        step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+        counts = self._spatial_bin_counts.get(pallet_id, {})
+        placement = getattr(plan.preview, "placement", None)
+        bx_by = self._placement_bin_xy(placement)
+        if bx_by is None:
+            return
+        current_count = int(counts.get(bx_by, 0))
+        after_count = int(current_count) + 1
+        _delta, penalty = self._spatial_tower_penalty_for_after_count(
+            after_count=after_count,
+            step_idx=step_idx,
+        )
+        if penalty > 0.0:
+            self.spatial_tower_selected_penalty_count += 1
+            self.spatial_tower_selected_penalty_sum += float(penalty)
+
+    @staticmethod
+    def _placement_xy_mm(placement: object | None) -> tuple[int, int] | None:
+        if placement is None:
+            return None
+        try:
+            x_mm = int(getattr(placement, "x_mm"))
+            y_mm = int(getattr(placement, "y_mm"))
+        except Exception:
+            return None
+        return int(x_mm), int(y_mm)
+
+    def _placement_bin_xy(self, placement: object | None) -> tuple[int, int] | None:
+        xy = self._placement_xy_mm(placement)
+        if xy is None:
+            return None
+        bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
+        return int(xy[0]) // bin_mm, int(xy[1]) // bin_mm
+
+
+    def _apply_tower_z_penalty_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        min_feasible_height_after_mm: int,
+    ) -> list[_ScoredCandidate]:
+        weight = float(getattr(self.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        if weight <= 0.0:
+            return candidates
+        band = max(0, int(getattr(self.config, "tower_z_band_mm", 0) or 0))
+        base = int(min_feasible_height_after_mm)
+
+        out: list[_ScoredCandidate] = []
+        for cand in candidates:
+            h = int(cand.terms.height_after_mm)
+            delta = max(0, h - (base + band))
+            penalty = float(weight) * (float(delta) / 1000.0) if delta > 0 else 0.0
+            if penalty > 0.0:
+                self.tower_z_penalty_applied_count += 1
+                self.tower_z_penalty_sum += float(penalty)
+                self.tower_z_delta_mm_sum += int(delta)
+            new_terms = cand.terms
+            new_plan = cand.plan
+            if penalty > 0.0:
+                from dataclasses import replace
+                new_terms = replace(
+                    cand.terms,
+                    scalar_score=float(cand.terms.scalar_score) - float(penalty),
+                    tower_z_delta_mm=int(delta),
+                    tower_z_penalty=float(penalty),
+                )
+                new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
+            out.append(_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms))
+        return out
+
+    def _apply_tower_z_penalty_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        min_feasible_height_after_mm: int,
+        adjust_first_plan: bool,
+    ) -> list[_BeamExpansion]:
+        weight = float(getattr(self.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        if weight <= 0.0:
+            return expansions
+        band = max(0, int(getattr(self.config, "tower_z_band_mm", 0) or 0))
+        base = int(min_feasible_height_after_mm)
+
+        out: list[_BeamExpansion] = []
+        for exp in expansions:
+            h = int(exp.terms.height_after_mm)
+            delta = max(0, h - (base + band))
+            penalty = float(weight) * (float(delta) / 1000.0) if delta > 0 else 0.0
+            if penalty > 0.0:
+                self.tower_z_penalty_applied_count += 1
+                self.tower_z_penalty_sum += float(penalty)
+                self.tower_z_delta_mm_sum += int(delta)
+                # Important: keep node.score_sum consistent with penalized scalar_score
+                exp.node.score_sum = float(exp.node.score_sum) - float(penalty)
+                if adjust_first_plan and exp.node.first_plan is not None:
+                    from dataclasses import replace
+                    exp.node.first_plan = replace(exp.node.first_plan, score=float(exp.node.first_plan.score) - float(penalty))
+            new_terms = exp.terms
+            if penalty > 0.0:
+                from dataclasses import replace
+                new_terms = replace(
+                    exp.terms,
+                    scalar_score=float(exp.terms.scalar_score) - float(penalty),
+                    tower_z_delta_mm=int(delta),
+                    tower_z_penalty=float(penalty),
+                )
+            out.append(_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms))
+        return out
 
     def _score_candidate(
         self,

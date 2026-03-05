@@ -155,6 +155,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Slack de altura para min_height_slack_then_gain (mm)",
     )
     parser.add_argument(
+        "--tower-z-band-mm",
+        type=int,
+        default=0,
+        help="Banda (mm) para penalización tower-z respecto al mínimo factible (0 = solo por encima del mínimo).",
+    )
+    parser.add_argument(
+        "--tower-z-penalty-weight",
+        type=float,
+        default=0.0,
+        help="Peso de penalización tower-z (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--spatial-xy-bin-mm",
+        type=int,
+        default=150,
+        help="Tamaño de bin XY (mm) para penalty espacial anti-torre.",
+    )
+    parser.add_argument(
+        "--spatial-tower-penalty-weight",
+        type=float,
+        default=0.0,
+        help="Peso de penalización espacial anti-torre temprana (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--spatial-tower-penalty-end-step",
+        type=int,
+        default=0,
+        help="Paso límite (exclusivo) para aplicar penalty espacial; 0 deshabilita.",
+    )
+    parser.add_argument(
+        "--spatial-tower-target-base",
+        type=int,
+        default=2,
+        help="Target base de cajas por bin XY al inicio del episode step por pallet.",
+    )
+    parser.add_argument(
+        "--spatial-tower-target-step-div",
+        type=int,
+        default=6,
+        help="Cada N pasos sube en +1 el target espacial por bin.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -382,6 +424,13 @@ def run_simulation(
     dominant_free_rect_ratio_gate: float = 0.35,
     score_mode: str = "gain_frag",
     height_slack_mm: int = 0,
+    tower_z_band_mm: int = 0,
+    tower_z_penalty_weight: float = 0.0,
+    spatial_xy_bin_mm: int = 150,
+    spatial_tower_penalty_weight: float = 0.0,
+    spatial_tower_penalty_end_step: int = 0,
+    spatial_tower_target_base: int = 2,
+    spatial_tower_target_step_div: int = 6,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -570,6 +619,13 @@ def run_simulation(
             dominant_free_rect_ratio_gate=float(dominant_free_rect_ratio_gate),
             score_mode=score_mode,
             height_slack_mm=max(0, int(height_slack_mm)),
+            tower_z_band_mm=max(0, int(tower_z_band_mm)),
+            tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
+            spatial_xy_bin_mm=max(1, int(spatial_xy_bin_mm)),
+            spatial_tower_penalty_weight=max(0.0, float(spatial_tower_penalty_weight)),
+            spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
+            spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
+            spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -672,6 +728,13 @@ def run_simulation(
             "dominant_free_rect_ratio_gate": float(dominant_free_rect_ratio_gate),
             "score_mode": score_mode,
             "height_slack_mm": int(max(0, int(height_slack_mm))),
+            "tower_z_band_mm": int(max(0, int(tower_z_band_mm))),
+            "tower_z_penalty_weight": float(max(0.0, float(tower_z_penalty_weight))),
+            "spatial_xy_bin_mm": int(max(1, int(spatial_xy_bin_mm))),
+            "spatial_tower_penalty_weight": float(max(0.0, float(spatial_tower_penalty_weight))),
+            "spatial_tower_penalty_end_step": int(max(0, int(spatial_tower_penalty_end_step))),
+            "spatial_tower_target_base": int(max(1, int(spatial_tower_target_base))),
+            "spatial_tower_target_step_div": int(max(1, int(spatial_tower_target_step_div))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -765,6 +828,13 @@ def main() -> None:
         dominant_free_rect_ratio_gate=float(args.dominant_free_rect_ratio_gate),
         score_mode=str(args.score_mode),
         height_slack_mm=int(args.height_slack_mm),
+        tower_z_band_mm=int(args.tower_z_band_mm),
+        tower_z_penalty_weight=float(args.tower_z_penalty_weight),
+        spatial_xy_bin_mm=int(args.spatial_xy_bin_mm),
+        spatial_tower_penalty_weight=float(args.spatial_tower_penalty_weight),
+        spatial_tower_penalty_end_step=int(args.spatial_tower_penalty_end_step),
+        spatial_tower_target_base=int(args.spatial_tower_target_base),
+        spatial_tower_target_step_div=int(args.spatial_tower_target_step_div),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
