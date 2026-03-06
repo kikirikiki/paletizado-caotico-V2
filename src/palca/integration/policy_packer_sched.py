@@ -56,6 +56,7 @@ class PolicyConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    floor_first_end_step: int = 0
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -176,6 +177,7 @@ class PolicyPackerScheduler:
         spatial_tower_penalty_end_step: int = 0,
         spatial_tower_target_base: int = 2,
         spatial_tower_target_step_div: int = 6,
+        floor_first_end_step: int = 0,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -216,6 +218,7 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=spatial_tower_penalty_end_step,
             spatial_tower_target_base=spatial_tower_target_base,
             spatial_tower_target_step_div=spatial_tower_target_step_div,
+            floor_first_end_step=floor_first_end_step,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -259,6 +262,7 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
             spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            floor_first_end_step=max(0, int(floor_first_end_step)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -714,6 +718,7 @@ class PolicyPackerScheduler:
         spatial_tower_target_step_div = int(
             getattr(self._scheduler.config, "spatial_tower_target_step_div", 6) or 6
         )
+        floor_first_end_step = int(getattr(self._scheduler.config, "floor_first_end_step", 0) or 0)
         spatial_tower_penalty_applied_count = int(
             getattr(self._scheduler, "spatial_tower_penalty_applied_count", 0) or 0
         )
@@ -723,6 +728,15 @@ class PolicyPackerScheduler:
         )
         spatial_tower_selected_penalty_sum = float(
             getattr(self._scheduler, "spatial_tower_selected_penalty_sum", 0.0) or 0.0
+        )
+        floor_first_filter_applied_total = int(
+            getattr(self._scheduler, "floor_first_filter_applied_total", 0) or 0
+        )
+        floor_first_floor_candidates_seen_total = int(
+            getattr(self._scheduler, "floor_first_floor_candidates_seen_total", 0) or 0
+        )
+        floor_first_stacked_candidates_suppressed_total = int(
+            getattr(self._scheduler, "floor_first_stacked_candidates_suppressed_total", 0) or 0
         )
 
         kpis["score_mode"] = score_mode
@@ -746,6 +760,12 @@ class PolicyPackerScheduler:
         kpis["spatial_tower_selected_penalty_count"] = int(spatial_tower_selected_penalty_count)
         kpis["spatial_tower_selected_penalty_mean"] = float(
             spatial_tower_selected_penalty_sum / max(1, spatial_tower_selected_penalty_count)
+        )
+        kpis["floor_first_end_step"] = int(floor_first_end_step)
+        kpis["floor_first_filter_applied_total"] = int(floor_first_filter_applied_total)
+        kpis["floor_first_floor_candidates_seen_total"] = int(floor_first_floor_candidates_seen_total)
+        kpis["floor_first_stacked_candidates_suppressed_total"] = int(
+            floor_first_stacked_candidates_suppressed_total
         )
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)

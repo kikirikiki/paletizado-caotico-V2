@@ -45,6 +45,7 @@ class SchedulerConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    floor_first_end_step: int = 0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -88,6 +89,7 @@ class SchedulerConfig:
         object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
         object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
         object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
+        object.__setattr__(self, "floor_first_end_step", max(0, int(self.floor_first_end_step)))
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,9 @@ class SchedulerV1:
         self.spatial_tower_penalty_sum = 0.0
         self.spatial_tower_selected_penalty_count = 0
         self.spatial_tower_selected_penalty_sum = 0.0
+        self.floor_first_filter_applied_total = 0
+        self.floor_first_floor_candidates_seen_total = 0
+        self.floor_first_stacked_candidates_suppressed_total = 0
         self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
         self._spatial_step_index_by_pallet: dict[int | str, int] = {}
         self.batchfill_calls = 0
@@ -468,6 +473,7 @@ class SchedulerV1:
             "batchfill_applied": 0,
             "batchfill_selected_layer_boxes_mean": 0.0,
         }
+        feasible_candidates = self._apply_floor_first_filter_scored_candidates(candidates=feasible_candidates)
         if feasible_candidates and bool(self.config.batchfill_layer_starter):
             feasible_candidates, batchfill_stats = self._apply_batchfill_on_scored_candidates(
                 feasible_candidates=feasible_candidates,
@@ -599,6 +605,9 @@ class SchedulerV1:
                     nodes_expanded += 1
                     expansions.append(expansion)
 
+                if expansions:
+                    if depth == 0 and node.first_plan is None:
+                        expansions = self._apply_floor_first_filter_expansions(expansions=expansions)
                 if expansions:
                     min_h = min(int(e.terms.height_after_mm) for e in expansions)
                     expansions = self._apply_tower_z_penalty_expansions(
@@ -1276,6 +1285,121 @@ class SchedulerV1:
             except Exception:
                 continue
         return float(max_priority)
+
+    @staticmethod
+    def is_floor_candidate(z_mm: object) -> bool:
+        try:
+            return float(z_mm) <= 0.0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _preview_z_mm(preview: PlacementPreview | None) -> float:
+        if preview is None:
+            return 0.0
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return 0.0
+        return float(getattr(placement, "z_mm", 0.0) or 0.0)
+
+    def _floor_first_active_for_pallet(self, pallet_id: int | str | None) -> bool:
+        end_step = int(getattr(self.config, "floor_first_end_step", 0) or 0)
+        if end_step <= 0 or pallet_id is None:
+            return False
+        step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+        return int(step_idx) < int(end_step)
+
+    def _record_floor_first_filter_stats(self, *, floor_seen: int, suppressed_stacked: int) -> None:
+        if int(suppressed_stacked) <= 0:
+            return
+        self.floor_first_filter_applied_total += 1
+        self.floor_first_floor_candidates_seen_total += max(0, int(floor_seen))
+        self.floor_first_stacked_candidates_suppressed_total += max(0, int(suppressed_stacked))
+
+    def _apply_floor_first_filter_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        end_step = int(getattr(self.config, "floor_first_end_step", 0) or 0)
+        if end_step <= 0 or not candidates:
+            return candidates
+
+        by_pallet: dict[int | str, dict[str, list[int]]] = {}
+        for idx, cand in enumerate(candidates):
+            pallet_id = cand.plan.pallet_id
+            bucket = by_pallet.setdefault(pallet_id, {"floor": [], "stacked": []})
+            z_mm = self._preview_z_mm(cand.plan.preview)
+            if self.is_floor_candidate(z_mm):
+                bucket["floor"].append(int(idx))
+            else:
+                bucket["stacked"].append(int(idx))
+
+        suppressed_indices: set[int] = set()
+        floor_seen = 0
+        suppressed_stacked = 0
+        for pallet_id, bucket in by_pallet.items():
+            floor_idxs = list(bucket.get("floor", []))
+            stacked_idxs = list(bucket.get("stacked", []))
+            if not self._floor_first_active_for_pallet(pallet_id):
+                continue
+            if not floor_idxs or not stacked_idxs:
+                continue
+            floor_seen += len(floor_idxs)
+            suppressed_stacked += len(stacked_idxs)
+            suppressed_indices.update(stacked_idxs)
+
+        self._record_floor_first_filter_stats(
+            floor_seen=int(floor_seen),
+            suppressed_stacked=int(suppressed_stacked),
+        )
+        if not suppressed_indices:
+            return candidates
+        return [cand for idx, cand in enumerate(candidates) if idx not in suppressed_indices]
+
+    def _apply_floor_first_filter_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+    ) -> list[_BeamExpansion]:
+        end_step = int(getattr(self.config, "floor_first_end_step", 0) or 0)
+        if end_step <= 0 or not expansions:
+            return expansions
+
+        by_pallet: dict[int | str, dict[str, list[int]]] = {}
+        for idx, exp in enumerate(expansions):
+            pallet_id = exp.box.destination
+            if pallet_id is None:
+                continue
+            bucket = by_pallet.setdefault(pallet_id, {"floor": [], "stacked": []})
+            preview = exp.node.first_plan.preview if exp.node.first_plan is not None else None
+            z_mm = self._preview_z_mm(preview)
+            if self.is_floor_candidate(z_mm):
+                bucket["floor"].append(int(idx))
+            else:
+                bucket["stacked"].append(int(idx))
+
+        suppressed_indices: set[int] = set()
+        floor_seen = 0
+        suppressed_stacked = 0
+        for pallet_id, bucket in by_pallet.items():
+            floor_idxs = list(bucket.get("floor", []))
+            stacked_idxs = list(bucket.get("stacked", []))
+            if not self._floor_first_active_for_pallet(pallet_id):
+                continue
+            if not floor_idxs or not stacked_idxs:
+                continue
+            floor_seen += len(floor_idxs)
+            suppressed_stacked += len(stacked_idxs)
+            suppressed_indices.update(stacked_idxs)
+
+        self._record_floor_first_filter_stats(
+            floor_seen=int(floor_seen),
+            suppressed_stacked=int(suppressed_stacked),
+        )
+        if not suppressed_indices:
+            return expansions
+        return [exp for idx, exp in enumerate(expansions) if idx not in suppressed_indices]
 
     def _spatial_tower_penalty_for_after_count(
         self,
