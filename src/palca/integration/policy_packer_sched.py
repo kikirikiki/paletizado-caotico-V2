@@ -189,6 +189,7 @@ class PolicyPackerScheduler:
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
+        early_window_floor_probe_end_step: int = 0,
         batchfill_layer_starter: bool = False,
         batchfill_starters_max: int = 6,
         batchfill_budget_ms: int = 150,
@@ -224,6 +225,7 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            early_window_floor_probe_end_step=max(0, int(early_window_floor_probe_end_step)),
             batchfill_layer_starter=batchfill_layer_starter,
             batchfill_starters_max=batchfill_starters_max,
             batchfill_budget_ms=batchfill_budget_ms,
@@ -668,6 +670,21 @@ class PolicyPackerScheduler:
         kpis["batchfill_applied"] = int(getattr(self._scheduler, "batchfill_applied", 0) or 0)
         kpis["batchfill_selected_layer_boxes_mean"] = float(
             float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
+        )
+        kpis["early_window_floor_probe_triggered_total"] = int(
+            getattr(self._scheduler, "early_window_floor_probe_triggered_total", 0) or 0
+        )
+        kpis["early_window_floor_probe_items_scanned_total"] = int(
+            getattr(self._scheduler, "early_window_floor_probe_items_scanned_total", 0) or 0
+        )
+        kpis["early_window_floor_probe_floor_alternative_found_total"] = int(
+            getattr(self._scheduler, "early_window_floor_probe_floor_alternative_found_total", 0) or 0
+        )
+        kpis["early_window_floor_probe_chosen_total"] = int(
+            getattr(self._scheduler, "early_window_floor_probe_chosen_total", 0) or 0
+        )
+        kpis["early_window_floor_probe_no_floor_alternative_total"] = int(
+            getattr(self._scheduler, "early_window_floor_probe_no_floor_alternative_total", 0) or 0
         )
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
