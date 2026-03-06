@@ -51,6 +51,7 @@ class SchedulerConfig:
     micro_plan_topk_per_step: int = 15
     micro_plan_window_total: int = 15
     micro_plan_window_strategy: str = "fifo_ramp"
+    early_window_floor_probe_end_step: int = 0
     batchfill_layer_starter: bool = False
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
@@ -73,6 +74,7 @@ class SchedulerConfig:
         object.__setattr__(self, "micro_plan_width", max(1, int(self.micro_plan_width)))
         object.__setattr__(self, "micro_plan_topk_per_step", max(1, int(self.micro_plan_topk_per_step)))
         object.__setattr__(self, "micro_plan_window_total", int(self.micro_plan_window_total))
+        object.__setattr__(self, "early_window_floor_probe_end_step", max(0, int(self.early_window_floor_probe_end_step)))
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
@@ -223,6 +225,11 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.early_window_floor_probe_triggered_total = 0
+        self.early_window_floor_probe_items_scanned_total = 0
+        self.early_window_floor_probe_floor_alternative_found_total = 0
+        self.early_window_floor_probe_chosen_total = 0
+        self.early_window_floor_probe_no_floor_alternative_total = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -494,26 +501,18 @@ class SchedulerV1:
                 candidates=feasible_candidates,
                 min_feasible_height_after_mm=int(min_feasible_height_after_mm),
             )
-            best_by_slack, slack_stats = choose_with_height_slack(
-                candidates=feasible_candidates,
-                score_mode=self.config.score_mode,
-                height_slack_mm=int(self.config.height_slack_mm),
-                height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
-                gain_frag_key_fn=self._gain_frag_candidate_key,
+            selected, slack_stats = self._select_best_scored_candidate(feasible_candidates)
+            selected = self._apply_early_window_floor_probe_greedy(
+                sim_state=sim_state,
+                selected=selected,
+                lookahead_k=lookahead_k,
+                deadline=deadline,
             )
-            if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
-                selected = min(
-                    feasible_candidates,
-                    key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
-                )
-            else:
-                selected = best_by_slack
-
             if selected is not None:
                 best_plan = selected.plan
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
-                    min_feasible_height=slack_stats.min_height_after_mm,
+                    min_feasible_height=min_feasible_height_after_mm,
                 )
                 self._record_slack_decision(slack_stats)
 
@@ -707,7 +706,14 @@ class SchedulerV1:
 
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
-        return best_node.first_plan, stats, root_slack_stats
+        selected_plan = self._apply_early_window_floor_probe_micro_root(
+            sim_state=sim_state,
+            root_node=root,
+            selected_plan=best_node.first_plan,
+            deadline=deadline,
+        )
+        stats["selected_height_after_mm"] = self._resolve_height_after_mm(selected_plan.preview)
+        return selected_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.score_mode == "min_height_then_gain":
@@ -1561,6 +1567,264 @@ class SchedulerV1:
             scalar_score=float(score),
             height_after_mm=int(height_after_mm),
         )
+
+    def _select_best_scored_candidate(
+        self,
+        candidates: Sequence[_ScoredCandidate],
+    ) -> tuple[_ScoredCandidate | None, SlackDecisionStats]:
+        selected_by_slack, slack_stats = choose_with_height_slack(
+            candidates=candidates,
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+            gain_frag_key_fn=self._gain_frag_candidate_key,
+        )
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            selected = min(
+                candidates,
+                key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+            )
+        else:
+            selected = selected_by_slack
+        return selected, slack_stats
+
+    def _select_best_beam_expansion(self, expansions: Sequence[_BeamExpansion]) -> _BeamExpansion | None:
+        if not expansions:
+            return None
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
+            ranked = rank_for_expansion_with_height_slack(
+                candidates=list(expansions),
+                score_mode=self.config.score_mode,
+                height_slack_mm=int(self.config.height_slack_mm),
+                height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+            )
+            return ranked[0] if ranked else None
+        ranked = sorted(
+            expansions,
+            key=lambda candidate: self._beam_rank_key(candidate.node),
+            reverse=True,
+        )
+        return ranked[0] if ranked else None
+
+    @staticmethod
+    def _pickplan_z_mm(plan: PickPlan | None) -> int | None:
+        if plan is None:
+            return None
+        placement = getattr(plan.preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_floor_preview(preview: PlacementPreview | None) -> bool:
+        if preview is None:
+            return False
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return False
+        try:
+            return int(getattr(placement, "z_mm", 0) or 0) == 0
+        except (TypeError, ValueError):
+            return False
+
+    def _is_early_window_floor_probe_active_for_pallet(self, pallet_id: int | str | None) -> bool:
+        if pallet_id is None:
+            return False
+        end_step = int(getattr(self.config, "early_window_floor_probe_end_step", 0) or 0)
+        if end_step <= 0:
+            return False
+        step_idx = int(self._lookup_mapping_value(self._spatial_step_index_by_pallet, pallet_id, default=0))
+        return int(step_idx) < int(end_step)
+
+    @staticmethod
+    def _same_pallet_id(left: object, right: object) -> bool:
+        if left == right:
+            return True
+        try:
+            return int(left) == int(right)
+        except (TypeError, ValueError):
+            pass
+        return str(left) == str(right)
+
+    @staticmethod
+    def _lookup_mapping_value(mapping: Mapping[object, Any], key: object, *, default: Any) -> Any:
+        if key in mapping:
+            return mapping[key]
+        try:
+            int_key = int(key)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            int_key = None
+        if int_key is not None and int_key in mapping:
+            return mapping[int_key]
+        str_key = str(key)
+        if str_key in mapping:
+            return mapping[str_key]
+        return default
+
+    def _apply_early_window_floor_probe_greedy(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        selected: _ScoredCandidate | None,
+        lookahead_k: int,
+        deadline: float | None,
+    ) -> _ScoredCandidate | None:
+        if selected is None:
+            return None
+
+        base_plan = selected.plan
+        pallet_id = base_plan.pallet_id
+        if not self._is_early_window_floor_probe_active_for_pallet(pallet_id):
+            return selected
+        z_mm = self._pickplan_z_mm(base_plan)
+        if z_mm is None or int(z_mm) <= 0:
+            return selected
+
+        self.early_window_floor_probe_triggered_total += 1
+
+        pallet = self._lookup_mapping_value(sim_state.pallets, pallet_id, default=None)
+        if pallet is None:
+            self.early_window_floor_probe_no_floor_alternative_total += 1
+            return selected
+
+        floor_alternatives: list[_ScoredCandidate] = []
+        scanned = 0
+        for ramp_id, ramp in sim_state.ramps.items():
+            ramp_items = list(ramp)[: max(1, int(lookahead_k))]
+            max_priority = self._max_priority(ramp_items)
+            for idx, box in enumerate(ramp_items):
+                if not self._same_pallet_id(box.destination, pallet_id):
+                    continue
+                if (
+                    int(ramp_id) == int(base_plan.ramp_id)
+                    and int(idx) == int(base_plan.buffer_index)
+                ):
+                    continue
+                scanned += 1
+                preview = self._preview_place(pallet, box)
+                if not preview.feasible or not self._is_floor_preview(preview):
+                    continue
+                terms = self._score_candidate(
+                    now=float(sim_state.now),
+                    box=box,
+                    idx=idx,
+                    preview=preview,
+                    max_priority=max_priority,
+                    height_after_mm=self._resolve_height_after_mm(preview, pallet),
+                )
+                floor_alternatives.append(
+                    _ScoredCandidate(
+                        plan=PickPlan(
+                            ramp_id=int(ramp_id),
+                            buffer_index=int(idx),
+                            box_id=box.box_id,
+                            pallet_id=pallet_id,
+                            preview=preview,
+                            score=float(terms.scalar_score),
+                            dt_extra=float(terms.dt_extra),
+                        ),
+                        box=box,
+                        terms=terms,
+                    )
+                )
+
+        self.early_window_floor_probe_items_scanned_total += int(scanned)
+        if not floor_alternatives:
+            self.early_window_floor_probe_no_floor_alternative_total += 1
+            return selected
+
+        self.early_window_floor_probe_floor_alternative_found_total += 1
+        floor_alternatives = self._apply_spatial_tower_penalty_scored_candidates(candidates=floor_alternatives)
+        min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in floor_alternatives)
+        floor_alternatives = self._apply_tower_z_penalty_scored_candidates(
+            candidates=floor_alternatives,
+            min_feasible_height_after_mm=int(min_feasible_height_after_mm),
+        )
+        floor_selected, _ = self._select_best_scored_candidate(floor_alternatives)
+        if floor_selected is None:
+            self.early_window_floor_probe_no_floor_alternative_total += 1
+            return selected
+
+        self.early_window_floor_probe_chosen_total += 1
+        return floor_selected
+
+    def _apply_early_window_floor_probe_micro_root(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        root_node: _BeamNode,
+        selected_plan: PickPlan,
+        deadline: float | None,
+    ) -> PickPlan:
+        pallet_id = selected_plan.pallet_id
+        if not self._is_early_window_floor_probe_active_for_pallet(pallet_id):
+            return selected_plan
+        z_mm = self._pickplan_z_mm(selected_plan)
+        if z_mm is None or int(z_mm) <= 0:
+            return selected_plan
+
+        self.early_window_floor_probe_triggered_total += 1
+
+        actions = self._enumerate_beam_actions(root_node.ramps)
+        floor_expansions: list[_BeamExpansion] = []
+        scanned = 0
+        selected_ramp = int(selected_plan.ramp_id)
+        selected_idx = int(selected_plan.buffer_index)
+
+        for action in actions:
+            if int(action.ramp_id) == selected_ramp and int(action.buffer_index) == selected_idx:
+                continue
+            ramp = root_node.ramps.get(int(action.ramp_id))
+            if ramp is None:
+                continue
+            idx = int(action.buffer_index)
+            if idx < 0 or idx >= len(ramp.queue):
+                continue
+            box = ramp.queue[idx]
+            if not self._same_pallet_id(box.destination, pallet_id):
+                continue
+            scanned += 1
+            expansion = self._expand_beam_node(
+                node=root_node,
+                action=action,
+                sim_state=sim_state,
+            )
+            if expansion is None:
+                continue
+            first_plan = expansion.node.first_plan
+            if first_plan is None:
+                continue
+            if not self._is_floor_preview(first_plan.preview):
+                continue
+            floor_expansions.append(expansion)
+
+        self.early_window_floor_probe_items_scanned_total += int(scanned)
+        if not floor_expansions:
+            self.early_window_floor_probe_no_floor_alternative_total += 1
+            return selected_plan
+
+        self.early_window_floor_probe_floor_alternative_found_total += 1
+        min_feasible_height_after_mm = min(int(e.terms.height_after_mm) for e in floor_expansions)
+        floor_expansions = self._apply_tower_z_penalty_expansions(
+            expansions=floor_expansions,
+            min_feasible_height_after_mm=int(min_feasible_height_after_mm),
+            adjust_first_plan=True,
+        )
+        floor_expansions = self._apply_spatial_tower_penalty_to_expansions(
+            expansions=floor_expansions,
+            adjust_first_plan=True,
+        )
+        floor_selected = self._select_best_beam_expansion(floor_expansions)
+        if floor_selected is None or floor_selected.node.first_plan is None:
+            self.early_window_floor_probe_no_floor_alternative_total += 1
+            return selected_plan
+
+        self.early_window_floor_probe_chosen_total += 1
+        return floor_selected.node.first_plan
 
     @staticmethod
     def _gain_frag_sort_key(terms: _ScoreTerms, box: Box) -> tuple[Any, ...]:
