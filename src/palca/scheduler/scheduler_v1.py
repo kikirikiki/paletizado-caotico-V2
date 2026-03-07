@@ -45,6 +45,8 @@ class SchedulerConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    floor_continuity_end_step: int = 0
+    floor_continuity_lookahead_items: int = 8
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -88,6 +90,8 @@ class SchedulerConfig:
         object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
         object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
         object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
+        object.__setattr__(self, "floor_continuity_end_step", max(0, int(self.floor_continuity_end_step)))
+        object.__setattr__(self, "floor_continuity_lookahead_items", max(1, int(self.floor_continuity_lookahead_items)))
 
 
 @dataclass(frozen=True)
@@ -217,6 +221,11 @@ class SchedulerV1:
         self.spatial_tower_penalty_sum = 0.0
         self.spatial_tower_selected_penalty_count = 0
         self.spatial_tower_selected_penalty_sum = 0.0
+        self.floor_continuity_eval_total = 0
+        self.floor_continuity_candidates_scored_total = 0
+        self.floor_continuity_tiebreak_used_total = 0
+        self.floor_continuity_best_future_floor_count_sum = 0.0
+        self.floor_continuity_best_future_floor_count_max = 0
         self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
         self._spatial_step_index_by_pallet: dict[int | str, int] = {}
         self.batchfill_calls = 0
@@ -509,6 +518,20 @@ class SchedulerV1:
             else:
                 selected = best_by_slack
 
+            floor_continuity_debug: dict[str, Any] = {
+                "evaluated": False,
+                "scored_candidates": 0,
+                "best_future_floor_count": None,
+                "used": False,
+            }
+            if selected is not None:
+                selected, floor_continuity_debug = self._apply_floor_continuity_tiebreak_greedy(
+                    selected=selected,
+                    candidates=feasible_candidates,
+                    sim_state=sim_state,
+                )
+                self.last_eval_stats["floor_continuity"] = dict(floor_continuity_debug)
+
             if selected is not None:
                 best_plan = selected.plan
                 self._record_height_decision(
@@ -565,6 +588,13 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        root_expansions: list[_BeamExpansion] = []
+        root_floor_continuity_debug: dict[str, Any] = {
+            "evaluated": False,
+            "scored_candidates": 0,
+            "best_future_floor_count": None,
+            "used": False,
+        }
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -623,6 +653,7 @@ class SchedulerV1:
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    root_expansions = list(expansions)
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -677,6 +708,13 @@ class SchedulerV1:
                 break
 
         best_seq_len = int(best_node.placed_count)
+        selected_plan = best_node.first_plan
+        if selected_plan is not None:
+            selected_plan, root_floor_continuity_debug = self._apply_floor_continuity_tiebreak_micro_root(
+                selected_plan=selected_plan,
+                sim_state=sim_state,
+                root_expansions=root_expansions,
+            )
         stats = {
             "enabled": True,
             "score_mode": str(self.config.score_mode),
@@ -691,8 +729,8 @@ class SchedulerV1:
                 int(feasible_first_min_height) if feasible_first_min_height is not None else None
             ),
             "selected_height_after_mm": (
-                self._resolve_height_after_mm(best_node.first_plan.preview)
-                if best_node.first_plan is not None
+                self._resolve_height_after_mm(selected_plan.preview)
+                if selected_plan is not None
                 else None
             ),
             "height_slack_mm": int(self.config.height_slack_mm),
@@ -703,11 +741,12 @@ class SchedulerV1:
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
             ),
+            "floor_continuity": dict(root_floor_continuity_debug),
         }
 
-        if best_node.first_plan is None:
+        if selected_plan is None:
             return None, stats, root_slack_stats
-        return best_node.first_plan, stats, root_slack_stats
+        return selected_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.score_mode == "min_height_then_gain":
@@ -1449,6 +1488,345 @@ class SchedulerV1:
         bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
         return int(xy[0]) // bin_mm, int(xy[1]) // bin_mm
 
+    @staticmethod
+    def _plan_identity(plan: PickPlan) -> tuple[int, int, str, str]:
+        return (
+            int(plan.ramp_id),
+            int(plan.buffer_index),
+            str(plan.pallet_id),
+            str(plan.box_id),
+        )
+
+    @staticmethod
+    def _preview_z_mm(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm", 0))
+        except (TypeError, ValueError):
+            return None
+
+    def _is_floor_preview(self, preview: PlacementPreview | None) -> bool:
+        z_mm = self._preview_z_mm(preview)
+        return z_mm is not None and int(z_mm) <= 0
+
+    def _is_floor_continuity_enabled_for_pallet(self, pallet_id: int | str) -> bool:
+        end_step = int(getattr(self.config, "floor_continuity_end_step", 0) or 0)
+        if end_step <= 0:
+            return False
+        step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+        return int(step_idx) < int(end_step)
+
+    def _record_floor_continuity_eval(self, *, scored_counts: list[int], tiebreak_used: bool) -> None:
+        if not scored_counts:
+            return
+        self.floor_continuity_eval_total += 1
+        self.floor_continuity_candidates_scored_total += int(len(scored_counts))
+        best_future_floor_count = int(max(scored_counts))
+        self.floor_continuity_best_future_floor_count_sum += float(best_future_floor_count)
+        self.floor_continuity_best_future_floor_count_max = max(
+            int(self.floor_continuity_best_future_floor_count_max),
+            int(best_future_floor_count),
+        )
+        if bool(tiebreak_used):
+            self.floor_continuity_tiebreak_used_total += 1
+
+    def _collect_future_boxes_from_ramps_after_pick(
+        self,
+        *,
+        ramps: Mapping[int, Sequence[Box]],
+        selected_plan: PickPlan,
+        pallet_id: int | str,
+        limit: int,
+    ) -> list[Box]:
+        remaining: list[Box] = []
+        max_items = max(1, int(limit))
+        for rid in sorted(int(key) for key in ramps.keys()):
+            queue = list(ramps.get(rid, []))
+            if int(rid) == int(selected_plan.ramp_id):
+                pick_idx = int(selected_plan.buffer_index)
+                if 0 <= pick_idx < len(queue):
+                    queue.pop(pick_idx)
+            for box in queue:
+                if str(getattr(box, "destination", None)) != str(pallet_id):
+                    continue
+                remaining.append(box)
+                if len(remaining) >= max_items:
+                    return remaining
+        return remaining
+
+    def _collect_future_boxes_from_beam_ramps(
+        self,
+        *,
+        ramps: Mapping[int, _BeamRampState],
+        pallet_id: int | str,
+        limit: int,
+    ) -> list[Box]:
+        remaining: list[Box] = []
+        max_items = max(1, int(limit))
+        for rid in sorted(int(key) for key in ramps.keys()):
+            queue = list(getattr(ramps[rid], "queue", []) or [])
+            for box in queue:
+                if str(getattr(box, "destination", None)) != str(pallet_id):
+                    continue
+                remaining.append(box)
+                if len(remaining) >= max_items:
+                    return remaining
+        return remaining
+
+    def _has_floor_preview_for_box(self, *, pallet: PalletModel, box: Box) -> bool:
+        had_z_band_attr = hasattr(pallet, "z_band_mm")
+        previous_z_band = getattr(pallet, "z_band_mm", None) if had_z_band_attr else None
+        try:
+            if had_z_band_attr:
+                setattr(pallet, "z_band_mm", 0)
+            floor_probe = self._preview_place(pallet, box)
+        except Exception:
+            return False
+        finally:
+            if had_z_band_attr:
+                setattr(pallet, "z_band_mm", previous_z_band)
+
+        if not bool(getattr(floor_probe, "feasible", False)):
+            return False
+        return self._is_floor_preview(floor_probe)
+
+    def _estimate_future_floor_count_after_scored_candidate(
+        self,
+        *,
+        candidate: _ScoredCandidate,
+        sim_state: SchedulerSimState,
+    ) -> int | None:
+        pallet_id = candidate.plan.pallet_id
+        pallet = sim_state.pallets.get(pallet_id)
+        if pallet is None:
+            return None
+        try:
+            pallet_after = copy.deepcopy(pallet)
+            pallet_after.commit_place(candidate.plan.preview)
+        except Exception:
+            return None
+
+        scan_limit = int(getattr(self.config, "floor_continuity_lookahead_items", 8) or 8)
+        future_boxes = self._collect_future_boxes_from_ramps_after_pick(
+            ramps=sim_state.ramps,
+            selected_plan=candidate.plan,
+            pallet_id=pallet_id,
+            limit=scan_limit,
+        )
+
+        future_floor_count = 0
+        for box in future_boxes:
+            if self._has_floor_preview_for_box(pallet=pallet_after, box=box):
+                future_floor_count += 1
+        return int(future_floor_count)
+
+    def _estimate_future_floor_count_after_root_expansion(
+        self,
+        *,
+        expansion: _BeamExpansion,
+        pallet_id: int | str,
+    ) -> int | None:
+        pallet_after = expansion.node.pallets.get(pallet_id)
+        if pallet_after is None:
+            return None
+        try:
+            pallet_probe = copy.deepcopy(pallet_after)
+        except Exception:
+            return None
+
+        scan_limit = int(getattr(self.config, "floor_continuity_lookahead_items", 8) or 8)
+        future_boxes = self._collect_future_boxes_from_beam_ramps(
+            ramps=expansion.node.ramps,
+            pallet_id=pallet_id,
+            limit=scan_limit,
+        )
+        future_floor_count = 0
+        for box in future_boxes:
+            if self._has_floor_preview_for_box(pallet=pallet_probe, box=box):
+                future_floor_count += 1
+        return int(future_floor_count)
+
+    def _apply_floor_continuity_tiebreak_greedy(
+        self,
+        *,
+        selected: _ScoredCandidate,
+        candidates: Sequence[_ScoredCandidate],
+        sim_state: SchedulerSimState,
+    ) -> tuple[_ScoredCandidate, dict[str, Any]]:
+        debug: dict[str, Any] = {
+            "evaluated": False,
+            "scored_candidates": 0,
+            "best_future_floor_count": None,
+            "used": False,
+        }
+        if not self._is_floor_preview(selected.plan.preview):
+            return selected, debug
+        if not self._is_floor_continuity_enabled_for_pallet(selected.plan.pallet_id):
+            return selected, debug
+
+        floor_candidates = [
+            candidate
+            for candidate in candidates
+            if str(candidate.plan.pallet_id) == str(selected.plan.pallet_id)
+            and self._is_floor_preview(candidate.plan.preview)
+        ]
+        if len(floor_candidates) < 2:
+            return selected, debug
+
+        scored_counts: list[int] = []
+        counts_by_identity: dict[tuple[int, int, str, str], int] = {}
+        for candidate in floor_candidates:
+            future_floor_count = self._estimate_future_floor_count_after_scored_candidate(
+                candidate=candidate,
+                sim_state=sim_state,
+            )
+            if future_floor_count is None:
+                continue
+            candidate_key = self._plan_identity(candidate.plan)
+            counts_by_identity[candidate_key] = int(future_floor_count)
+            scored_counts.append(int(future_floor_count))
+
+        if not scored_counts:
+            return selected, debug
+
+        selected_key = self._plan_identity(selected.plan)
+        selected_count = counts_by_identity.get(selected_key)
+        best_count = int(max(scored_counts))
+        best_candidates = [
+            candidate
+            for candidate in floor_candidates
+            if counts_by_identity.get(self._plan_identity(candidate.plan)) == best_count
+        ]
+        preferred_candidate = selected
+        if best_candidates:
+            if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                preferred_candidate = min(
+                    best_candidates,
+                    key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+                )
+            else:
+                preferred_by_slack, _stats = choose_with_height_slack(
+                    candidates=best_candidates,
+                    score_mode=self.config.score_mode,
+                    height_slack_mm=int(self.config.height_slack_mm),
+                    height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                    gain_frag_key_fn=self._gain_frag_candidate_key,
+                )
+                preferred_candidate = preferred_by_slack or max(
+                    best_candidates,
+                    key=self._gain_frag_candidate_key,
+                )
+
+        use_tiebreak = bool(
+            selected_count is not None
+            and best_count > int(selected_count)
+            and self._plan_identity(preferred_candidate.plan) != selected_key
+        )
+        if use_tiebreak:
+            selected = preferred_candidate
+
+        self._record_floor_continuity_eval(scored_counts=scored_counts, tiebreak_used=use_tiebreak)
+        debug["evaluated"] = True
+        debug["scored_candidates"] = int(len(scored_counts))
+        debug["best_future_floor_count"] = int(best_count)
+        debug["used"] = bool(use_tiebreak)
+        return selected, debug
+
+    def _apply_floor_continuity_tiebreak_micro_root(
+        self,
+        *,
+        selected_plan: PickPlan,
+        sim_state: SchedulerSimState,
+        root_expansions: Sequence[_BeamExpansion],
+    ) -> tuple[PickPlan, dict[str, Any]]:
+        debug: dict[str, Any] = {
+            "evaluated": False,
+            "scored_candidates": 0,
+            "best_future_floor_count": None,
+            "used": False,
+        }
+        if not self._is_floor_preview(selected_plan.preview):
+            return selected_plan, debug
+        selected_pallet_id = selected_plan.pallet_id
+        if not self._is_floor_continuity_enabled_for_pallet(selected_pallet_id):
+            return selected_plan, debug
+
+        floor_expansions: list[_BeamExpansion] = []
+        for expansion in root_expansions:
+            first_plan = expansion.node.first_plan
+            if first_plan is None:
+                continue
+            if str(first_plan.pallet_id) != str(selected_pallet_id):
+                continue
+            if not self._is_floor_preview(first_plan.preview):
+                continue
+            floor_expansions.append(expansion)
+        if len(floor_expansions) < 2:
+            return selected_plan, debug
+
+        scored_counts: list[int] = []
+        counts_by_identity: dict[tuple[int, int, str, str], int] = {}
+        for expansion in floor_expansions:
+            first_plan = expansion.node.first_plan
+            if first_plan is None:
+                continue
+            future_floor_count = self._estimate_future_floor_count_after_root_expansion(
+                expansion=expansion,
+                pallet_id=selected_pallet_id,
+            )
+            if future_floor_count is None:
+                continue
+            plan_key = self._plan_identity(first_plan)
+            counts_by_identity[plan_key] = int(future_floor_count)
+            scored_counts.append(int(future_floor_count))
+        if not scored_counts:
+            return selected_plan, debug
+
+        selected_key = self._plan_identity(selected_plan)
+        selected_count = counts_by_identity.get(selected_key)
+        best_count = int(max(scored_counts))
+        best_expansions = [
+            expansion
+            for expansion in floor_expansions
+            if expansion.node.first_plan is not None
+            and counts_by_identity.get(self._plan_identity(expansion.node.first_plan)) == best_count
+        ]
+        preferred_expansion: _BeamExpansion | None = None
+        if best_expansions:
+            if self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
+                ordered_best = rank_for_expansion_with_height_slack(
+                    candidates=best_expansions,
+                    score_mode=self.config.score_mode,
+                    height_slack_mm=int(self.config.height_slack_mm),
+                    height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                    gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+                )
+                preferred_expansion = ordered_best[0] if ordered_best else None
+            else:
+                preferred_expansion = max(
+                    best_expansions,
+                    key=lambda expansion: self._beam_rank_key(expansion.node),
+                )
+        preferred_plan = preferred_expansion.node.first_plan if preferred_expansion is not None else None
+        use_tiebreak = bool(
+            selected_count is not None
+            and best_count > int(selected_count)
+            and preferred_plan is not None
+            and self._plan_identity(preferred_plan) != selected_key
+        )
+        if use_tiebreak and preferred_plan is not None:
+            selected_plan = preferred_plan
+
+        self._record_floor_continuity_eval(scored_counts=scored_counts, tiebreak_used=use_tiebreak)
+        debug["evaluated"] = True
+        debug["scored_candidates"] = int(len(scored_counts))
+        debug["best_future_floor_count"] = int(best_count)
+        debug["used"] = bool(use_tiebreak)
+        return selected_plan, debug
 
     def _apply_tower_z_penalty_scored_candidates(
         self,
