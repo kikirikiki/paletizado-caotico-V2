@@ -197,6 +197,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cada N pasos sube en +1 el target espacial por bin.",
     )
     parser.add_argument(
+        "--two-step-floor-layout-end-step",
+        type=int,
+        default=0,
+        help="Hasta este step (exclusivo) evalua candidatos root de suelo con calidad de layout a 2 pasos.",
+    )
+    parser.add_argument(
+        "--two-step-floor-layout-lookahead-items",
+        type=int,
+        default=6,
+        help="Cantidad de items por rampa para estimar continuidad de suelo en la heuristica de 2 pasos.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -431,6 +443,8 @@ def run_simulation(
     spatial_tower_penalty_end_step: int = 0,
     spatial_tower_target_base: int = 2,
     spatial_tower_target_step_div: int = 6,
+    two_step_floor_layout_end_step: int = 0,
+    two_step_floor_layout_lookahead_items: int = 6,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -626,6 +640,8 @@ def run_simulation(
             spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
             spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            two_step_floor_layout_end_step=max(0, int(two_step_floor_layout_end_step)),
+            two_step_floor_layout_lookahead_items=max(1, int(two_step_floor_layout_lookahead_items)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -735,6 +751,8 @@ def run_simulation(
             "spatial_tower_penalty_end_step": int(max(0, int(spatial_tower_penalty_end_step))),
             "spatial_tower_target_base": int(max(1, int(spatial_tower_target_base))),
             "spatial_tower_target_step_div": int(max(1, int(spatial_tower_target_step_div))),
+            "two_step_floor_layout_end_step": int(max(0, int(two_step_floor_layout_end_step))),
+            "two_step_floor_layout_lookahead_items": int(max(1, int(two_step_floor_layout_lookahead_items))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -835,6 +853,8 @@ def main() -> None:
         spatial_tower_penalty_end_step=int(args.spatial_tower_penalty_end_step),
         spatial_tower_target_base=int(args.spatial_tower_target_base),
         spatial_tower_target_step_div=int(args.spatial_tower_target_step_div),
+        two_step_floor_layout_end_step=int(args.two_step_floor_layout_end_step),
+        two_step_floor_layout_lookahead_items=int(args.two_step_floor_layout_lookahead_items),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,

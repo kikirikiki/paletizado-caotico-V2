@@ -45,6 +45,8 @@ class SchedulerConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    two_step_floor_layout_end_step: int = 0
+    two_step_floor_layout_lookahead_items: int = 6
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -88,6 +90,12 @@ class SchedulerConfig:
         object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
         object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
         object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
+        object.__setattr__(self, "two_step_floor_layout_end_step", max(0, int(self.two_step_floor_layout_end_step)))
+        object.__setattr__(
+            self,
+            "two_step_floor_layout_lookahead_items",
+            max(1, int(self.two_step_floor_layout_lookahead_items)),
+        )
 
 
 @dataclass(frozen=True)
@@ -180,6 +188,22 @@ class _BeamExpansion:
     terms: _ScoreTerms
 
 
+@dataclass(frozen=True)
+class _FloorOption:
+    ramp_id: int
+    buffer_index: int
+    box: Box
+    preview: PlacementPreview
+    scalar_score: float
+
+
+@dataclass(frozen=True)
+class _TwoStepFloorLayoutEval:
+    future_floor_count_step1: int
+    future_floor_count_step2: int
+    layout_score: float
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -217,6 +241,12 @@ class SchedulerV1:
         self.spatial_tower_penalty_sum = 0.0
         self.spatial_tower_selected_penalty_count = 0
         self.spatial_tower_selected_penalty_sum = 0.0
+        self.two_step_floor_layout_eval_total = 0
+        self.two_step_floor_layout_candidates_scored_total = 0
+        self.two_step_floor_layout_tiebreak_used_total = 0
+        self.two_step_floor_layout_future_floor_count_step1_sum = 0.0
+        self.two_step_floor_layout_future_floor_count_step2_sum = 0.0
+        self.two_step_floor_layout_best_score_max = 0.0
         self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
         self._spatial_step_index_by_pallet: dict[int | str, int] = {}
         self.batchfill_calls = 0
@@ -494,6 +524,10 @@ class SchedulerV1:
                 candidates=feasible_candidates,
                 min_feasible_height_after_mm=int(min_feasible_height_after_mm),
             )
+            feasible_candidates = self._apply_two_step_floor_layout_scored_candidates(
+                candidates=feasible_candidates,
+                sim_state=sim_state,
+            )
             best_by_slack, slack_stats = choose_with_height_slack(
                 candidates=feasible_candidates,
                 score_mode=self.config.score_mode,
@@ -622,6 +656,10 @@ class SchedulerV1:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
                         expansions=expansions,
                         adjust_first_plan=True,
+                    )
+                    expansions = self._apply_two_step_floor_layout_to_expansions(
+                        expansions=expansions,
+                        sim_state=sim_state,
                     )
 
                 if depth == 0:
@@ -1380,6 +1418,383 @@ class SchedulerV1:
                 out.append(_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms))
                 continue
             out.append(exp)
+        return out
+
+    @staticmethod
+    def _preview_is_floor(preview: PlacementPreview | None) -> bool:
+        if preview is None:
+            return False
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return False
+        try:
+            return int(getattr(placement, "z_mm", 0)) == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _clone_beam_ramps(ramps: Mapping[int, _BeamRampState]) -> dict[int, _BeamRampState]:
+        return {
+            int(rid): _BeamRampState(
+                queue=list(state.queue),
+                upstream=list(state.upstream),
+                capacity=int(state.capacity),
+            )
+            for rid, state in ramps.items()
+        }
+
+    @classmethod
+    def _simulate_pick_on_beam_ramps(
+        cls,
+        *,
+        ramps: Mapping[int, _BeamRampState],
+        ramp_id: int,
+        buffer_index: int,
+    ) -> dict[int, _BeamRampState]:
+        out = cls._clone_beam_ramps(ramps)
+        rid = int(ramp_id)
+        ramp = out.get(rid)
+        if ramp is None:
+            return out
+        out[rid] = cls._beam_pick_and_refill(ramp, int(buffer_index))
+        return out
+
+    def _collect_floor_options_for_pallet(
+        self,
+        *,
+        pallet: PalletModel,
+        pallet_id: int | str,
+        ramps: Mapping[int, _BeamRampState],
+        lookahead_items: int,
+        now: float,
+    ) -> list[_FloorOption]:
+        out: list[_FloorOption] = []
+        per_ramp = max(1, int(lookahead_items))
+        for rid in sorted(ramps):
+            queue = list(ramps[rid].queue)
+            if not queue:
+                continue
+            limit = min(len(queue), per_ramp)
+            max_priority = self._max_priority(queue[:limit])
+            for idx in range(limit):
+                box = queue[idx]
+                if box.destination != pallet_id:
+                    continue
+                preview = self._preview_place(pallet, box)
+                if not preview.feasible or not self._preview_is_floor(preview):
+                    continue
+                height_after_mm = self._resolve_height_after_mm(preview, pallet)
+                terms = self._score_candidate(
+                    now=float(now),
+                    box=box,
+                    idx=idx,
+                    preview=preview,
+                    max_priority=max_priority,
+                    height_after_mm=height_after_mm,
+                )
+                out.append(
+                    _FloorOption(
+                        ramp_id=int(rid),
+                        buffer_index=int(idx),
+                        box=box,
+                        preview=preview,
+                        scalar_score=float(terms.scalar_score),
+                    )
+                )
+        return out
+
+    def _estimate_second_step_floor_count(
+        self,
+        *,
+        pallet_after_root: PalletModel,
+        pallet_id: int | str,
+        ramps_after_root: Mapping[int, _BeamRampState],
+        step1_options: Sequence[_FloorOption],
+        lookahead_items: int,
+        now: float,
+    ) -> int:
+        if not step1_options:
+            return 0
+        max_trials = min(2, len(step1_options))
+        ranked_step1 = sorted(
+            step1_options,
+            key=lambda opt: (float(opt.scalar_score), -int(opt.buffer_index), -float(opt.box.timestamp)),
+            reverse=True,
+        )[:max_trials]
+        best_floor_count = 0
+        for option in ranked_step1:
+            try:
+                pallet_after_step2 = copy.deepcopy(pallet_after_root)
+            except Exception:
+                continue
+            preview_step2 = self._preview_place(pallet_after_step2, option.box)
+            if not preview_step2.feasible or not self._preview_is_floor(preview_step2):
+                continue
+            try:
+                pallet_after_step2.commit_place(preview_step2)
+            except Exception:
+                continue
+            ramps_after_step2 = self._simulate_pick_on_beam_ramps(
+                ramps=ramps_after_root,
+                ramp_id=option.ramp_id,
+                buffer_index=option.buffer_index,
+            )
+            floor_options_step2 = self._collect_floor_options_for_pallet(
+                pallet=pallet_after_step2,
+                pallet_id=pallet_id,
+                ramps=ramps_after_step2,
+                lookahead_items=lookahead_items,
+                now=now,
+            )
+            best_floor_count = max(int(best_floor_count), int(len(floor_options_step2)))
+        return int(best_floor_count)
+
+    def _evaluate_two_step_floor_layout_after_root(
+        self,
+        *,
+        pallet_id: int | str,
+        root_preview: PlacementPreview,
+        pallet_after_root: PalletModel,
+        ramps_after_root: Mapping[int, _BeamRampState],
+        current_floor_count: int,
+        lookahead_items: int,
+        now: float,
+    ) -> _TwoStepFloorLayoutEval:
+        floor_options_step1 = self._collect_floor_options_for_pallet(
+            pallet=pallet_after_root,
+            pallet_id=pallet_id,
+            ramps=ramps_after_root,
+            lookahead_items=lookahead_items,
+            now=now,
+        )
+        future_floor_step1 = int(len(floor_options_step1))
+        future_floor_step2 = self._estimate_second_step_floor_count(
+            pallet_after_root=pallet_after_root,
+            pallet_id=pallet_id,
+            ramps_after_root=ramps_after_root,
+            step1_options=floor_options_step1,
+            lookahead_items=lookahead_items,
+            now=now,
+        )
+
+        placement = getattr(root_preview, "placement", None)
+        bin_xy = self._placement_bin_xy(placement)
+        concentration_penalty = 0.0
+        if bin_xy is not None:
+            current_bin_count = int(self._spatial_bin_counts.get(pallet_id, {}).get(bin_xy, 0))
+            concentration_penalty = max(0.0, float(current_bin_count + 1 - 1) * 0.20)
+        floor_drop_penalty = float(max(0, int(current_floor_count) - int(future_floor_step1))) / float(max(1, lookahead_items))
+        layout_score = (
+            (float(future_floor_step1) + 0.70 * float(future_floor_step2)) / float(max(1, lookahead_items))
+            - concentration_penalty
+            - floor_drop_penalty
+        )
+        return _TwoStepFloorLayoutEval(
+            future_floor_count_step1=int(future_floor_step1),
+            future_floor_count_step2=int(future_floor_step2),
+            layout_score=float(layout_score),
+        )
+
+    def _record_two_step_floor_layout_eval(self, *, eval_result: _TwoStepFloorLayoutEval) -> None:
+        self.two_step_floor_layout_candidates_scored_total += 1
+        self.two_step_floor_layout_future_floor_count_step1_sum += float(eval_result.future_floor_count_step1)
+        self.two_step_floor_layout_future_floor_count_step2_sum += float(eval_result.future_floor_count_step2)
+        self.two_step_floor_layout_best_score_max = max(
+            float(self.two_step_floor_layout_best_score_max),
+            float(eval_result.layout_score),
+        )
+
+    def _apply_two_step_floor_layout_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        sim_state: SchedulerSimState,
+    ) -> list[_ScoredCandidate]:
+        end_step = int(getattr(self.config, "two_step_floor_layout_end_step", 0) or 0)
+        if end_step <= 0:
+            return candidates
+        lookahead_items = max(1, int(getattr(self.config, "two_step_floor_layout_lookahead_items", 6) or 6))
+        base_ramps = self._build_beam_ramps(sim_state)
+        replacements: dict[int, _ScoredCandidate] = {}
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        for cand in candidates:
+            if not self._preview_is_floor(cand.plan.preview):
+                continue
+            pallet_id = cand.plan.pallet_id
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+            if step_idx >= end_step:
+                continue
+            grouped.setdefault(pallet_id, []).append(cand)
+
+        for pallet_id, floor_candidates in grouped.items():
+            if len(floor_candidates) < 2:
+                continue
+            pallet = sim_state.pallets.get(pallet_id)
+            if pallet is None:
+                continue
+            current_floor_count = 0
+            try:
+                current_floor_count = len(
+                    self._collect_floor_options_for_pallet(
+                        pallet=pallet,
+                        pallet_id=pallet_id,
+                        ramps=base_ramps,
+                        lookahead_items=lookahead_items,
+                        now=float(sim_state.now),
+                    )
+                )
+            except Exception:
+                current_floor_count = 0
+
+            self.two_step_floor_layout_eval_total += 1
+            evaluated: list[tuple[_ScoredCandidate, _TwoStepFloorLayoutEval]] = []
+            for cand in floor_candidates:
+                try:
+                    pallet_after_root = copy.deepcopy(pallet)
+                except Exception:
+                    continue
+                root_preview = self._preview_place(pallet_after_root, cand.box)
+                if not root_preview.feasible or not self._preview_is_floor(root_preview):
+                    continue
+                try:
+                    pallet_after_root.commit_place(root_preview)
+                except Exception:
+                    continue
+                ramps_after_root = self._simulate_pick_on_beam_ramps(
+                    ramps=base_ramps,
+                    ramp_id=cand.plan.ramp_id,
+                    buffer_index=cand.plan.buffer_index,
+                )
+                eval_result = self._evaluate_two_step_floor_layout_after_root(
+                    pallet_id=pallet_id,
+                    root_preview=root_preview,
+                    pallet_after_root=pallet_after_root,
+                    ramps_after_root=ramps_after_root,
+                    current_floor_count=current_floor_count,
+                    lookahead_items=lookahead_items,
+                    now=float(sim_state.now),
+                )
+                self._record_two_step_floor_layout_eval(eval_result=eval_result)
+                evaluated.append((cand, eval_result))
+
+            if len(evaluated) < 2:
+                continue
+
+            baseline_best = max(evaluated, key=lambda row: self._gain_frag_candidate_key(row[0]))[0]
+            heuristic_best = max(
+                evaluated,
+                key=lambda row: (float(row[1].layout_score), self._gain_frag_candidate_key(row[0])),
+            )[0]
+            if heuristic_best is not baseline_best:
+                self.two_step_floor_layout_tiebreak_used_total += 1
+
+            for cand, eval_result in evaluated:
+                new_terms = replace(
+                    cand.terms,
+                    scalar_score=float(cand.terms.scalar_score) + float(eval_result.layout_score),
+                )
+                new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
+                replacements[id(cand)] = _ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms)
+
+        if not replacements:
+            return candidates
+        out: list[_ScoredCandidate] = []
+        for cand in candidates:
+            out.append(replacements.get(id(cand), cand))
+        return out
+
+    def _apply_two_step_floor_layout_to_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        sim_state: SchedulerSimState,
+    ) -> list[_BeamExpansion]:
+        end_step = int(getattr(self.config, "two_step_floor_layout_end_step", 0) or 0)
+        if end_step <= 0:
+            return expansions
+        lookahead_items = max(1, int(getattr(self.config, "two_step_floor_layout_lookahead_items", 6) or 6))
+        base_ramps = self._build_beam_ramps(sim_state)
+        current_floor_count_by_pallet: dict[int | str, int] = {}
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        for exp in expansions:
+            first_plan = exp.node.first_plan
+            if first_plan is None or not self._preview_is_floor(first_plan.preview):
+                continue
+            pallet_id = first_plan.pallet_id
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+            if step_idx >= end_step:
+                continue
+            grouped.setdefault(pallet_id, []).append(exp)
+
+        out = list(expansions)
+        for pallet_id, floor_expansions in grouped.items():
+            if len(floor_expansions) < 2:
+                continue
+            pallet_before = sim_state.pallets.get(pallet_id)
+            if pallet_before is None:
+                continue
+            if pallet_id not in current_floor_count_by_pallet:
+                try:
+                    current_floor_count_by_pallet[pallet_id] = len(
+                        self._collect_floor_options_for_pallet(
+                            pallet=pallet_before,
+                            pallet_id=pallet_id,
+                            ramps=base_ramps,
+                            lookahead_items=lookahead_items,
+                            now=float(sim_state.now),
+                        )
+                    )
+                except Exception:
+                    current_floor_count_by_pallet[pallet_id] = 0
+            current_floor_count = int(current_floor_count_by_pallet.get(pallet_id, 0))
+
+            self.two_step_floor_layout_eval_total += 1
+            evaluated: list[tuple[_BeamExpansion, _TwoStepFloorLayoutEval]] = []
+            for exp in floor_expansions:
+                first_plan = exp.node.first_plan
+                if first_plan is None:
+                    continue
+                pallet_after_root = exp.node.pallets.get(pallet_id)
+                if pallet_after_root is None:
+                    continue
+                eval_result = self._evaluate_two_step_floor_layout_after_root(
+                    pallet_id=pallet_id,
+                    root_preview=first_plan.preview,
+                    pallet_after_root=pallet_after_root,
+                    ramps_after_root=exp.node.ramps,
+                    current_floor_count=current_floor_count,
+                    lookahead_items=lookahead_items,
+                    now=float(sim_state.now),
+                )
+                self._record_two_step_floor_layout_eval(eval_result=eval_result)
+                evaluated.append((exp, eval_result))
+
+            if len(evaluated) < 2:
+                continue
+
+            baseline_best = max(evaluated, key=lambda row: float(row[0].terms.scalar_score))[0]
+            heuristic_best = max(
+                evaluated,
+                key=lambda row: (float(row[1].layout_score), float(row[0].terms.scalar_score)),
+            )[0]
+            if heuristic_best is not baseline_best:
+                self.two_step_floor_layout_tiebreak_used_total += 1
+
+            for exp, eval_result in evaluated:
+                exp.node.score_sum = float(exp.node.score_sum) + float(eval_result.layout_score)
+                if exp.node.first_plan is not None:
+                    exp.node.first_plan = replace(
+                        exp.node.first_plan,
+                        score=float(exp.node.first_plan.score) + float(eval_result.layout_score),
+                    )
+                new_terms = replace(
+                    exp.terms,
+                    scalar_score=float(exp.terms.scalar_score) + float(eval_result.layout_score),
+                )
+                for i, existing in enumerate(out):
+                    if existing is exp:
+                        out[i] = _BeamExpansion(node=exp.node, box=exp.box, terms=new_terms)
+                        break
         return out
 
     def _rebuild_spatial_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
