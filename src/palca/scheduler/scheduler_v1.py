@@ -45,6 +45,9 @@ class SchedulerConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    hard_floor_phase_end_step: int = 0
+    hard_floor_phase_min_base_candidates: int = 1
+    hard_floor_phase_lookahead_items: int = 8
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -88,6 +91,13 @@ class SchedulerConfig:
         object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
         object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
         object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
+        object.__setattr__(self, "hard_floor_phase_end_step", max(0, int(self.hard_floor_phase_end_step)))
+        object.__setattr__(
+            self,
+            "hard_floor_phase_min_base_candidates",
+            max(1, int(self.hard_floor_phase_min_base_candidates)),
+        )
+        object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
 
 
 @dataclass(frozen=True)
@@ -180,6 +190,18 @@ class _BeamExpansion:
     terms: _ScoreTerms
 
 
+@dataclass(frozen=True)
+class _HardFloorScoredCandidate:
+    candidate: _ScoredCandidate
+    base_score: float
+
+
+@dataclass(frozen=True)
+class _HardFloorScoredExpansion:
+    expansion: _BeamExpansion
+    base_score: float
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -217,6 +239,16 @@ class SchedulerV1:
         self.spatial_tower_penalty_sum = 0.0
         self.spatial_tower_selected_penalty_count = 0
         self.spatial_tower_selected_penalty_sum = 0.0
+        self.hard_floor_phase_active_total = 0
+        self.hard_floor_phase_floor_candidates_seen_total = 0
+        self.hard_floor_phase_chosen_total = 0
+        self.hard_floor_phase_stand_hw_chosen_total = 0
+        self.hard_floor_phase_exit_no_floor_total = 0
+        self.hard_floor_phase_exit_end_step_total = 0
+        self.hard_floor_phase_score_sum = 0.0
+        self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
+        self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
+        self._hard_floor_phase_active_counted_this_decision = False
         self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
         self._spatial_step_index_by_pallet: dict[int | str, int] = {}
         self.batchfill_calls = 0
@@ -231,6 +263,7 @@ class SchedulerV1:
         self.last_eval_stats = {}
         self.last_micro_plan_stats = {}
         self.last_micro_feasible_first_candidates = 0
+        self._hard_floor_phase_active_counted_this_decision = False
         self._rebuild_spatial_state(sim_state.pallets)
         k = max(1, int(self.config.lookahead_k))
 
@@ -322,7 +355,7 @@ class SchedulerV1:
         deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
-            ramp_items = list(ramp)[:lookahead_k]
+            ramp_items = list(ramp)[: max(1, int(lookahead_k))]
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
                 cutoff_reason = "time_budget"
@@ -488,32 +521,52 @@ class SchedulerV1:
 
         best_plan: PickPlan | None = None
         if feasible_candidates:
-            feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
-            min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
-            feasible_candidates = self._apply_tower_z_penalty_scored_candidates(
+            hard_floor_candidates = self._hard_floor_phase_filter_scored_candidates(
                 candidates=feasible_candidates,
-                min_feasible_height_after_mm=int(min_feasible_height_after_mm),
+                pallets=sim_state.pallets,
             )
-            best_by_slack, slack_stats = choose_with_height_slack(
-                candidates=feasible_candidates,
-                score_mode=self.config.score_mode,
-                height_slack_mm=int(self.config.height_slack_mm),
-                height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
-                gain_frag_key_fn=self._gain_frag_candidate_key,
-            )
-            if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
-                selected = min(
-                    feasible_candidates,
-                    key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
-                )
+            selected: _ScoredCandidate | None = None
+            slack_stats: SlackDecisionStats | None = None
+            if hard_floor_candidates:
+                selected = max(
+                    hard_floor_candidates,
+                    key=lambda item: (
+                        float(item.base_score),
+                        float(item.candidate.terms.packing_gain),
+                        -float(item.candidate.terms.fragmentation),
+                        -float(item.candidate.terms.dt_extra),
+                    ),
+                ).candidate
+                self._record_hard_floor_phase_choice(selected.plan, selected.terms.scalar_score)
             else:
-                selected = best_by_slack
+                feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
+                min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
+                feasible_candidates = self._apply_tower_z_penalty_scored_candidates(
+                    candidates=feasible_candidates,
+                    min_feasible_height_after_mm=int(min_feasible_height_after_mm),
+                )
+                best_by_slack, slack_stats = choose_with_height_slack(
+                    candidates=feasible_candidates,
+                    score_mode=self.config.score_mode,
+                    height_slack_mm=int(self.config.height_slack_mm),
+                    height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                    gain_frag_key_fn=self._gain_frag_candidate_key,
+                )
+                if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                    selected = min(
+                        feasible_candidates,
+                        key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+                    )
+                else:
+                    selected = best_by_slack
 
             if selected is not None:
                 best_plan = selected.plan
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
-                    min_feasible_height=slack_stats.min_height_after_mm,
+                    min_feasible_height=(
+                        slack_stats.min_height_after_mm if slack_stats is not None else selected.terms.height_after_mm
+                    ),
                 )
                 self._record_slack_decision(slack_stats)
 
@@ -623,6 +676,48 @@ class SchedulerV1:
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    hard_floor_expansions = self._hard_floor_phase_filter_beam_expansions(
+                        expansions=expansions,
+                        pallets=node.pallets,
+                    )
+                    if hard_floor_expansions:
+                        chosen = max(
+                            hard_floor_expansions,
+                            key=lambda item: (
+                                float(item.base_score),
+                                float(item.expansion.terms.packing_gain),
+                                -float(item.expansion.terms.fragmentation),
+                                -float(item.expansion.terms.dt_extra),
+                            ),
+                        )
+                        chosen_plan = chosen.expansion.node.first_plan
+                        if chosen_plan is not None:
+                            self._record_hard_floor_phase_choice(chosen_plan, chosen.base_score)
+                            stats = {
+                                "enabled": True,
+                                "score_mode": str(self.config.score_mode),
+                                "depth_limit": int(depth_limit),
+                                "width": int(beam_width),
+                                "topk_per_step": int(topk_per_step),
+                                "nodes_expanded": int(nodes_expanded),
+                                "depth_effective": 1,
+                                "best_seq_len": 1,
+                                "feasible_first_candidates": int(len(hard_floor_expansions)),
+                                "feasible_first_min_height_mm": min(
+                                    int(item.expansion.terms.height_after_mm) for item in hard_floor_expansions
+                                ),
+                                "selected_height_after_mm": self._resolve_height_after_mm(chosen_plan.preview),
+                                "height_slack_mm": int(self.config.height_slack_mm),
+                                "cutoff": bool(cutoff),
+                                "cutoff_reason": str(cutoff_reason),
+                                "batchfill_calls": int(batchfill_calls_local),
+                                "batchfill_applied": int(batchfill_applied_local),
+                                "batchfill_selected_layer_boxes_mean": float(
+                                    float(batchfill_selected_boxes_sum_local)
+                                    / max(1, int(batchfill_selected_boxes_count_local))
+                                ),
+                            }
+                            return chosen_plan, stats, None
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -1277,6 +1372,341 @@ class SchedulerV1:
                 continue
         return float(max_priority)
 
+    def _hard_floor_phase_enabled(self) -> bool:
+        return int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0) > 0
+
+    def _hard_floor_phase_may_be_active(self, pallets: Mapping[int | str, PalletModel]) -> bool:
+        if not self._hard_floor_phase_enabled():
+            return False
+        end_step = int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0)
+        for pallet_id, pallet in pallets.items():
+            if pallet_id in self._hard_floor_phase_exited_no_floor_pallets:
+                continue
+            step_idx = int(
+                self._spatial_step_index_by_pallet.get(
+                    pallet_id,
+                    len(list(getattr(pallet, "placements", []) or [])),
+                )
+            )
+            if int(step_idx) < int(end_step):
+                return True
+        return False
+
+    def _hard_floor_phase_mark_active_decision(self) -> None:
+        if self._hard_floor_phase_active_counted_this_decision:
+            return
+        self.hard_floor_phase_active_total += 1
+        self._hard_floor_phase_active_counted_this_decision = True
+
+    def _hard_floor_phase_filter_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> list[_HardFloorScoredCandidate]:
+        if not candidates or not self._hard_floor_phase_enabled():
+            return []
+
+        end_step = int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0)
+        min_floor = max(1, int(getattr(self.config, "hard_floor_phase_min_base_candidates", 1) or 1))
+
+        by_pallet: dict[int | str, list[_ScoredCandidate]] = {}
+        for cand in candidates:
+            by_pallet.setdefault(cand.plan.pallet_id, []).append(cand)
+
+        active_found = False
+        scored: list[_HardFloorScoredCandidate] = []
+        for pallet_id, group in by_pallet.items():
+            if pallet_id in self._hard_floor_phase_exited_no_floor_pallets:
+                continue
+
+            pallet = pallets.get(pallet_id)
+            if pallet is None:
+                continue
+
+            step_idx = int(
+                self._spatial_step_index_by_pallet.get(
+                    pallet_id,
+                    len(list(getattr(pallet, "placements", []) or [])),
+                )
+            )
+            if int(step_idx) >= int(end_step):
+                if pallet_id not in self._hard_floor_phase_exit_end_step_recorded_pallets:
+                    self._hard_floor_phase_exit_end_step_recorded_pallets.add(pallet_id)
+                    self.hard_floor_phase_exit_end_step_total += 1
+                continue
+
+            active_found = True
+            floor_group = [cand for cand in group if self._preview_is_floor(cand.plan.preview)]
+            self.hard_floor_phase_floor_candidates_seen_total += int(len(floor_group))
+            if len(floor_group) < int(min_floor):
+                self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
+                self.hard_floor_phase_exit_no_floor_total += 1
+                continue
+
+            for cand in floor_group:
+                base_score = self._hard_floor_phase_score_preview(
+                    pallet=pallet,
+                    preview=cand.plan.preview,
+                    future_boxes=[item.box for item in group],
+                    selected_box=cand.box,
+                )
+                new_terms = replace(cand.terms, scalar_score=float(base_score))
+                new_plan = replace(cand.plan, score=float(base_score))
+                scored.append(
+                    _HardFloorScoredCandidate(
+                        candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
+                        base_score=float(base_score),
+                    )
+                )
+
+        if active_found:
+            self._hard_floor_phase_mark_active_decision()
+        return scored
+
+    def _hard_floor_phase_filter_beam_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> list[_HardFloorScoredExpansion]:
+        if not expansions or not self._hard_floor_phase_enabled():
+            return []
+
+        end_step = int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0)
+        min_floor = max(1, int(getattr(self.config, "hard_floor_phase_min_base_candidates", 1) or 1))
+        by_pallet: dict[int | str, list[_BeamExpansion]] = {}
+        for exp in expansions:
+            pallet_id = exp.box.destination
+            if pallet_id is None:
+                continue
+            by_pallet.setdefault(pallet_id, []).append(exp)
+
+        active_found = False
+        scored: list[_HardFloorScoredExpansion] = []
+        for pallet_id, group in by_pallet.items():
+            if pallet_id in self._hard_floor_phase_exited_no_floor_pallets:
+                continue
+
+            pallet = pallets.get(pallet_id)
+            if pallet is None:
+                continue
+
+            step_idx = int(
+                self._spatial_step_index_by_pallet.get(
+                    pallet_id,
+                    len(list(getattr(pallet, "placements", []) or [])),
+                )
+            )
+            if int(step_idx) >= int(end_step):
+                if pallet_id not in self._hard_floor_phase_exit_end_step_recorded_pallets:
+                    self._hard_floor_phase_exit_end_step_recorded_pallets.add(pallet_id)
+                    self.hard_floor_phase_exit_end_step_total += 1
+                continue
+
+            active_found = True
+            floor_group = [
+                exp
+                for exp in group
+                if exp.node.first_plan is not None and self._preview_is_floor(exp.node.first_plan.preview)
+            ]
+            self.hard_floor_phase_floor_candidates_seen_total += int(len(floor_group))
+            if len(floor_group) < int(min_floor):
+                self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
+                self.hard_floor_phase_exit_no_floor_total += 1
+                continue
+
+            for exp in floor_group:
+                assert exp.node.first_plan is not None
+                base_score = self._hard_floor_phase_score_preview(
+                    pallet=pallet,
+                    preview=exp.node.first_plan.preview,
+                    future_boxes=[item.box for item in group],
+                    selected_box=exp.box,
+                )
+                exp.node.score_sum = float(base_score)
+                exp.node.first_plan = replace(exp.node.first_plan, score=float(base_score))
+                new_terms = replace(exp.terms, scalar_score=float(base_score))
+                scored.append(
+                    _HardFloorScoredExpansion(
+                        expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
+                        base_score=float(base_score),
+                    )
+                )
+
+        if active_found:
+            self._hard_floor_phase_mark_active_decision()
+        return scored
+
+    @staticmethod
+    def _preview_is_floor(preview: PlacementPreview | None) -> bool:
+        if preview is None:
+            return False
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return False
+        try:
+            return int(getattr(placement, "z_mm", 0) or 0) == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _placement_is_stand_hw(placement: object | None) -> bool:
+        if placement is None:
+            return False
+        family = str(getattr(placement, "orientation_family", "") or "").lower()
+        name = str(getattr(placement, "orientation_name", "") or "").lower()
+        return family == "stand_hw" or "stand_hw" in name
+
+    @staticmethod
+    def _rectangles_touch(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+        ax0, ay0, ax1, ay1 = a
+        bx0, by0, bx1, by1 = b
+        overlap_x = min(ax1, bx1) - max(ax0, bx0)
+        overlap_y = min(ay1, by1) - max(ay0, by0)
+        touch_x = overlap_x > 0 and (ay1 == by0 or by1 == ay0)
+        touch_y = overlap_y > 0 and (ax1 == bx0 or bx1 == ax0)
+        return bool(touch_x or touch_y)
+
+    def _hard_floor_phase_score_preview(
+        self,
+        *,
+        pallet: PalletModel,
+        preview: PlacementPreview,
+        future_boxes: Sequence[Box] | None = None,
+        selected_box: Box | None = None,
+    ) -> float:
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return -1e9
+
+        floor_rects: list[tuple[int, int, int, int]] = []
+        stand_count = 0
+        for p in list(getattr(pallet, "placements", []) or []):
+            try:
+                z_mm = int(getattr(p, "z_mm", 0) or 0)
+            except Exception:
+                continue
+            if z_mm != 0:
+                continue
+            try:
+                x0 = int(getattr(p, "x_mm", 0) or 0)
+                y0 = int(getattr(p, "y_mm", 0) or 0)
+                x1 = x0 + int(getattr(p, "length_mm", 0) or 0)
+                y1 = y0 + int(getattr(p, "width_mm", 0) or 0)
+            except Exception:
+                continue
+            floor_rects.append((x0, y0, x1, y1))
+            if self._placement_is_stand_hw(p):
+                stand_count += 1
+
+        try:
+            px0 = int(getattr(placement, "x_mm", 0) or 0)
+            py0 = int(getattr(placement, "y_mm", 0) or 0)
+            px1 = px0 + int(getattr(placement, "length_mm", 0) or 0)
+            py1 = py0 + int(getattr(placement, "width_mm", 0) or 0)
+        except Exception:
+            return -1e9
+        candidate_rect = (px0, py0, px1, py1)
+        floor_rects_after = floor_rects + [candidate_rect]
+
+        areas = [max(0, (x1 - x0)) * max(0, (y1 - y0)) for (x0, y0, x1, y1) in floor_rects_after]
+        area_sum = float(sum(areas))
+        bin_area = float(max(1, int(getattr(pallet, "bin_area_mm2", 1) or 1)))
+        coverage_ratio = area_sum / bin_area
+
+        min_x = min(r[0] for r in floor_rects_after)
+        min_y = min(r[1] for r in floor_rects_after)
+        max_x = max(r[2] for r in floor_rects_after)
+        max_y = max(r[3] for r in floor_rects_after)
+        bbox_w = max(1, int(max_x - min_x))
+        bbox_h = max(1, int(max_y - min_y))
+        bbox_area = float(max(1, bbox_w * bbox_h))
+        compactness = area_sum / bbox_area
+        dead_gap_ratio = max(0.0, bbox_area - area_sum) / bin_area
+        elongation_penalty = abs(float(bbox_w) - float(bbox_h)) / float(max(bbox_w, bbox_h))
+
+        bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
+        bin_counts: dict[tuple[int, int], int] = {}
+        for rect in floor_rects_after:
+            bx = int(rect[0]) // int(bin_mm)
+            by = int(rect[1]) // int(bin_mm)
+            key = (bx, by)
+            bin_counts[key] = int(bin_counts.get(key, 0)) + 1
+        total_floor = max(1, len(floor_rects_after))
+        dominant_ratio = float(max(bin_counts.values())) / float(total_floor)
+        dominance_penalty = max(0.0, dominant_ratio - 0.45)
+
+        bbox_bins_x = max(1, (bbox_w + bin_mm - 1) // bin_mm)
+        bbox_bins_y = max(1, (bbox_h + bin_mm - 1) // bin_mm)
+        potential_bins = max(1, bbox_bins_x * bbox_bins_y)
+        occupied_bins = len(bin_counts)
+        continuity_ratio = float(occupied_bins) / float(potential_bins)
+
+        touches = 0
+        for rect in floor_rects:
+            if self._rectangles_touch(rect, candidate_rect):
+                touches += 1
+        adjacency_ratio = float(touches) / float(max(1, len(floor_rects)))
+
+        stand_after = int(stand_count) + (1 if self._placement_is_stand_hw(placement) else 0)
+        stand_mix_ratio = float(stand_after) / float(total_floor)
+        stand_mix_bonus = 1.0 - abs(stand_mix_ratio - 0.35)
+        stand_early_bonus = 0.0
+        if total_floor <= 4 and self._placement_is_stand_hw(placement):
+            stand_early_bonus = 1.0
+
+        next_floor_options = 0
+        future_total = 0
+        if future_boxes:
+            try:
+                pallet_clone = copy.deepcopy(pallet)
+                if selected_box is not None:
+                    chosen_preview = self._preview_place(pallet_clone, selected_box)
+                    if chosen_preview.feasible:
+                        pallet_clone.commit_place(chosen_preview)
+                selected_consumed = False
+                selected_box_id = getattr(selected_box, "box_id", None) if selected_box is not None else None
+                lookahead_cap = max(1, int(getattr(self.config, "hard_floor_phase_lookahead_items", 8) or 8))
+                for box in list(future_boxes)[:lookahead_cap]:
+                    if selected_box is not None and not selected_consumed:
+                        if box is selected_box or getattr(box, "box_id", None) == selected_box_id:
+                            selected_consumed = True
+                            continue
+                    future_total += 1
+                    future_preview = self._preview_place(pallet_clone, box)
+                    if future_preview.feasible and self._preview_is_floor(future_preview):
+                        next_floor_options += 1
+            except Exception:
+                next_floor_options = 0
+                future_total = 0
+        next_floor_ratio = float(next_floor_options) / float(max(1, future_total))
+
+        early_l_penalty = 0.0
+        if total_floor >= 3 and compactness < 0.72 and elongation_penalty > 0.45:
+            early_l_penalty = 1.0
+
+        return (
+            3.2 * float(coverage_ratio)
+            + 1.6 * float(compactness)
+            + 0.6 * float(adjacency_ratio)
+            + 0.6 * float(continuity_ratio)
+            + 0.8 * float(next_floor_ratio)
+            - 1.8 * float(dominance_penalty)
+            - 1.2 * float(dead_gap_ratio)
+            - 0.7 * float(elongation_penalty)
+            - 0.6 * float(early_l_penalty)
+            + 0.20 * float(stand_mix_bonus)
+            + 0.15 * float(stand_early_bonus)
+        )
+
+    def _record_hard_floor_phase_choice(self, plan: PickPlan, base_score: float) -> None:
+        self.hard_floor_phase_chosen_total += 1
+        self.hard_floor_phase_score_sum += float(base_score)
+        placement = getattr(plan.preview, "placement", None)
+        if self._placement_is_stand_hw(placement):
+            self.hard_floor_phase_stand_hw_chosen_total += 1
+
     def _spatial_tower_penalty_for_after_count(
         self,
         *,
@@ -1383,6 +1813,7 @@ class SchedulerV1:
         return out
 
     def _rebuild_spatial_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
+        prev_step_index = dict(self._spatial_step_index_by_pallet)
         self._spatial_bin_counts = {}
         self._spatial_step_index_by_pallet = {}
         bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
@@ -1400,6 +1831,18 @@ class SchedulerV1:
                 counts[key] = int(counts.get(key, 0)) + 1
             self._spatial_bin_counts[pallet_id] = counts
             self._spatial_step_index_by_pallet[pallet_id] = int(step_idx)
+            prev_idx = int(prev_step_index.get(pallet_id, 0) or 0)
+            if int(step_idx) == 0 and prev_idx > 0:
+                self._hard_floor_phase_exited_no_floor_pallets.discard(pallet_id)
+                self._hard_floor_phase_exit_end_step_recorded_pallets.discard(pallet_id)
+
+        live_ids = set(pallets.keys())
+        self._hard_floor_phase_exited_no_floor_pallets = {
+            pid for pid in self._hard_floor_phase_exited_no_floor_pallets if pid in live_ids
+        }
+        self._hard_floor_phase_exit_end_step_recorded_pallets = {
+            pid for pid in self._hard_floor_phase_exit_end_step_recorded_pallets if pid in live_ids
+        }
 
     def _update_spatial_state_from_selected_plan(self, plan: PickPlan) -> None:
         pallet_id = plan.pallet_id
