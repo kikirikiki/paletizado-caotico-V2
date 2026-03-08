@@ -1688,10 +1688,21 @@ class SchedulerV1:
             if heuristic_best is not baseline_best:
                 self.two_step_floor_layout_tiebreak_used_total += 1
 
+            ranked = sorted(
+                evaluated,
+                key=lambda row: (float(row[1].layout_score), self._gain_frag_candidate_key(row[0])),
+                reverse=True,
+            )
+            rank_bonus: dict[int, float] = {}
+            total_rank = len(ranked)
+            for rank, (cand_ranked, _eval_ranked) in enumerate(ranked):
+                rank_bonus[id(cand_ranked)] = float(total_rank - rank)
+
             for cand, eval_result in evaluated:
+                layout_rank_bonus = float(rank_bonus.get(id(cand), 0.0))
                 new_terms = replace(
                     cand.terms,
-                    scalar_score=float(cand.terms.scalar_score) + float(eval_result.layout_score),
+                    scalar_score=float(cand.terms.scalar_score) + layout_rank_bonus + float(eval_result.layout_score),
                 )
                 new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
                 replacements[id(cand)] = _ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms)
@@ -1780,16 +1791,27 @@ class SchedulerV1:
             if heuristic_best is not baseline_best:
                 self.two_step_floor_layout_tiebreak_used_total += 1
 
+            ranked = sorted(
+                evaluated,
+                key=lambda row: (float(row[1].layout_score), float(row[0].terms.scalar_score)),
+                reverse=True,
+            )
+            rank_bonus: dict[int, float] = {}
+            total_rank = len(ranked)
+            for rank, (exp_ranked, _eval_ranked) in enumerate(ranked):
+                rank_bonus[id(exp_ranked)] = float(total_rank - rank)
+
             for exp, eval_result in evaluated:
-                exp.node.score_sum = float(exp.node.score_sum) + float(eval_result.layout_score)
+                layout_rank_bonus = float(rank_bonus.get(id(exp), 0.0))
+                exp.node.score_sum = float(exp.node.score_sum) + layout_rank_bonus + float(eval_result.layout_score)
                 if exp.node.first_plan is not None:
                     exp.node.first_plan = replace(
                         exp.node.first_plan,
-                        score=float(exp.node.first_plan.score) + float(eval_result.layout_score),
+                        score=float(exp.node.first_plan.score) + layout_rank_bonus + float(eval_result.layout_score),
                     )
                 new_terms = replace(
                     exp.terms,
-                    scalar_score=float(exp.terms.scalar_score) + float(eval_result.layout_score),
+                    scalar_score=float(exp.terms.scalar_score) + layout_rank_bonus + float(eval_result.layout_score),
                 )
                 for i, existing in enumerate(out):
                     if existing is exp:
