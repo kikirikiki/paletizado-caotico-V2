@@ -215,6 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limite de lookahead por rampa durante fase dura de base.",
     )
     parser.add_argument(
+        "--hard-floor-phase-stand-mix-bonus",
+        type=float,
+        default=0.0,
+        help="Bonus extra para candidatos stand_hw en suelo durante hard floor phase.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -452,6 +458,7 @@ def run_simulation(
     hard_floor_phase_end_step: int = 0,
     hard_floor_phase_min_base_candidates: int = 1,
     hard_floor_phase_lookahead_items: int = 8,
+    hard_floor_phase_stand_mix_bonus: float = 0.0,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -650,6 +657,7 @@ def run_simulation(
             hard_floor_phase_end_step=max(0, int(hard_floor_phase_end_step)),
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
+            hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -762,6 +770,7 @@ def run_simulation(
             "hard_floor_phase_end_step": int(max(0, int(hard_floor_phase_end_step))),
             "hard_floor_phase_min_base_candidates": int(max(1, int(hard_floor_phase_min_base_candidates))),
             "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
+            "hard_floor_phase_stand_mix_bonus": float(max(0.0, float(hard_floor_phase_stand_mix_bonus))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -865,6 +874,7 @@ def main() -> None:
         hard_floor_phase_end_step=int(args.hard_floor_phase_end_step),
         hard_floor_phase_min_base_candidates=int(args.hard_floor_phase_min_base_candidates),
         hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
+        hard_floor_phase_stand_mix_bonus=float(args.hard_floor_phase_stand_mix_bonus),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,

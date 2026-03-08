@@ -59,6 +59,7 @@ class PolicyConfig:
     hard_floor_phase_end_step: int = 0
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
+    hard_floor_phase_stand_mix_bonus: float = 0.0
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -182,6 +183,7 @@ class PolicyPackerScheduler:
         hard_floor_phase_end_step: int = 0,
         hard_floor_phase_min_base_candidates: int = 1,
         hard_floor_phase_lookahead_items: int = 8,
+        hard_floor_phase_stand_mix_bonus: float = 0.0,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -225,6 +227,7 @@ class PolicyPackerScheduler:
             hard_floor_phase_end_step=hard_floor_phase_end_step,
             hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
+            hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -271,6 +274,7 @@ class PolicyPackerScheduler:
             hard_floor_phase_end_step=max(0, int(hard_floor_phase_end_step)),
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
+            hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -743,6 +747,9 @@ class PolicyPackerScheduler:
         hard_floor_phase_lookahead_items = int(
             getattr(self._scheduler.config, "hard_floor_phase_lookahead_items", 8) or 8
         )
+        hard_floor_phase_stand_mix_bonus = float(
+            getattr(self._scheduler.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0
+        )
         hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
         hard_floor_phase_floor_candidates_seen_total = int(
             getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
@@ -758,6 +765,15 @@ class PolicyPackerScheduler:
             getattr(self._scheduler, "hard_floor_phase_exit_end_step_total", 0) or 0
         )
         hard_floor_phase_score_sum = float(getattr(self._scheduler, "hard_floor_phase_score_sum", 0.0) or 0.0)
+        hard_floor_phase_stand_mix_bonus_applied_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_mix_bonus_applied_total", 0) or 0
+        )
+        hard_floor_phase_stand_mix_candidates_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_mix_candidates_total", 0) or 0
+        )
+        hard_floor_phase_stand_mix_chosen_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -784,12 +800,16 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_end_step"] = int(hard_floor_phase_end_step)
         kpis["hard_floor_phase_min_base_candidates"] = int(hard_floor_phase_min_base_candidates)
         kpis["hard_floor_phase_lookahead_items"] = int(hard_floor_phase_lookahead_items)
+        kpis["hard_floor_phase_stand_mix_bonus"] = float(hard_floor_phase_stand_mix_bonus)
         kpis["hard_floor_phase_active_total"] = int(hard_floor_phase_active_total)
         kpis["hard_floor_phase_floor_candidates_seen_total"] = int(hard_floor_phase_floor_candidates_seen_total)
         kpis["hard_floor_phase_chosen_total"] = int(hard_floor_phase_chosen_total)
         kpis["hard_floor_phase_stand_hw_chosen_total"] = int(hard_floor_phase_stand_hw_chosen_total)
         kpis["hard_floor_phase_exit_no_floor_total"] = int(hard_floor_phase_exit_no_floor_total)
         kpis["hard_floor_phase_exit_end_step_total"] = int(hard_floor_phase_exit_end_step_total)
+        kpis["hard_floor_phase_stand_mix_bonus_applied_total"] = int(hard_floor_phase_stand_mix_bonus_applied_total)
+        kpis["hard_floor_phase_stand_mix_candidates_total"] = int(hard_floor_phase_stand_mix_candidates_total)
+        kpis["hard_floor_phase_stand_mix_chosen_total"] = int(hard_floor_phase_stand_mix_chosen_total)
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )

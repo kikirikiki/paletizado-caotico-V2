@@ -48,6 +48,7 @@ class SchedulerConfig:
     hard_floor_phase_end_step: int = 0
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
+    hard_floor_phase_stand_mix_bonus: float = 0.0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -98,6 +99,7 @@ class SchedulerConfig:
             max(1, int(self.hard_floor_phase_min_base_candidates)),
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
+        object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
 
 
 @dataclass(frozen=True)
@@ -194,12 +196,14 @@ class _BeamExpansion:
 class _HardFloorScoredCandidate:
     candidate: _ScoredCandidate
     base_score: float
+    stand_mix_bonus_applied: bool = False
 
 
 @dataclass(frozen=True)
 class _HardFloorScoredExpansion:
     expansion: _BeamExpansion
     base_score: float
+    stand_mix_bonus_applied: bool = False
 
 
 class SchedulerV1:
@@ -246,6 +250,9 @@ class SchedulerV1:
         self.hard_floor_phase_exit_no_floor_total = 0
         self.hard_floor_phase_exit_end_step_total = 0
         self.hard_floor_phase_score_sum = 0.0
+        self.hard_floor_phase_stand_mix_bonus_applied_total = 0
+        self.hard_floor_phase_stand_mix_candidates_total = 0
+        self.hard_floor_phase_stand_mix_chosen_total = 0
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -528,7 +535,7 @@ class SchedulerV1:
             selected: _ScoredCandidate | None = None
             slack_stats: SlackDecisionStats | None = None
             if hard_floor_candidates:
-                selected = max(
+                hard_floor_selected = max(
                     hard_floor_candidates,
                     key=lambda item: (
                         float(item.base_score),
@@ -536,8 +543,13 @@ class SchedulerV1:
                         -float(item.candidate.terms.fragmentation),
                         -float(item.candidate.terms.dt_extra),
                     ),
-                ).candidate
-                self._record_hard_floor_phase_choice(selected.plan, selected.terms.scalar_score)
+                )
+                selected = hard_floor_selected.candidate
+                self._record_hard_floor_phase_choice(
+                    selected.plan,
+                    selected.terms.scalar_score,
+                    stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
+                )
             else:
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
                 min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
@@ -692,7 +704,11 @@ class SchedulerV1:
                         )
                         chosen_plan = chosen.expansion.node.first_plan
                         if chosen_plan is not None:
-                            self._record_hard_floor_phase_choice(chosen_plan, chosen.base_score)
+                            self._record_hard_floor_phase_choice(
+                                chosen_plan,
+                                chosen.base_score,
+                                stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
+                            )
                             stats = {
                                 "enabled": True,
                                 "score_mode": str(self.config.score_mode),
@@ -1451,12 +1467,23 @@ class SchedulerV1:
                     future_boxes=[item.box for item in group],
                     selected_box=cand.box,
                 )
-                new_terms = replace(cand.terms, scalar_score=float(base_score))
-                new_plan = replace(cand.plan, score=float(base_score))
+                placement = getattr(cand.plan.preview, "placement", None)
+                is_stand_hw = self._placement_is_stand_hw(placement)
+                if is_stand_hw:
+                    self.hard_floor_phase_stand_mix_candidates_total += 1
+                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                    base_score=float(base_score),
+                    placement=placement,
+                )
+                if stand_mix_bonus_applied:
+                    self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+                new_terms = replace(cand.terms, scalar_score=float(scored_value))
+                new_plan = replace(cand.plan, score=float(scored_value))
                 scored.append(
                     _HardFloorScoredCandidate(
                         candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
-                        base_score=float(base_score),
+                        base_score=float(scored_value),
+                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
                     )
                 )
 
@@ -1524,13 +1551,24 @@ class SchedulerV1:
                     future_boxes=[item.box for item in group],
                     selected_box=exp.box,
                 )
-                exp.node.score_sum = float(base_score)
-                exp.node.first_plan = replace(exp.node.first_plan, score=float(base_score))
-                new_terms = replace(exp.terms, scalar_score=float(base_score))
+                placement = getattr(exp.node.first_plan.preview, "placement", None)
+                is_stand_hw = self._placement_is_stand_hw(placement)
+                if is_stand_hw:
+                    self.hard_floor_phase_stand_mix_candidates_total += 1
+                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                    base_score=float(base_score),
+                    placement=placement,
+                )
+                if stand_mix_bonus_applied:
+                    self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+                exp.node.score_sum = float(scored_value)
+                exp.node.first_plan = replace(exp.node.first_plan, score=float(scored_value))
+                new_terms = replace(exp.terms, scalar_score=float(scored_value))
                 scored.append(
                     _HardFloorScoredExpansion(
                         expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
-                        base_score=float(base_score),
+                        base_score=float(scored_value),
+                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
                     )
                 )
 
@@ -1557,6 +1595,17 @@ class SchedulerV1:
         family = str(getattr(placement, "orientation_family", "") or "").lower()
         name = str(getattr(placement, "orientation_name", "") or "").lower()
         return family == "stand_hw" or "stand_hw" in name
+
+    def _hard_floor_phase_apply_stand_mix_bonus(
+        self,
+        *,
+        base_score: float,
+        placement: object | None,
+    ) -> tuple[float, bool]:
+        bonus = float(getattr(self.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0)
+        if bonus <= 0.0 or not self._placement_is_stand_hw(placement):
+            return float(base_score), False
+        return float(base_score) + float(bonus), True
 
     @staticmethod
     def _rectangles_touch(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
@@ -1700,12 +1749,20 @@ class SchedulerV1:
             + 0.15 * float(stand_early_bonus)
         )
 
-    def _record_hard_floor_phase_choice(self, plan: PickPlan, base_score: float) -> None:
+    def _record_hard_floor_phase_choice(
+        self,
+        plan: PickPlan,
+        base_score: float,
+        *,
+        stand_mix_bonus_applied: bool = False,
+    ) -> None:
         self.hard_floor_phase_chosen_total += 1
         self.hard_floor_phase_score_sum += float(base_score)
         placement = getattr(plan.preview, "placement", None)
         if self._placement_is_stand_hw(placement):
             self.hard_floor_phase_stand_hw_chosen_total += 1
+            if stand_mix_bonus_applied:
+                self.hard_floor_phase_stand_mix_chosen_total += 1
 
     def _spatial_tower_penalty_for_after_count(
         self,
@@ -2109,19 +2166,50 @@ class SchedulerV1:
             kwargs["max_seconds_per_item"] = max_seconds
 
         preview_fn = pallet.preview_place
-        if not kwargs:
-            return preview_fn(box)
-
-        filtered = self._filter_preview_kwargs(preview_fn, kwargs)
-        if not filtered:
-            return preview_fn(box)
-
+        should_relax_stand_gate = self._hard_floor_phase_stand_mix_gate_enabled_for_pallet(pallet)
+        original_stand_gate = None
+        if should_relax_stand_gate:
+            try:
+                original_stand_gate = int(getattr(pallet, "stand_hw_height_margin_gate_mm", 0) or 0)
+                setattr(pallet, "stand_hw_height_margin_gate_mm", max(int(original_stand_gate), 1_000_000_000))
+            except Exception:
+                should_relax_stand_gate = False
+                original_stand_gate = None
         try:
-            return preview_fn(box, **filtered)
-        except TypeError as exc:
-            if self._is_unexpected_kwarg(exc):
+            if not kwargs:
                 return preview_fn(box)
-            raise
+
+            filtered = self._filter_preview_kwargs(preview_fn, kwargs)
+            if not filtered:
+                return preview_fn(box)
+
+            try:
+                return preview_fn(box, **filtered)
+            except TypeError as exc:
+                if self._is_unexpected_kwarg(exc):
+                    return preview_fn(box)
+                raise
+        finally:
+            if should_relax_stand_gate and original_stand_gate is not None:
+                try:
+                    setattr(pallet, "stand_hw_height_margin_gate_mm", int(original_stand_gate))
+                except Exception:
+                    pass
+
+    def _hard_floor_phase_stand_mix_gate_enabled_for_pallet(self, pallet: PalletModel) -> bool:
+        if not self._hard_floor_phase_enabled():
+            return False
+        bonus = float(getattr(self.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0)
+        if bonus <= 0.0:
+            return False
+        end_step = int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0)
+        if end_step <= 0:
+            return False
+        try:
+            step_idx = len(list(getattr(pallet, "placements", []) or []))
+        except Exception:
+            step_idx = 0
+        return int(step_idx) < int(end_step)
 
     @staticmethod
     def _filter_preview_kwargs(preview_fn: object, kwargs: dict[str, object]) -> dict[str, object]:
