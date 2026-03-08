@@ -119,6 +119,43 @@ def _sim_state(*, boxes: list[Box], pallet: FakePallet) -> SchedulerSimState:
     )
 
 
+def _height_balance_test_pallet() -> FakePallet:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=0, y_mm=0, length_mm=40, width_mm=40, height_mm=120, packing_gain=9.0),
+            2: PreviewSpec(z_mm=0, x_mm=40, y_mm=0, length_mm=40, width_mm=40, height_mm=120, packing_gain=1.0),
+        },
+        bin_area_mm2=12_000,
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=900,
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=120,
+            orientation_family="planar",
+            orientation_name="seed_high",
+        )
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=901,
+            z_mm=0,
+            x_mm=40,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=20,
+            orientation_family="planar",
+            orientation_name="seed_low",
+        )
+    )
+    return pallet
+
+
 def test_hard_floor_phase_never_chooses_stacking_while_floor_exists() -> None:
     pallet = FakePallet(
         {
@@ -292,6 +329,55 @@ def test_hard_floor_phase_stand_mix_bonus_zero_keeps_current_behavior() -> None:
     assert int(with_zero_bonus.hard_floor_phase_stand_mix_chosen_total) == 0
 
 
+def test_hard_floor_phase_height_balance_weight_prefers_balanced_floor_candidate() -> None:
+    pallet = _height_balance_test_pallet()
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_height_balance_weight=1.0,
+            spatial_xy_bin_mm=40,
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+    assert int(scheduler.hard_floor_phase_height_balance_applied_total) == 2
+    assert int(scheduler.hard_floor_phase_height_balance_chosen_total) == 1
+    assert float(scheduler.hard_floor_phase_height_balance_score_max) > 0.0
+
+
+def test_hard_floor_phase_height_balance_weight_zero_keeps_current_behavior() -> None:
+    pallet_baseline = _height_balance_test_pallet()
+    pallet_zero = _height_balance_test_pallet()
+    baseline = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            spatial_xy_bin_mm=40,
+        )
+    )
+    with_zero_weight = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_height_balance_weight=0.0,
+            spatial_xy_bin_mm=40,
+        )
+    )
+
+    baseline_plan = baseline.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_baseline))
+    zero_weight_plan = with_zero_weight.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_zero))
+    assert baseline_plan is not None and zero_weight_plan is not None
+    assert int(baseline_plan.box_id) == int(zero_weight_plan.box_id)
+    assert int(with_zero_weight.hard_floor_phase_height_balance_applied_total) == 0
+    assert int(with_zero_weight.hard_floor_phase_height_balance_chosen_total) == 0
+
+
 def test_hard_floor_phase_disabled_mode_keeps_existing_behavior() -> None:
     pallet_a = FakePallet(
         {
@@ -349,12 +435,36 @@ def test_hard_floor_phase_applies_same_root_logic_with_micro_planner_depth0() ->
     assert int(scheduler.hard_floor_phase_chosen_total) == 1
 
 
+def test_hard_floor_phase_height_balance_applies_in_micro_planner_depth0() -> None:
+    pallet = _height_balance_test_pallet()
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            micro_plan_enabled=True,
+            micro_plan_depth=3,
+            micro_plan_width=6,
+            micro_plan_topk_per_step=6,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_height_balance_weight=1.0,
+            spatial_xy_bin_mm=40,
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+    assert int(scheduler.hard_floor_phase_height_balance_chosen_total) == 1
+    assert int(scheduler.hard_floor_phase_chosen_total) == 1
+
+
 def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy = PolicyPackerScheduler.from_defaults(
         hard_floor_phase_end_step=8,
         hard_floor_phase_min_base_candidates=1,
         hard_floor_phase_lookahead_items=9,
         hard_floor_phase_stand_mix_bonus=0.5,
+        hard_floor_phase_height_balance_weight=0.65,
     )
     policy._scheduler.hard_floor_phase_active_total = 3
     policy._scheduler.hard_floor_phase_floor_candidates_seen_total = 12
@@ -366,6 +476,10 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.hard_floor_phase_stand_mix_bonus_applied_total = 4
     policy._scheduler.hard_floor_phase_stand_mix_candidates_total = 6
     policy._scheduler.hard_floor_phase_stand_mix_chosen_total = 1
+    policy._scheduler.hard_floor_phase_height_balance_applied_total = 5
+    policy._scheduler.hard_floor_phase_height_balance_score_sum = 2.5
+    policy._scheduler.hard_floor_phase_height_balance_score_max = 0.9
+    policy._scheduler.hard_floor_phase_height_balance_chosen_total = 2
 
     kpis = policy.collect_kpis()
 
@@ -376,7 +490,12 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_exit_no_floor_total"]) == 1
     assert int(kpis["hard_floor_phase_exit_end_step_total"]) == 1
     assert float(kpis["hard_floor_phase_stand_mix_bonus"]) == 0.5
+    assert float(kpis["hard_floor_phase_height_balance_weight"]) == 0.65
     assert int(kpis["hard_floor_phase_stand_mix_bonus_applied_total"]) == 4
     assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
     assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
+    assert int(kpis["hard_floor_phase_height_balance_applied_total"]) == 5
+    assert float(kpis["hard_floor_phase_height_balance_score_mean"]) == 0.5
+    assert float(kpis["hard_floor_phase_height_balance_score_max"]) == 0.9
+    assert int(kpis["hard_floor_phase_height_balance_chosen_total"]) == 2
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5

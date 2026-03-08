@@ -49,6 +49,7 @@ class SchedulerConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    hard_floor_phase_height_balance_weight: float = 0.0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -100,6 +101,11 @@ class SchedulerConfig:
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
         object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
+        object.__setattr__(
+            self,
+            "hard_floor_phase_height_balance_weight",
+            max(0.0, float(self.hard_floor_phase_height_balance_weight)),
+        )
 
 
 @dataclass(frozen=True)
@@ -197,6 +203,7 @@ class _HardFloorScoredCandidate:
     candidate: _ScoredCandidate
     base_score: float
     stand_mix_bonus_applied: bool = False
+    height_balance_applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -204,6 +211,7 @@ class _HardFloorScoredExpansion:
     expansion: _BeamExpansion
     base_score: float
     stand_mix_bonus_applied: bool = False
+    height_balance_applied: bool = False
 
 
 class SchedulerV1:
@@ -253,6 +261,10 @@ class SchedulerV1:
         self.hard_floor_phase_stand_mix_bonus_applied_total = 0
         self.hard_floor_phase_stand_mix_candidates_total = 0
         self.hard_floor_phase_stand_mix_chosen_total = 0
+        self.hard_floor_phase_height_balance_applied_total = 0
+        self.hard_floor_phase_height_balance_score_sum = 0.0
+        self.hard_floor_phase_height_balance_score_max = 0.0
+        self.hard_floor_phase_height_balance_chosen_total = 0
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -549,6 +561,7 @@ class SchedulerV1:
                     selected.plan,
                     selected.terms.scalar_score,
                     stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
+                    height_balance_applied=bool(hard_floor_selected.height_balance_applied),
                 )
             else:
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
@@ -708,6 +721,7 @@ class SchedulerV1:
                                 chosen_plan,
                                 chosen.base_score,
                                 stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
+                                height_balance_applied=bool(chosen.height_balance_applied),
                             )
                             stats = {
                                 "enabled": True,
@@ -1461,7 +1475,7 @@ class SchedulerV1:
                 continue
 
             for cand in floor_group:
-                base_score = self._hard_floor_phase_score_preview(
+                base_score, height_balance_applied = self._hard_floor_phase_score_preview(
                     pallet=pallet,
                     preview=cand.plan.preview,
                     future_boxes=[item.box for item in group],
@@ -1484,6 +1498,7 @@ class SchedulerV1:
                         candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
                         base_score=float(scored_value),
                         stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                        height_balance_applied=bool(height_balance_applied),
                     )
                 )
 
@@ -1545,7 +1560,7 @@ class SchedulerV1:
 
             for exp in floor_group:
                 assert exp.node.first_plan is not None
-                base_score = self._hard_floor_phase_score_preview(
+                base_score, height_balance_applied = self._hard_floor_phase_score_preview(
                     pallet=pallet,
                     preview=exp.node.first_plan.preview,
                     future_boxes=[item.box for item in group],
@@ -1569,6 +1584,7 @@ class SchedulerV1:
                         expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
                         base_score=float(scored_value),
                         stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                        height_balance_applied=bool(height_balance_applied),
                     )
                 )
 
@@ -1624,10 +1640,10 @@ class SchedulerV1:
         preview: PlacementPreview,
         future_boxes: Sequence[Box] | None = None,
         selected_box: Box | None = None,
-    ) -> float:
+    ) -> tuple[float, bool]:
         placement = getattr(preview, "placement", None)
         if placement is None:
-            return -1e9
+            return -1e9, False
 
         floor_rects: list[tuple[int, int, int, int]] = []
         stand_count = 0
@@ -1655,7 +1671,7 @@ class SchedulerV1:
             px1 = px0 + int(getattr(placement, "length_mm", 0) or 0)
             py1 = py0 + int(getattr(placement, "width_mm", 0) or 0)
         except Exception:
-            return -1e9
+            return -1e9, False
         candidate_rect = (px0, py0, px1, py1)
         floor_rects_after = floor_rects + [candidate_rect]
 
@@ -1735,7 +1751,7 @@ class SchedulerV1:
         if total_floor >= 3 and compactness < 0.72 and elongation_penalty > 0.45:
             early_l_penalty = 1.0
 
-        return (
+        score = (
             3.2 * float(coverage_ratio)
             + 1.6 * float(compactness)
             + 0.6 * float(adjacency_ratio)
@@ -1748,6 +1764,128 @@ class SchedulerV1:
             + 0.20 * float(stand_mix_bonus)
             + 0.15 * float(stand_early_bonus)
         )
+        return self._hard_floor_phase_apply_height_balance_penalty(
+            base_score=float(score),
+            pallet=pallet,
+            placement=placement,
+        )
+
+    @staticmethod
+    def _hard_floor_phase_add_height_bins_from_placement(
+        *,
+        placement: object | None,
+        height_bins: dict[tuple[int, int], int],
+        bin_mm: int,
+    ) -> None:
+        if placement is None:
+            return
+        try:
+            x0 = int(getattr(placement, "x_mm", 0) or 0)
+            y0 = int(getattr(placement, "y_mm", 0) or 0)
+            length_mm = int(getattr(placement, "length_mm", 0) or 0)
+            width_mm = int(getattr(placement, "width_mm", 0) or 0)
+            z_mm = int(getattr(placement, "z_mm", 0) or 0)
+            height_mm = int(getattr(placement, "height_mm", 0) or 0)
+        except Exception:
+            return
+        if length_mm <= 0 or width_mm <= 0 or height_mm <= 0:
+            return
+        top_height = max(0, int(z_mm) + int(height_mm))
+        x1 = int(x0) + int(length_mm) - 1
+        y1 = int(y0) + int(width_mm) - 1
+        bx0 = int(x0) // int(bin_mm)
+        by0 = int(y0) // int(bin_mm)
+        bx1 = int(x1) // int(bin_mm)
+        by1 = int(y1) // int(bin_mm)
+        for bx in range(int(bx0), int(bx1) + 1):
+            for by in range(int(by0), int(by1) + 1):
+                key = (int(bx), int(by))
+                current = int(height_bins.get(key, 0))
+                if int(top_height) > int(current):
+                    height_bins[key] = int(top_height)
+
+    def _hard_floor_phase_height_balance_score(
+        self,
+        *,
+        pallet: PalletModel,
+        placement: object | None,
+    ) -> tuple[float, bool]:
+        weight = float(getattr(self.config, "hard_floor_phase_height_balance_weight", 0.0) or 0.0)
+        if weight <= 0.0:
+            return 0.0, False
+
+        bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
+        height_bins: dict[tuple[int, int], int] = {}
+        for existing in list(getattr(pallet, "placements", []) or []):
+            self._hard_floor_phase_add_height_bins_from_placement(
+                placement=existing,
+                height_bins=height_bins,
+                bin_mm=int(bin_mm),
+            )
+        self._hard_floor_phase_add_height_bins_from_placement(
+            placement=placement,
+            height_bins=height_bins,
+            bin_mm=int(bin_mm),
+        )
+        if not height_bins:
+            return 0.0, False
+
+        values = sorted(float(max(0, v)) for v in height_bins.values())
+        count = len(values)
+        if count <= 0:
+            return 0.0, False
+        mean_h = float(sum(values)) / float(count)
+        variance = float(sum((value - mean_h) ** 2 for value in values)) / float(count)
+        std_h = float(variance) ** 0.5
+        mid = count // 2
+        if count % 2 == 1:
+            median_h = float(values[mid])
+        else:
+            median_h = 0.5 * (float(values[mid - 1]) + float(values[mid]))
+        max_h = float(values[-1])
+        topk = max(1, (int(count) + 3) // 4)
+        top_mean = float(sum(values[-topk:])) / float(topk)
+        top2 = max(1, min(2, int(count)))
+        total_h = float(sum(values))
+        top2_share = float(sum(values[-top2:])) / float(max(1.0, total_h))
+        expected_top2_share = float(top2) / float(count)
+
+        dispersion = float(std_h) / float(max(1.0, mean_h))
+        max_gap = max(0.0, float(max_h) - float(median_h)) / float(max(1.0, max_h))
+        dominant_gap = max(0.0, float(top_mean) - float(median_h)) / float(max(1.0, max_h))
+        concentration = max(0.0, float(top2_share) - float(expected_top2_share))
+        balance_score = (
+            0.50 * float(dispersion)
+            + 0.30 * float(max_gap)
+            + 0.20 * float(dominant_gap)
+            + 0.40 * float(concentration)
+        )
+        return float(max(0.0, balance_score)), True
+
+    def _hard_floor_phase_apply_height_balance_penalty(
+        self,
+        *,
+        base_score: float,
+        pallet: PalletModel,
+        placement: object | None,
+    ) -> tuple[float, bool]:
+        weight = float(getattr(self.config, "hard_floor_phase_height_balance_weight", 0.0) or 0.0)
+        if weight <= 0.0:
+            return float(base_score), False
+        balance_score, applied = self._hard_floor_phase_height_balance_score(
+            pallet=pallet,
+            placement=placement,
+        )
+        if not applied:
+            return float(base_score), False
+        self.hard_floor_phase_height_balance_applied_total += 1
+        self.hard_floor_phase_height_balance_score_sum += float(balance_score)
+        self.hard_floor_phase_height_balance_score_max = max(
+            float(self.hard_floor_phase_height_balance_score_max),
+            float(balance_score),
+        )
+        adjusted_score = float(base_score) - (float(weight) * float(balance_score))
+        return float(adjusted_score), True
 
     def _record_hard_floor_phase_choice(
         self,
@@ -1755,9 +1893,12 @@ class SchedulerV1:
         base_score: float,
         *,
         stand_mix_bonus_applied: bool = False,
+        height_balance_applied: bool = False,
     ) -> None:
         self.hard_floor_phase_chosen_total += 1
         self.hard_floor_phase_score_sum += float(base_score)
+        if height_balance_applied:
+            self.hard_floor_phase_height_balance_chosen_total += 1
         placement = getattr(plan.preview, "placement", None)
         if self._placement_is_stand_hw(placement):
             self.hard_floor_phase_stand_hw_chosen_total += 1
