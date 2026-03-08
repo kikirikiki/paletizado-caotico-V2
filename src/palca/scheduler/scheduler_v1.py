@@ -45,6 +45,8 @@ class SchedulerConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    first_layer_planner_end_step: int = 0
+    first_layer_planner_lookahead_items: int = 8
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -88,6 +90,12 @@ class SchedulerConfig:
         object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
         object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
         object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
+        object.__setattr__(self, "first_layer_planner_end_step", max(0, int(self.first_layer_planner_end_step)))
+        object.__setattr__(
+            self,
+            "first_layer_planner_lookahead_items",
+            max(1, int(self.first_layer_planner_lookahead_items)),
+        )
 
 
 @dataclass(frozen=True)
@@ -148,6 +156,7 @@ class _ScoreTerms:
     tower_z_penalty: float = 0.0
     spatial_tower_delta: int = 0
     spatial_tower_penalty: float = 0.0
+    first_layer_planner_score: float = 0.0
 
 
 @dataclass
@@ -163,6 +172,7 @@ class _BeamNode:
     priority_sum: float = 0.0
     height_after_mm: int = 0
     placed_count: int = 0
+    first_layer_planner_score: float = 0.0
     first_plan: PickPlan | None = None
 
 
@@ -223,6 +233,14 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.first_layer_planner_active_total = 0
+        self.first_layer_planner_floor_candidates_seen_total = 0
+        self.first_layer_planner_chosen_total = 0
+        self.first_layer_planner_stand_hw_chosen_total = 0
+        self.first_layer_planner_exit_no_floor_total = 0
+        self.first_layer_planner_score_sum = 0.0
+        self.first_layer_planner_score_count = 0
+        self._first_layer_planner_exited_pallets: set[int | str] = set()
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -232,6 +250,7 @@ class SchedulerV1:
         self.last_micro_plan_stats = {}
         self.last_micro_feasible_first_candidates = 0
         self._rebuild_spatial_state(sim_state.pallets)
+        self._refresh_first_layer_planner_state(sim_state.pallets)
         k = max(1, int(self.config.lookahead_k))
 
         deadline = None
@@ -260,6 +279,11 @@ class SchedulerV1:
             ) + 1
 
             if micro_plan is not None:
+                if bool(micro_stats.get("first_layer_planner_selected", False)):
+                    self._record_first_layer_planner_chosen(
+                        micro_plan,
+                        score=float(micro_stats.get("first_layer_planner_selected_score", 0.0) or 0.0),
+                    )
                 self._record_selected_spatial_tower_penalty(micro_plan)
                 self._update_spatial_state_from_selected_plan(micro_plan)
                 self._record_height_decision(
@@ -318,11 +342,18 @@ class SchedulerV1:
         items_evaluated = 0
         items_feasible = 0
         feasible_candidates: list[_ScoredCandidate] = []
+        planner_active_any = any(
+            self._first_layer_planner_active_for_pallet(pallet_id) for pallet_id in sim_state.pallets.keys()
+        )
+        lookahead_window = max(
+            1,
+            int(lookahead_k) + (self._first_layer_planner_limit() if planner_active_any else 0),
+        )
         window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
 
         for ramp_id, ramp in sim_state.ramps.items():
-            ramp_items = list(ramp)[:lookahead_k]
+            ramp_items = list(ramp)[:lookahead_window]
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
                 cutoff_reason = "time_budget"
@@ -468,6 +499,12 @@ class SchedulerV1:
             "batchfill_applied": 0,
             "batchfill_selected_layer_boxes_mean": 0.0,
         }
+        planner_floor_active_pallets: set[int | str] = set()
+        if feasible_candidates:
+            feasible_candidates, planner_floor_active_pallets = self._apply_first_layer_planner_scored_candidates(
+                candidates=feasible_candidates,
+                pallets=sim_state.pallets,
+            )
         if feasible_candidates and bool(self.config.batchfill_layer_starter):
             feasible_candidates, batchfill_stats = self._apply_batchfill_on_scored_candidates(
                 feasible_candidates=feasible_candidates,
@@ -511,6 +548,11 @@ class SchedulerV1:
 
             if selected is not None:
                 best_plan = selected.plan
+                if selected.plan.pallet_id in planner_floor_active_pallets and self._is_floor_preview(selected.plan.preview):
+                    self._record_first_layer_planner_chosen(
+                        selected.plan,
+                        score=selected.terms.first_layer_planner_score,
+                    )
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
                     min_feasible_height=slack_stats.min_height_after_mm,
@@ -565,6 +607,7 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        root_first_layer_active_pallets: set[int | str] = set()
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -600,6 +643,15 @@ class SchedulerV1:
                     expansions.append(expansion)
 
                 if expansions:
+                    if depth == 0 and node.first_plan is None:
+                        expansions, planner_active_pallets = self._apply_first_layer_planner_to_expansions(
+                            expansions=expansions,
+                            pallets=node.pallets,
+                            adjust_first_plan=True,
+                        )
+                        root_first_layer_active_pallets.update(planner_active_pallets)
+                    if not expansions:
+                        continue
                     min_h = min(int(e.terms.height_after_mm) for e in expansions)
                     expansions = self._apply_tower_z_penalty_expansions(
                         expansions=expansions,
@@ -677,6 +729,11 @@ class SchedulerV1:
                 break
 
         best_seq_len = int(best_node.placed_count)
+        first_layer_planner_selected = bool(
+            best_node.first_plan is not None
+            and best_node.first_plan.pallet_id in root_first_layer_active_pallets
+            and self._is_floor_preview(best_node.first_plan.preview)
+        )
         stats = {
             "enabled": True,
             "score_mode": str(self.config.score_mode),
@@ -702,6 +759,10 @@ class SchedulerV1:
             "batchfill_applied": int(batchfill_applied_local),
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
+            ),
+            "first_layer_planner_selected": bool(first_layer_planner_selected),
+            "first_layer_planner_selected_score": (
+                float(best_node.first_layer_planner_score) if first_layer_planner_selected else None
             ),
         }
 
@@ -779,6 +840,8 @@ class SchedulerV1:
             return {}
 
         total_limit = int(self.config.micro_plan_window_total)
+        if any(self._first_layer_planner_active_for_pallet(pallet_id) for pallet_id in self._spatial_step_index_by_pallet):
+            total_limit += self._first_layer_planner_limit()
         if total_limit <= 0:
             return {rid: max(0, int(queue_lens.get(rid, 0))) for rid in ramp_ids}
 
@@ -851,6 +914,7 @@ class SchedulerV1:
         )
 
         first_plan = node.first_plan
+        first_layer_planner_score = float(node.first_layer_planner_score)
         if first_plan is None:
             first_plan = PickPlan(
                 ramp_id=int(action.ramp_id),
@@ -861,6 +925,7 @@ class SchedulerV1:
                 score=float(terms.scalar_score),
                 dt_extra=float(terms.dt_extra),
             )
+            first_layer_planner_score = float(terms.first_layer_planner_score)
 
         pallet_clone = copy.deepcopy(pallet)
         try:
@@ -886,6 +951,7 @@ class SchedulerV1:
             priority_sum=float(node.priority_sum) + float(terms.priority_score),
             height_after_mm=int(self._state_height_after_mm(new_pallets)),
             placed_count=int(node.placed_count) + 1,
+            first_layer_planner_score=float(first_layer_planner_score),
             first_plan=first_plan,
         )
         return _BeamExpansion(node=child, box=box, terms=terms)
@@ -1448,6 +1514,462 @@ class SchedulerV1:
             return None
         bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
         return int(xy[0]) // bin_mm, int(xy[1]) // bin_mm
+
+    def _refresh_first_layer_planner_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
+        if not self._first_layer_planner_enabled():
+            self._first_layer_planner_exited_pallets = set()
+            return
+        active_ids = set(pallets.keys())
+        keep: set[int | str] = set()
+        for pallet_id in self._first_layer_planner_exited_pallets:
+            if pallet_id not in active_ids:
+                continue
+            if int(self._spatial_step_index_by_pallet.get(pallet_id, 0)) > 0:
+                keep.add(pallet_id)
+        self._first_layer_planner_exited_pallets = keep
+
+    def _first_layer_planner_enabled(self) -> bool:
+        return int(getattr(self.config, "first_layer_planner_end_step", 0) or 0) > 0
+
+    def _first_layer_planner_active_for_pallet(self, pallet_id: int | str) -> bool:
+        if not self._first_layer_planner_enabled():
+            return False
+        if pallet_id in self._first_layer_planner_exited_pallets:
+            return False
+        end_step = int(getattr(self.config, "first_layer_planner_end_step", 0) or 0)
+        step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+        return int(step_idx) < int(end_step)
+
+    def _mark_first_layer_planner_exit_no_floor(self, pallet_id: int | str) -> None:
+        if pallet_id in self._first_layer_planner_exited_pallets:
+            return
+        self._first_layer_planner_exited_pallets.add(pallet_id)
+        self.first_layer_planner_exit_no_floor_total += 1
+
+    @staticmethod
+    def _is_floor_preview(preview: PlacementPreview | None) -> bool:
+        if preview is None:
+            return False
+        placement = getattr(preview, "placement", None)
+        return SchedulerV1._is_floor_placement(placement)
+
+    @staticmethod
+    def _is_floor_placement(placement: object | None) -> bool:
+        if placement is None:
+            return False
+        try:
+            return int(getattr(placement, "z_mm", 0)) == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_stand_hw_preview(preview: PlacementPreview | None) -> bool:
+        if preview is None:
+            return False
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return False
+        family = str(getattr(placement, "orientation_family", "") or "").strip().lower()
+        return family == "stand_hw"
+
+    def _first_layer_planner_limit(self) -> int:
+        return max(1, int(getattr(self.config, "first_layer_planner_lookahead_items", 8) or 8))
+
+    def _apply_first_layer_planner_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> tuple[list[_ScoredCandidate], set[int | str]]:
+        if not candidates or not self._first_layer_planner_enabled():
+            return candidates, set()
+
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        order: list[int | str] = []
+        for candidate in candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        out: list[_ScoredCandidate] = []
+        active_with_floor: set[int | str] = set()
+        saw_active = False
+
+        for pallet_id in order:
+            group = grouped.get(pallet_id, [])
+            pallet = pallets.get(pallet_id)
+            if pallet is None or not group or not self._first_layer_planner_active_for_pallet(pallet_id):
+                out.extend(group)
+                continue
+
+            saw_active = True
+            floor = [item for item in group if self._is_floor_preview(item.plan.preview)]
+            self.first_layer_planner_floor_candidates_seen_total += int(len(floor))
+            if not floor:
+                self._mark_first_layer_planner_exit_no_floor(pallet_id)
+                out.extend(group)
+                continue
+
+            active_with_floor.add(pallet_id)
+            pool_boxes = [item.box for item in group]
+            scored_floor = [
+                self._with_first_layer_score_scored_candidate(
+                    candidate=item,
+                    pallet=pallet,
+                    pool_boxes=pool_boxes,
+                    selected_box_id=item.box.box_id,
+                )
+                for item in floor
+            ]
+            out.extend(scored_floor)
+
+        if saw_active:
+            self.first_layer_planner_active_total += 1
+        return out, active_with_floor
+
+    def _apply_first_layer_planner_to_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        pallets: Mapping[int | str, PalletModel],
+        adjust_first_plan: bool,
+    ) -> tuple[list[_BeamExpansion], set[int | str]]:
+        if not expansions or not self._first_layer_planner_enabled():
+            return expansions, set()
+
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        out: list[_BeamExpansion] = []
+        active_with_floor: set[int | str] = set()
+        saw_active = False
+
+        for pallet_id in order:
+            group = grouped.get(pallet_id, [])
+            pallet = pallets.get(pallet_id)
+            if pallet is None or not group or not self._first_layer_planner_active_for_pallet(pallet_id):
+                out.extend(group)
+                continue
+
+            saw_active = True
+            floor = []
+            for item in group:
+                first_plan = item.node.first_plan
+                preview = first_plan.preview if first_plan is not None else None
+                if self._is_floor_preview(preview):
+                    floor.append(item)
+            self.first_layer_planner_floor_candidates_seen_total += int(len(floor))
+            if not floor:
+                self._mark_first_layer_planner_exit_no_floor(pallet_id)
+                out.extend(group)
+                continue
+
+            active_with_floor.add(pallet_id)
+            pool_boxes = [item.box for item in group]
+            scored_floor = [
+                self._with_first_layer_score_expansion(
+                    expansion=item,
+                    pallet=pallet,
+                    adjust_first_plan=adjust_first_plan,
+                    pool_boxes=pool_boxes,
+                    selected_box_id=item.box.box_id,
+                )
+                for item in floor
+            ]
+            out.extend(scored_floor)
+
+        if saw_active:
+            self.first_layer_planner_active_total += 1
+        return out, active_with_floor
+
+    def _with_first_layer_score_scored_candidate(
+        self,
+        *,
+        candidate: _ScoredCandidate,
+        pallet: PalletModel,
+        pool_boxes: Sequence[Box],
+        selected_box_id: int | str | None,
+    ) -> _ScoredCandidate:
+        followup_floor_count = self._first_layer_followup_floor_count(
+            pallet=pallet,
+            selected_preview=candidate.plan.preview,
+            selected_box_id=selected_box_id,
+            pool_boxes=pool_boxes,
+            max_items=self._first_layer_planner_limit(),
+        )
+        planner_score = self._first_layer_layout_score(
+            pallet=pallet,
+            preview=candidate.plan.preview,
+            followup_floor_count=followup_floor_count,
+        )
+        new_terms = replace(
+            candidate.terms,
+            scalar_score=float(candidate.terms.scalar_score) + float(planner_score),
+            first_layer_planner_score=float(planner_score),
+        )
+        new_plan = replace(candidate.plan, score=float(new_terms.scalar_score))
+        return _ScoredCandidate(plan=new_plan, box=candidate.box, terms=new_terms)
+
+    def _with_first_layer_score_expansion(
+        self,
+        *,
+        expansion: _BeamExpansion,
+        pallet: PalletModel,
+        adjust_first_plan: bool,
+        pool_boxes: Sequence[Box],
+        selected_box_id: int | str | None,
+    ) -> _BeamExpansion:
+        first_plan = expansion.node.first_plan
+        preview = first_plan.preview if first_plan is not None else None
+        followup_floor_count = self._first_layer_followup_floor_count(
+            pallet=pallet,
+            selected_preview=preview,
+            selected_box_id=selected_box_id,
+            pool_boxes=pool_boxes,
+            max_items=self._first_layer_planner_limit(),
+        )
+        pallet_id = expansion.box.destination
+        if pallet_id is not None:
+            followup_floor_count = max(
+                int(followup_floor_count),
+                int(
+                    self._first_layer_followup_floor_count_from_node(
+                        node=expansion.node,
+                        pallet_id=pallet_id,
+                        max_items=self._first_layer_planner_limit(),
+                    )
+                ),
+            )
+        planner_score = self._first_layer_layout_score(
+            pallet=pallet,
+            preview=preview,
+            followup_floor_count=followup_floor_count,
+        )
+        expansion.node.score_sum = float(expansion.node.score_sum) + float(planner_score)
+        expansion.node.first_layer_planner_score = float(planner_score)
+        if adjust_first_plan and first_plan is not None:
+            expansion.node.first_plan = replace(
+                first_plan,
+                score=float(first_plan.score) + float(planner_score),
+            )
+        new_terms = replace(
+            expansion.terms,
+            scalar_score=float(expansion.terms.scalar_score) + float(planner_score),
+            first_layer_planner_score=float(planner_score),
+        )
+        return _BeamExpansion(node=expansion.node, box=expansion.box, terms=new_terms)
+
+    def _first_layer_layout_score(
+        self,
+        *,
+        pallet: PalletModel,
+        preview: PlacementPreview | None,
+        followup_floor_count: int = 0,
+    ) -> float:
+        if preview is None:
+            return 0.0
+        candidate = getattr(preview, "placement", None)
+        candidate_rect = self._placement_rect_xyxy(candidate)
+        if candidate_rect is None:
+            return 0.0
+
+        floor_rects: list[tuple[int, int, int, int]] = []
+        floor_bin_counts: dict[tuple[int, int], int] = {}
+        floor_x_bins: dict[int, int] = {}
+        floor_y_bins: dict[int, int] = {}
+        for placement in list(getattr(pallet, "placements", []) or []):
+            if not self._is_floor_placement(placement):
+                continue
+            rect = self._placement_rect_xyxy(placement)
+            if rect is None:
+                continue
+            floor_rects.append(rect)
+            bin_key = self._placement_bin_xy(placement)
+            if bin_key is None:
+                continue
+            floor_bin_counts[bin_key] = int(floor_bin_counts.get(bin_key, 0)) + 1
+            floor_x_bins[bin_key[0]] = int(floor_x_bins.get(bin_key[0], 0)) + 1
+            floor_y_bins[bin_key[1]] = int(floor_y_bins.get(bin_key[1], 0)) + 1
+
+        candidate_area = float(self._rect_area(candidate_rect))
+        if candidate_area <= 0.0:
+            return 0.0
+        bin_area = float(max(1, int(getattr(pallet, "bin_area_mm2", 1) or 1)))
+        coverage_gain = candidate_area / bin_area
+
+        used_before = float(sum(self._rect_area(rect) for rect in floor_rects))
+        used_after = used_before + candidate_area
+        bbox_before = float(self._bbox_area(floor_rects))
+        bbox_after = float(self._bbox_area([*floor_rects, candidate_rect]))
+        compact_before = (used_before / max(1.0, bbox_before)) if floor_rects else 0.0
+        compact_after = used_after / max(1.0, bbox_after)
+        compact_gain = compact_after - compact_before
+
+        contact_edge = float(sum(self._shared_edge_len(candidate_rect, rect) for rect in floor_rects))
+        cand_perimeter = float(
+            2
+            * (
+                max(1, int(candidate_rect[2] - candidate_rect[0]))
+                + max(1, int(candidate_rect[3] - candidate_rect[1]))
+            )
+        )
+        continuity = min(1.0, contact_edge / max(1.0, cand_perimeter))
+
+        candidate_key = self._placement_bin_xy(candidate)
+        tower_penalty = 0.0
+        dominance_penalty_x = 0.0
+        dominance_penalty_y = 0.0
+        if candidate_key is not None:
+            after_count = int(floor_bin_counts.get(candidate_key, 0)) + 1
+            tower_penalty = float(max(0, after_count - 1))
+
+            x_after = dict(floor_x_bins)
+            y_after = dict(floor_y_bins)
+            x_after[candidate_key[0]] = int(x_after.get(candidate_key[0], 0)) + 1
+            y_after[candidate_key[1]] = int(y_after.get(candidate_key[1], 0)) + 1
+
+            total_after = int(len(floor_rects)) + 1
+            dominant_x = max(x_after.values()) if x_after else 1
+            dominant_y = max(y_after.values()) if y_after else 1
+            mean_x = float(total_after) / float(max(1, len(x_after)))
+            mean_y = float(total_after) / float(max(1, len(y_after)))
+            dominance_penalty_x = max(0.0, float(dominant_x) - (mean_x + 0.75))
+            dominance_penalty_y = max(0.0, float(dominant_y) - (mean_y + 0.75))
+
+        stand_bonus = 0.0
+        if self._is_stand_hw_preview(preview):
+            stand_bonus = 0.10 + 0.25 * max(0.0, float(compact_gain)) + 0.15 * float(continuity)
+
+        score = (
+            4.0 * float(coverage_gain)
+            + 2.0 * float(compact_after)
+            + 1.2 * float(continuity)
+            + 1.5 * float(compact_gain)
+            + 0.35 * float(max(0, int(followup_floor_count)))
+            - 0.9 * float(tower_penalty)
+            - 0.7 * float(dominance_penalty_x + dominance_penalty_y)
+            + float(stand_bonus)
+        )
+        return float(score)
+
+    def _first_layer_followup_floor_count(
+        self,
+        *,
+        pallet: PalletModel,
+        selected_preview: PlacementPreview | None,
+        selected_box_id: int | str | None,
+        pool_boxes: Sequence[Box],
+        max_items: int,
+    ) -> int:
+        if selected_preview is None or selected_preview.placement is None:
+            return 0
+        if not pool_boxes:
+            return 0
+        limit = max(1, int(max_items))
+        try:
+            pallet_clone = copy.deepcopy(pallet)
+        except Exception:
+            return 0
+        try:
+            pallet_clone.commit_place(selected_preview)
+        except Exception:
+            return 0
+
+        followup_floor = 0
+        skipped_selected = False
+        seen = 0
+        for box in pool_boxes:
+            if seen >= limit:
+                break
+            if not skipped_selected and selected_box_id is not None and box.box_id == selected_box_id:
+                skipped_selected = True
+                continue
+            seen += 1
+            preview = self._preview_place(pallet_clone, box)
+            if preview.feasible and self._is_floor_preview(preview):
+                followup_floor += 1
+        return int(followup_floor)
+
+    def _first_layer_followup_floor_count_from_node(
+        self,
+        *,
+        node: _BeamNode,
+        pallet_id: int | str,
+        max_items: int,
+    ) -> int:
+        pallet = node.pallets.get(pallet_id)
+        if pallet is None:
+            return 0
+        limit = max(1, int(max_items))
+        followup_floor = 0
+        seen = 0
+        for ramp_id in sorted(node.ramps):
+            queue = list(getattr(node.ramps[ramp_id], "queue", []) or [])
+            for box in queue:
+                if seen >= limit:
+                    return int(followup_floor)
+                if box.destination != pallet_id:
+                    continue
+                seen += 1
+                preview = self._preview_place(pallet, box)
+                if preview.feasible and self._is_floor_preview(preview):
+                    followup_floor += 1
+        return int(followup_floor)
+
+    def _record_first_layer_planner_chosen(self, plan: PickPlan, *, score: float) -> None:
+        self.first_layer_planner_chosen_total += 1
+        if self._is_stand_hw_preview(plan.preview):
+            self.first_layer_planner_stand_hw_chosen_total += 1
+        self.first_layer_planner_score_sum += float(score)
+        self.first_layer_planner_score_count += 1
+
+    @staticmethod
+    def _placement_rect_xyxy(placement: object | None) -> tuple[int, int, int, int] | None:
+        if placement is None:
+            return None
+        try:
+            x0 = int(getattr(placement, "x_mm"))
+            y0 = int(getattr(placement, "y_mm"))
+            length = int(getattr(placement, "length_mm"))
+            width = int(getattr(placement, "width_mm"))
+        except Exception:
+            return None
+        if length <= 0 or width <= 0:
+            return None
+        return int(x0), int(y0), int(x0 + length), int(y0 + width)
+
+    @staticmethod
+    def _rect_area(rect: tuple[int, int, int, int]) -> int:
+        return max(0, int(rect[2]) - int(rect[0])) * max(0, int(rect[3]) - int(rect[1]))
+
+    @staticmethod
+    def _bbox_area(rects: Sequence[tuple[int, int, int, int]]) -> int:
+        if not rects:
+            return 0
+        min_x = min(int(rect[0]) for rect in rects)
+        min_y = min(int(rect[1]) for rect in rects)
+        max_x = max(int(rect[2]) for rect in rects)
+        max_y = max(int(rect[3]) for rect in rects)
+        return max(0, max_x - min_x) * max(0, max_y - min_y)
+
+    @staticmethod
+    def _shared_edge_len(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
+        shared = 0
+        if int(a[2]) == int(b[0]) or int(b[2]) == int(a[0]):
+            shared += max(0, min(int(a[3]), int(b[3])) - max(int(a[1]), int(b[1])))
+        if int(a[3]) == int(b[1]) or int(b[3]) == int(a[1]):
+            shared += max(0, min(int(a[2]), int(b[2])) - max(int(a[0]), int(b[0])))
+        return int(shared)
 
 
     def _apply_tower_z_penalty_scored_candidates(
