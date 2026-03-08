@@ -56,6 +56,8 @@ class PolicyConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    two_step_floor_layout_end_step: int = 0
+    two_step_floor_layout_lookahead_items: int = 6
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -176,6 +178,8 @@ class PolicyPackerScheduler:
         spatial_tower_penalty_end_step: int = 0,
         spatial_tower_target_base: int = 2,
         spatial_tower_target_step_div: int = 6,
+        two_step_floor_layout_end_step: int = 0,
+        two_step_floor_layout_lookahead_items: int = 6,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -216,6 +220,8 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=spatial_tower_penalty_end_step,
             spatial_tower_target_base=spatial_tower_target_base,
             spatial_tower_target_step_div=spatial_tower_target_step_div,
+            two_step_floor_layout_end_step=two_step_floor_layout_end_step,
+            two_step_floor_layout_lookahead_items=two_step_floor_layout_lookahead_items,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -259,6 +265,8 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
             spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            two_step_floor_layout_end_step=max(0, int(two_step_floor_layout_end_step)),
+            two_step_floor_layout_lookahead_items=max(1, int(two_step_floor_layout_lookahead_items)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -724,6 +732,24 @@ class PolicyPackerScheduler:
         spatial_tower_selected_penalty_sum = float(
             getattr(self._scheduler, "spatial_tower_selected_penalty_sum", 0.0) or 0.0
         )
+        two_step_floor_layout_eval_total = int(
+            getattr(self._scheduler, "two_step_floor_layout_eval_total", 0) or 0
+        )
+        two_step_floor_layout_candidates_scored_total = int(
+            getattr(self._scheduler, "two_step_floor_layout_candidates_scored_total", 0) or 0
+        )
+        two_step_floor_layout_tiebreak_used_total = int(
+            getattr(self._scheduler, "two_step_floor_layout_tiebreak_used_total", 0) or 0
+        )
+        two_step_floor_layout_future_floor_count_step1_sum = float(
+            getattr(self._scheduler, "two_step_floor_layout_future_floor_count_step1_sum", 0.0) or 0.0
+        )
+        two_step_floor_layout_future_floor_count_step2_sum = float(
+            getattr(self._scheduler, "two_step_floor_layout_future_floor_count_step2_sum", 0.0) or 0.0
+        )
+        two_step_floor_layout_best_score_max = float(
+            getattr(self._scheduler, "two_step_floor_layout_best_score_max", 0.0) or 0.0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -747,6 +773,16 @@ class PolicyPackerScheduler:
         kpis["spatial_tower_selected_penalty_mean"] = float(
             spatial_tower_selected_penalty_sum / max(1, spatial_tower_selected_penalty_count)
         )
+        kpis["two_step_floor_layout_eval_total"] = int(two_step_floor_layout_eval_total)
+        kpis["two_step_floor_layout_candidates_scored_total"] = int(two_step_floor_layout_candidates_scored_total)
+        kpis["two_step_floor_layout_tiebreak_used_total"] = int(two_step_floor_layout_tiebreak_used_total)
+        kpis["two_step_floor_layout_future_floor_count_step1_mean"] = float(
+            two_step_floor_layout_future_floor_count_step1_sum / max(1, two_step_floor_layout_candidates_scored_total)
+        )
+        kpis["two_step_floor_layout_future_floor_count_step2_mean"] = float(
+            two_step_floor_layout_future_floor_count_step2_sum / max(1, two_step_floor_layout_candidates_scored_total)
+        )
+        kpis["two_step_floor_layout_best_score_max"] = float(two_step_floor_layout_best_score_max)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
