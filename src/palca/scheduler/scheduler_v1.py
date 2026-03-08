@@ -45,6 +45,8 @@ class SchedulerConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    early_stand_floor_priority_end_step: int = 0
+    early_stand_floor_priority_bonus: float = 0.0
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -88,6 +90,16 @@ class SchedulerConfig:
         object.__setattr__(self, "spatial_tower_penalty_end_step", max(0, int(self.spatial_tower_penalty_end_step)))
         object.__setattr__(self, "spatial_tower_target_base", max(1, int(self.spatial_tower_target_base)))
         object.__setattr__(self, "spatial_tower_target_step_div", max(1, int(self.spatial_tower_target_step_div)))
+        object.__setattr__(
+            self,
+            "early_stand_floor_priority_end_step",
+            max(0, int(self.early_stand_floor_priority_end_step)),
+        )
+        object.__setattr__(
+            self,
+            "early_stand_floor_priority_bonus",
+            max(0.0, float(self.early_stand_floor_priority_bonus)),
+        )
 
 
 @dataclass(frozen=True)
@@ -217,6 +229,10 @@ class SchedulerV1:
         self.spatial_tower_penalty_sum = 0.0
         self.spatial_tower_selected_penalty_count = 0
         self.spatial_tower_selected_penalty_sum = 0.0
+        self.early_stand_floor_priority_triggered_total = 0
+        self.early_stand_floor_priority_floor_stand_candidates_total = 0
+        self.early_stand_floor_priority_chosen_total = 0
+        self.early_stand_floor_priority_bonus_applied_total = 0
         self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
         self._spatial_step_index_by_pallet: dict[int | str, int] = {}
         self.batchfill_calls = 0
@@ -494,6 +510,9 @@ class SchedulerV1:
                 candidates=feasible_candidates,
                 min_feasible_height_after_mm=int(min_feasible_height_after_mm),
             )
+            feasible_candidates, early_priority_triggered_pallets = self._apply_early_stand_floor_priority_scored_candidates(
+                candidates=feasible_candidates
+            )
             best_by_slack, slack_stats = choose_with_height_slack(
                 candidates=feasible_candidates,
                 score_mode=self.config.score_mode,
@@ -516,6 +535,10 @@ class SchedulerV1:
                     min_feasible_height=slack_stats.min_height_after_mm,
                 )
                 self._record_slack_decision(slack_stats)
+                self._record_early_stand_floor_priority_choice(
+                    selected_plan=selected.plan,
+                    triggered_pallet_ids=early_priority_triggered_pallets,
+                )
 
         if items_evaluated > 0 and items_feasible == 0 and not cutoff and not self.last_blocked_pallets:
             self.last_deadlock = True
@@ -565,6 +588,7 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        early_priority_triggered_pallets: set[int | str] = set()
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -623,6 +647,11 @@ class SchedulerV1:
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    expansions, triggered_pallets = self._apply_early_stand_floor_priority_to_expansions(
+                        expansions=expansions,
+                        adjust_first_plan=True,
+                    )
+                    early_priority_triggered_pallets.update(triggered_pallets)
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -707,6 +736,10 @@ class SchedulerV1:
 
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
+        self._record_early_stand_floor_priority_choice(
+            selected_plan=best_node.first_plan,
+            triggered_pallet_ids=early_priority_triggered_pallets,
+        )
         return best_node.first_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
@@ -1381,6 +1414,166 @@ class SchedulerV1:
                 continue
             out.append(exp)
         return out
+
+    def _early_stand_floor_priority_enabled(self) -> bool:
+        end_step = int(getattr(self.config, "early_stand_floor_priority_end_step", 0) or 0)
+        bonus = float(getattr(self.config, "early_stand_floor_priority_bonus", 0.0) or 0.0)
+        return bool(end_step > 0 and bonus > 0.0)
+
+    @staticmethod
+    def _preview_orientation_family(preview: PlacementPreview | None) -> str:
+        if preview is None or preview.placement is None:
+            return ""
+        return str(getattr(preview.placement, "orientation_family", "") or "").strip().lower()
+
+    @staticmethod
+    def _preview_is_floor(preview: PlacementPreview | None) -> bool:
+        if preview is None or preview.placement is None:
+            return False
+        try:
+            return int(getattr(preview.placement, "z_mm", -1)) == 0
+        except Exception:
+            return False
+
+    def _preview_is_floor_stand_hw(self, preview: PlacementPreview | None) -> bool:
+        return self._preview_is_floor(preview) and self._preview_orientation_family(preview) == "stand_hw"
+
+    def _preview_is_floor_planar(self, preview: PlacementPreview | None) -> bool:
+        return self._preview_is_floor(preview) and self._preview_orientation_family(preview) == "planar"
+
+    def _record_early_stand_floor_priority_choice(
+        self,
+        *,
+        selected_plan: PickPlan | None,
+        triggered_pallet_ids: set[int | str],
+    ) -> None:
+        if selected_plan is None or not triggered_pallet_ids:
+            return
+        if selected_plan.pallet_id not in triggered_pallet_ids:
+            return
+        if self._preview_is_floor_stand_hw(selected_plan.preview):
+            self.early_stand_floor_priority_chosen_total += 1
+
+    def _apply_early_stand_floor_priority_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+    ) -> tuple[list[_ScoredCandidate], set[int | str]]:
+        if not candidates or not self._early_stand_floor_priority_enabled():
+            return candidates, set()
+        end_step = int(getattr(self.config, "early_stand_floor_priority_end_step", 0) or 0)
+        bonus = float(getattr(self.config, "early_stand_floor_priority_bonus", 0.0) or 0.0)
+
+        grouped: dict[int | str, list[int]] = {}
+        for idx, cand in enumerate(candidates):
+            grouped.setdefault(cand.plan.pallet_id, []).append(idx)
+
+        out = list(candidates)
+        triggered_pallet_ids: set[int | str] = set()
+        for pallet_id, idxs in grouped.items():
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+            if step_idx >= end_step:
+                continue
+            floor_stand_idxs = [
+                idx
+                for idx in idxs
+                if self._preview_is_floor_stand_hw(candidates[idx].plan.preview)
+            ]
+            if not floor_stand_idxs:
+                continue
+            floor_planar_idxs = [
+                idx
+                for idx in idxs
+                if self._preview_is_floor_planar(candidates[idx].plan.preview)
+            ]
+            if not floor_planar_idxs:
+                continue
+
+            self.early_stand_floor_priority_floor_stand_candidates_total += len(floor_stand_idxs)
+
+            floor_idxs = list(floor_stand_idxs) + list(floor_planar_idxs)
+            best_floor_idx = max(
+                floor_idxs,
+                key=lambda i: self._gain_frag_candidate_key(candidates[i]),
+            )
+            if best_floor_idx in floor_stand_idxs:
+                continue
+
+            self.early_stand_floor_priority_triggered_total += 1
+            triggered_pallet_ids.add(pallet_id)
+            for idx in floor_stand_idxs:
+                cand = out[idx]
+                new_terms = replace(
+                    cand.terms,
+                    scalar_score=float(cand.terms.scalar_score) + float(bonus),
+                )
+                new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
+                out[idx] = _ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms)
+                self.early_stand_floor_priority_bonus_applied_total += 1
+        return out, triggered_pallet_ids
+
+    def _apply_early_stand_floor_priority_to_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        adjust_first_plan: bool,
+    ) -> tuple[list[_BeamExpansion], set[int | str]]:
+        if not expansions or not self._early_stand_floor_priority_enabled():
+            return expansions, set()
+        end_step = int(getattr(self.config, "early_stand_floor_priority_end_step", 0) or 0)
+        bonus = float(getattr(self.config, "early_stand_floor_priority_bonus", 0.0) or 0.0)
+
+        grouped: dict[int | str, list[int]] = {}
+        for idx, exp in enumerate(expansions):
+            first_plan = exp.node.first_plan
+            if first_plan is None:
+                continue
+            grouped.setdefault(first_plan.pallet_id, []).append(idx)
+
+        out = list(expansions)
+        triggered_pallet_ids: set[int | str] = set()
+        for pallet_id, idxs in grouped.items():
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0))
+            if step_idx >= end_step:
+                continue
+            floor_stand_idxs = []
+            floor_planar_idxs = []
+            for idx in idxs:
+                first_plan = out[idx].node.first_plan
+                preview = first_plan.preview if first_plan is not None else None
+                if self._preview_is_floor_stand_hw(preview):
+                    floor_stand_idxs.append(idx)
+                elif self._preview_is_floor_planar(preview):
+                    floor_planar_idxs.append(idx)
+            if not floor_stand_idxs or not floor_planar_idxs:
+                continue
+
+            self.early_stand_floor_priority_floor_stand_candidates_total += len(floor_stand_idxs)
+            floor_idxs = list(floor_stand_idxs) + list(floor_planar_idxs)
+            best_floor_idx = max(
+                floor_idxs,
+                key=lambda i: self._beam_expansion_gain_frag_key(out[i]),
+            )
+            if best_floor_idx in floor_stand_idxs:
+                continue
+
+            self.early_stand_floor_priority_triggered_total += 1
+            triggered_pallet_ids.add(pallet_id)
+            for idx in floor_stand_idxs:
+                exp = out[idx]
+                exp.node.score_sum = float(exp.node.score_sum) + float(bonus)
+                if adjust_first_plan and exp.node.first_plan is not None:
+                    exp.node.first_plan = replace(
+                        exp.node.first_plan,
+                        score=float(exp.node.first_plan.score) + float(bonus),
+                    )
+                new_terms = replace(
+                    exp.terms,
+                    scalar_score=float(exp.terms.scalar_score) + float(bonus),
+                )
+                out[idx] = _BeamExpansion(node=exp.node, box=exp.box, terms=new_terms)
+                self.early_stand_floor_priority_bonus_applied_total += 1
+        return out, triggered_pallet_ids
 
     def _rebuild_spatial_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
         self._spatial_bin_counts = {}

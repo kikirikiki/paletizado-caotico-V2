@@ -56,6 +56,8 @@ class PolicyConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    early_stand_floor_priority_end_step: int = 0
+    early_stand_floor_priority_bonus: float = 0.0
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -176,6 +178,8 @@ class PolicyPackerScheduler:
         spatial_tower_penalty_end_step: int = 0,
         spatial_tower_target_base: int = 2,
         spatial_tower_target_step_div: int = 6,
+        early_stand_floor_priority_end_step: int = 0,
+        early_stand_floor_priority_bonus: float = 0.0,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -216,6 +220,8 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=spatial_tower_penalty_end_step,
             spatial_tower_target_base=spatial_tower_target_base,
             spatial_tower_target_step_div=spatial_tower_target_step_div,
+            early_stand_floor_priority_end_step=early_stand_floor_priority_end_step,
+            early_stand_floor_priority_bonus=early_stand_floor_priority_bonus,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -259,6 +265,8 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
             spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            early_stand_floor_priority_end_step=max(0, int(early_stand_floor_priority_end_step)),
+            early_stand_floor_priority_bonus=max(0.0, float(early_stand_floor_priority_bonus)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -724,6 +732,24 @@ class PolicyPackerScheduler:
         spatial_tower_selected_penalty_sum = float(
             getattr(self._scheduler, "spatial_tower_selected_penalty_sum", 0.0) or 0.0
         )
+        early_stand_floor_priority_end_step = int(
+            getattr(self._scheduler.config, "early_stand_floor_priority_end_step", 0) or 0
+        )
+        early_stand_floor_priority_bonus = float(
+            getattr(self._scheduler.config, "early_stand_floor_priority_bonus", 0.0) or 0.0
+        )
+        early_stand_floor_priority_triggered_total = int(
+            getattr(self._scheduler, "early_stand_floor_priority_triggered_total", 0) or 0
+        )
+        early_stand_floor_priority_floor_stand_candidates_total = int(
+            getattr(self._scheduler, "early_stand_floor_priority_floor_stand_candidates_total", 0) or 0
+        )
+        early_stand_floor_priority_chosen_total = int(
+            getattr(self._scheduler, "early_stand_floor_priority_chosen_total", 0) or 0
+        )
+        early_stand_floor_priority_bonus_applied_total = int(
+            getattr(self._scheduler, "early_stand_floor_priority_bonus_applied_total", 0) or 0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -746,6 +772,16 @@ class PolicyPackerScheduler:
         kpis["spatial_tower_selected_penalty_count"] = int(spatial_tower_selected_penalty_count)
         kpis["spatial_tower_selected_penalty_mean"] = float(
             spatial_tower_selected_penalty_sum / max(1, spatial_tower_selected_penalty_count)
+        )
+        kpis["early_stand_floor_priority_end_step"] = int(early_stand_floor_priority_end_step)
+        kpis["early_stand_floor_priority_bonus"] = float(early_stand_floor_priority_bonus)
+        kpis["early_stand_floor_priority_triggered_total"] = int(early_stand_floor_priority_triggered_total)
+        kpis["early_stand_floor_priority_floor_stand_candidates_total"] = int(
+            early_stand_floor_priority_floor_stand_candidates_total
+        )
+        kpis["early_stand_floor_priority_chosen_total"] = int(early_stand_floor_priority_chosen_total)
+        kpis["early_stand_floor_priority_bonus_applied_total"] = int(
+            early_stand_floor_priority_bonus_applied_total
         )
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)

@@ -208,6 +208,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=400,
         help="Permite stand_hw solo si (max_height-current_height) <= gate (mm).",
     )
+    parser.add_argument(
+        "--early-stand-floor-priority-end-step",
+        type=int,
+        default=0,
+        help="Paso límite (exclusivo) para priorizar stand_hw en suelo al inicio (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--early-stand-floor-priority-bonus",
+        type=float,
+        default=0.0,
+        help="Bonus de score para favorecer stand_hw en suelo durante la ventana early.",
+    )
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
     parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
@@ -433,6 +445,8 @@ def run_simulation(
     spatial_tower_target_step_div: int = 6,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
+    early_stand_floor_priority_end_step: int = 0,
+    early_stand_floor_priority_bonus: float = 0.0,
     time_budget_ms: int = 120,
     micro_plan: bool = False,
     micro_depth: int = 3,
@@ -628,6 +642,8 @@ def run_simulation(
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
+            early_stand_floor_priority_end_step=max(0, int(early_stand_floor_priority_end_step)),
+            early_stand_floor_priority_bonus=max(0.0, float(early_stand_floor_priority_bonus)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -737,6 +753,8 @@ def run_simulation(
             "spatial_tower_target_step_div": int(max(1, int(spatial_tower_target_step_div))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
+            "early_stand_floor_priority_end_step": int(max(0, int(early_stand_floor_priority_end_step))),
+            "early_stand_floor_priority_bonus": float(max(0.0, float(early_stand_floor_priority_bonus))),
             "time_budget_ms": time_budget_ms,
             "micro_plan": bool(micro_plan),
             "micro_depth": int(micro_depth),
@@ -837,6 +855,8 @@ def main() -> None:
         spatial_tower_target_step_div=int(args.spatial_tower_target_step_div),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
+        early_stand_floor_priority_end_step=int(args.early_stand_floor_priority_end_step),
+        early_stand_floor_priority_bonus=float(args.early_stand_floor_priority_bonus),
         time_budget_ms=args.time_budget_ms,
         micro_plan=bool(args.micro_plan),
         micro_depth=int(args.micro_depth),
