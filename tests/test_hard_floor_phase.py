@@ -82,6 +82,33 @@ def _box(box_id: int) -> Box:
     )
 
 
+def _placement(
+    *,
+    box_id: int,
+    z_mm: int,
+    x_mm: int,
+    y_mm: int,
+    length_mm: int,
+    width_mm: int,
+    height_mm: int,
+    orientation_family: str | None = None,
+    orientation_name: str | None = None,
+) -> Placement:
+    return Placement(
+        x_mm=int(x_mm),
+        y_mm=int(y_mm),
+        z_mm=int(z_mm),
+        rot90=False,
+        layer_id=0 if int(z_mm) == 0 else 1,
+        length_mm=int(length_mm),
+        width_mm=int(width_mm),
+        height_mm=int(height_mm),
+        box_id=int(box_id),
+        orientation_family=orientation_family,
+        orientation_name=orientation_name,
+    )
+
+
 def _sim_state(*, boxes: list[Box], pallet: FakePallet) -> SchedulerSimState:
     return SchedulerSimState(
         now=0.0,
@@ -139,45 +166,130 @@ def test_hard_floor_phase_exits_when_no_floor_candidates_and_falls_back_to_norma
     assert int(scheduler.hard_floor_phase_exit_no_floor_total) == 1
 
 
-def test_hard_floor_phase_can_choose_stand_hw_on_floor_when_base_improves() -> None:
+def test_hard_floor_phase_stand_mix_bonus_can_choose_stand_hw_on_floor() -> None:
     pallet = FakePallet(
         {
             1: PreviewSpec(
                 z_mm=0,
-                x_mm=0,
+                x_mm=60,
                 y_mm=0,
-                length_mm=30,
-                width_mm=30,
+                length_mm=60,
+                width_mm=40,
                 height_mm=50,
-                packing_gain=9.0,
+                packing_gain=3.0,
                 orientation_family="planar",
                 orientation_name="planar_lw",
             ),
             2: PreviewSpec(
                 z_mm=0,
                 x_mm=0,
-                y_mm=0,
-                length_mm=80,
-                width_mm=80,
+                y_mm=40,
+                length_mm=40,
+                width_mm=60,
                 height_mm=30,
-                packing_gain=0.1,
+                packing_gain=3.0,
                 orientation_family="stand_hw",
                 orientation_name="stand_hw_lh",
             ),
         }
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=100,
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=60,
+            width_mm=40,
+            height_mm=30,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_seed",
+        )
     )
     scheduler = SchedulerV1(
         SchedulerConfig(
             lookahead_k=2,
             hard_floor_phase_end_step=3,
             hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
         )
     )
 
     plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
     assert plan is not None
     assert str(plan.preview.placement.orientation_family) == "stand_hw"
+    assert int(scheduler.hard_floor_phase_stand_mix_candidates_total) == 1
+    assert int(scheduler.hard_floor_phase_stand_mix_bonus_applied_total) == 1
+    assert int(scheduler.hard_floor_phase_stand_mix_chosen_total) == 1
     assert int(scheduler.hard_floor_phase_stand_hw_chosen_total) == 1
+
+
+def test_hard_floor_phase_stand_mix_bonus_zero_keeps_current_behavior() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=60,
+            y_mm=0,
+            length_mm=60,
+            width_mm=40,
+            height_mm=50,
+            packing_gain=3.0,
+            orientation_family="planar",
+            orientation_name="planar_lw",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=40,
+            length_mm=40,
+            width_mm=60,
+            height_mm=30,
+            packing_gain=3.0,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_lh",
+        ),
+    }
+    pallet_a = FakePallet(previews)
+    pallet_b = FakePallet(previews)
+    seed = _placement(
+        box_id=100,
+        z_mm=0,
+        x_mm=0,
+        y_mm=0,
+        length_mm=60,
+        width_mm=40,
+        height_mm=30,
+        orientation_family="stand_hw",
+        orientation_name="stand_hw_seed",
+    )
+    pallet_a.placements.append(seed)
+    pallet_b.placements.append(seed)
+    baseline = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+        )
+    )
+    with_zero_bonus = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=0.0,
+        )
+    )
+
+    baseline_plan = baseline.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_a))
+    zero_bonus_plan = with_zero_bonus.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_b))
+
+    assert baseline_plan is not None and zero_bonus_plan is not None
+    assert str(baseline_plan.preview.placement.orientation_family) == "planar"
+    assert str(zero_bonus_plan.preview.placement.orientation_family) == str(
+        baseline_plan.preview.placement.orientation_family
+    )
+    assert int(with_zero_bonus.hard_floor_phase_stand_mix_bonus_applied_total) == 0
+    assert int(with_zero_bonus.hard_floor_phase_stand_mix_chosen_total) == 0
 
 
 def test_hard_floor_phase_disabled_mode_keeps_existing_behavior() -> None:
@@ -227,6 +339,7 @@ def test_hard_floor_phase_applies_same_root_logic_with_micro_planner_depth0() ->
             micro_plan_topk_per_step=6,
             hard_floor_phase_end_step=4,
             hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=0.7,
         )
     )
 
@@ -241,6 +354,7 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
         hard_floor_phase_end_step=8,
         hard_floor_phase_min_base_candidates=1,
         hard_floor_phase_lookahead_items=9,
+        hard_floor_phase_stand_mix_bonus=0.5,
     )
     policy._scheduler.hard_floor_phase_active_total = 3
     policy._scheduler.hard_floor_phase_floor_candidates_seen_total = 12
@@ -249,6 +363,9 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.hard_floor_phase_exit_no_floor_total = 1
     policy._scheduler.hard_floor_phase_exit_end_step_total = 1
     policy._scheduler.hard_floor_phase_score_sum = 5.0
+    policy._scheduler.hard_floor_phase_stand_mix_bonus_applied_total = 4
+    policy._scheduler.hard_floor_phase_stand_mix_candidates_total = 6
+    policy._scheduler.hard_floor_phase_stand_mix_chosen_total = 1
 
     kpis = policy.collect_kpis()
 
@@ -258,4 +375,8 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_stand_hw_chosen_total"]) == 1
     assert int(kpis["hard_floor_phase_exit_no_floor_total"]) == 1
     assert int(kpis["hard_floor_phase_exit_end_step_total"]) == 1
+    assert float(kpis["hard_floor_phase_stand_mix_bonus"]) == 0.5
+    assert int(kpis["hard_floor_phase_stand_mix_bonus_applied_total"]) == 4
+    assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
+    assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5
