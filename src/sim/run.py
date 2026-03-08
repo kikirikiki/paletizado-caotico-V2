@@ -197,6 +197,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cada N pasos sube en +1 el target espacial por bin.",
     )
     parser.add_argument(
+        "--hard-floor-phase-end-step",
+        type=int,
+        default=0,
+        help="Fase dura de base: durante los primeros N placements solo permite z==0 (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-min-base-candidates",
+        type=int,
+        default=1,
+        help="Minimo de candidatos en suelo para mantener fase dura; si cae por debajo, se desactiva.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-lookahead-items",
+        type=int,
+        default=8,
+        help="Limite de lookahead por rampa durante fase dura de base.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -431,6 +449,9 @@ def run_simulation(
     spatial_tower_penalty_end_step: int = 0,
     spatial_tower_target_base: int = 2,
     spatial_tower_target_step_div: int = 6,
+    hard_floor_phase_end_step: int = 0,
+    hard_floor_phase_min_base_candidates: int = 1,
+    hard_floor_phase_lookahead_items: int = 8,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -626,6 +647,9 @@ def run_simulation(
             spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
             spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            hard_floor_phase_end_step=max(0, int(hard_floor_phase_end_step)),
+            hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
+            hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -735,6 +759,9 @@ def run_simulation(
             "spatial_tower_penalty_end_step": int(max(0, int(spatial_tower_penalty_end_step))),
             "spatial_tower_target_base": int(max(1, int(spatial_tower_target_base))),
             "spatial_tower_target_step_div": int(max(1, int(spatial_tower_target_step_div))),
+            "hard_floor_phase_end_step": int(max(0, int(hard_floor_phase_end_step))),
+            "hard_floor_phase_min_base_candidates": int(max(1, int(hard_floor_phase_min_base_candidates))),
+            "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -835,6 +862,9 @@ def main() -> None:
         spatial_tower_penalty_end_step=int(args.spatial_tower_penalty_end_step),
         spatial_tower_target_base=int(args.spatial_tower_target_base),
         spatial_tower_target_step_div=int(args.spatial_tower_target_step_div),
+        hard_floor_phase_end_step=int(args.hard_floor_phase_end_step),
+        hard_floor_phase_min_base_candidates=int(args.hard_floor_phase_min_base_candidates),
+        hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,

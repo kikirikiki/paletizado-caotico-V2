@@ -56,6 +56,9 @@ class PolicyConfig:
     spatial_tower_penalty_end_step: int = 0
     spatial_tower_target_base: int = 2
     spatial_tower_target_step_div: int = 6
+    hard_floor_phase_end_step: int = 0
+    hard_floor_phase_min_base_candidates: int = 1
+    hard_floor_phase_lookahead_items: int = 8
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -176,6 +179,9 @@ class PolicyPackerScheduler:
         spatial_tower_penalty_end_step: int = 0,
         spatial_tower_target_base: int = 2,
         spatial_tower_target_step_div: int = 6,
+        hard_floor_phase_end_step: int = 0,
+        hard_floor_phase_min_base_candidates: int = 1,
+        hard_floor_phase_lookahead_items: int = 8,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -216,6 +222,9 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=spatial_tower_penalty_end_step,
             spatial_tower_target_base=spatial_tower_target_base,
             spatial_tower_target_step_div=spatial_tower_target_step_div,
+            hard_floor_phase_end_step=hard_floor_phase_end_step,
+            hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
+            hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -259,6 +268,9 @@ class PolicyPackerScheduler:
             spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
             spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
             spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            hard_floor_phase_end_step=max(0, int(hard_floor_phase_end_step)),
+            hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
+            hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -724,6 +736,28 @@ class PolicyPackerScheduler:
         spatial_tower_selected_penalty_sum = float(
             getattr(self._scheduler, "spatial_tower_selected_penalty_sum", 0.0) or 0.0
         )
+        hard_floor_phase_end_step = int(getattr(self._scheduler.config, "hard_floor_phase_end_step", 0) or 0)
+        hard_floor_phase_min_base_candidates = int(
+            getattr(self._scheduler.config, "hard_floor_phase_min_base_candidates", 1) or 1
+        )
+        hard_floor_phase_lookahead_items = int(
+            getattr(self._scheduler.config, "hard_floor_phase_lookahead_items", 8) or 8
+        )
+        hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
+        hard_floor_phase_floor_candidates_seen_total = int(
+            getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
+        )
+        hard_floor_phase_chosen_total = int(getattr(self._scheduler, "hard_floor_phase_chosen_total", 0) or 0)
+        hard_floor_phase_stand_hw_chosen_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_hw_chosen_total", 0) or 0
+        )
+        hard_floor_phase_exit_no_floor_total = int(
+            getattr(self._scheduler, "hard_floor_phase_exit_no_floor_total", 0) or 0
+        )
+        hard_floor_phase_exit_end_step_total = int(
+            getattr(self._scheduler, "hard_floor_phase_exit_end_step_total", 0) or 0
+        )
+        hard_floor_phase_score_sum = float(getattr(self._scheduler, "hard_floor_phase_score_sum", 0.0) or 0.0)
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -746,6 +780,18 @@ class PolicyPackerScheduler:
         kpis["spatial_tower_selected_penalty_count"] = int(spatial_tower_selected_penalty_count)
         kpis["spatial_tower_selected_penalty_mean"] = float(
             spatial_tower_selected_penalty_sum / max(1, spatial_tower_selected_penalty_count)
+        )
+        kpis["hard_floor_phase_end_step"] = int(hard_floor_phase_end_step)
+        kpis["hard_floor_phase_min_base_candidates"] = int(hard_floor_phase_min_base_candidates)
+        kpis["hard_floor_phase_lookahead_items"] = int(hard_floor_phase_lookahead_items)
+        kpis["hard_floor_phase_active_total"] = int(hard_floor_phase_active_total)
+        kpis["hard_floor_phase_floor_candidates_seen_total"] = int(hard_floor_phase_floor_candidates_seen_total)
+        kpis["hard_floor_phase_chosen_total"] = int(hard_floor_phase_chosen_total)
+        kpis["hard_floor_phase_stand_hw_chosen_total"] = int(hard_floor_phase_stand_hw_chosen_total)
+        kpis["hard_floor_phase_exit_no_floor_total"] = int(hard_floor_phase_exit_no_floor_total)
+        kpis["hard_floor_phase_exit_end_step_total"] = int(hard_floor_phase_exit_end_step_total)
+        kpis["hard_floor_phase_score_mean"] = float(
+            hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
