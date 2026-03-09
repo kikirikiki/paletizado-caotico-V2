@@ -40,6 +40,9 @@ class EarlyStandDecision:
     projected_placed_loss: int = 0
     projected_lfr_loss_ratio: float = 0.0
     projected_height_std_increase_mm: float = 0.0
+    projected_access_mouth_delta_mm: float = 0.0
+    projected_access_inaccessible_pocket_delta_mm2: float = 0.0
+    projected_access_boundary_connected_free_area_delta_mm2: float = 0.0
     debug_payload: dict[str, Any] | None = None
 
 
@@ -250,6 +253,13 @@ def admit_early_stands(
             preview_fn=preview_fn,
             lookahead_items=lookahead_items,
         )
+        mouth_delta_mm = float(stand_metrics.min_boundary_mouth_mm) - float(baseline_metrics.min_boundary_mouth_mm)
+        inaccessible_pocket_delta_mm2 = float(stand_metrics.inaccessible_pocket_area_mm2) - float(
+            baseline_metrics.inaccessible_pocket_area_mm2
+        )
+        boundary_connected_free_area_delta_mm2 = float(stand_metrics.boundary_connected_free_area_mm2) - float(
+            baseline_metrics.boundary_connected_free_area_mm2
+        )
         ok_regret, placed_loss, lfr_loss_ratio, height_std_increase = passes_regret_gate(
             baseline=baseline_metrics,
             candidate=stand_metrics,
@@ -264,6 +274,9 @@ def admit_early_stands(
                     projected_placed_loss=int(placed_loss),
                     projected_lfr_loss_ratio=float(lfr_loss_ratio),
                     projected_height_std_increase_mm=float(height_std_increase),
+                    projected_access_mouth_delta_mm=float(mouth_delta_mm),
+                    projected_access_inaccessible_pocket_delta_mm2=float(inaccessible_pocket_delta_mm2),
+                    projected_access_boundary_connected_free_area_delta_mm2=float(boundary_connected_free_area_delta_mm2),
                     debug_payload=_build_reject_debug_payload(
                         step_idx=int(step_idx),
                         pallet_id=pallet_id,
@@ -292,6 +305,9 @@ def admit_early_stands(
                     projected_placed_loss=int(placed_loss),
                     projected_lfr_loss_ratio=float(lfr_loss_ratio),
                     projected_height_std_increase_mm=float(height_std_increase),
+                    projected_access_mouth_delta_mm=float(mouth_delta_mm),
+                    projected_access_inaccessible_pocket_delta_mm2=float(inaccessible_pocket_delta_mm2),
+                    projected_access_boundary_connected_free_area_delta_mm2=float(boundary_connected_free_area_delta_mm2),
                     debug_payload=_build_reject_debug_payload(
                         step_idx=int(step_idx),
                         pallet_id=pallet_id,
@@ -315,6 +331,9 @@ def admit_early_stands(
                 projected_placed_loss=int(placed_loss),
                 projected_lfr_loss_ratio=float(lfr_loss_ratio),
                 projected_height_std_increase_mm=float(height_std_increase),
+                projected_access_mouth_delta_mm=float(mouth_delta_mm),
+                projected_access_inaccessible_pocket_delta_mm2=float(inaccessible_pocket_delta_mm2),
+                projected_access_boundary_connected_free_area_delta_mm2=float(boundary_connected_free_area_delta_mm2),
             )
         )
 

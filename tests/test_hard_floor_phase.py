@@ -411,6 +411,22 @@ def test_hard_floor_phase_policy_off_keeps_legacy_behavior() -> None:
             hard_floor_phase_early_stand_policy="off",
         )
     )
+
+    def fail_regret_selector(
+        self: SchedulerV1,
+        *,
+        best_planar_pair: tuple[object, float],
+        best_admitted_pair: tuple[object, float],
+        best_admitted_decision: object | None,
+    ) -> int:
+        _ = self, best_planar_pair, best_admitted_pair, best_admitted_decision
+        raise AssertionError("regret-aware selector must not run in policy=off")
+
+    policy_off.choose_between_best_planar_and_best_admitted_stand = MethodType(  # type: ignore[method-assign]
+        fail_regret_selector,
+        policy_off,
+    )
+
     legacy_plan = legacy.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_legacy))
     off_plan = policy_off.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_off))
     assert legacy_plan is not None and off_plan is not None
@@ -788,7 +804,7 @@ def test_hard_floor_phase_regret_gated_limits_to_one_early_stand_per_pallet() ->
     assert str(sample["final_chosen_candidate"]["type"]) == "stand_hw"
 
 
-def test_hard_floor_phase_regret_gated_admitted_stand_can_lose_vs_planar() -> None:
+def test_hard_floor_phase_regret_gated_admitted_stand_can_win_vs_planar_with_worse_local_score() -> None:
     pallet = FakePallet(
         {
             1: PreviewSpec(
@@ -873,6 +889,120 @@ def test_hard_floor_phase_regret_gated_admitted_stand_can_lose_vs_planar() -> No
             projected_placed_loss=0,
             projected_lfr_loss_ratio=0.0,
             projected_height_std_increase_mm=0.0,
+            projected_access_mouth_delta_mm=12.0,
+            projected_access_inaccessible_pocket_delta_mm2=-50.0,
+            projected_access_boundary_connected_free_area_delta_mm2=180.0,
+            debug_payload=None,
+        )
+        return [admitted_idx], [decision], baseline
+
+    scheduler_v1_module.admit_early_stands = force_admit_first_stand  # type: ignore[assignment]
+    try:
+        plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    finally:
+        scheduler_v1_module.admit_early_stands = original_admit  # type: ignore[assignment]
+
+    assert plan is not None
+    assert str(plan.preview.placement.orientation_family) == "stand_hw"
+    assert int(scheduler.early_stand_admitted_total) == 1
+    assert int(scheduler.early_stand_selected_total) == 1
+    assert int(scheduler.early_stand_admitted_but_not_selected_total) == 0
+    assert int(scheduler.hard_floor_phase_stand_hw_chosen_total) == 1
+    assert len(scheduler.early_stand_ranking_debug_samples) >= 1
+    sample = scheduler.early_stand_ranking_debug_samples[0]
+    assert bool(sample["admitted_stand_reinserted_to_final_pool"]) is True
+    assert float(sample["best_planar_final_score"]) > float(sample["best_admitted_stand_final_score"])
+    assert str(sample["final_chosen_candidate"]["type"]) == "stand_hw"
+
+
+def test_hard_floor_phase_regret_gated_planar_keeps_priority_when_admitted_stand_has_worse_structural_metrics() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="planar",
+                orientation_name="planar_a",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=70,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_a",
+            ),
+        },
+        bin_length_mm=240,
+        bin_width_mm=240,
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_max_count=1,
+            hard_floor_phase_early_stand_min_access_mouth_mm=20,
+        )
+    )
+
+    def planar_pref_score(
+        self: SchedulerV1,
+        *,
+        pallet: FakePallet,  # type: ignore[override]
+        preview: PlacementPreview,
+        future_boxes: list[Box] | None = None,
+        selected_box: Box | None = None,
+        include_stand_bias: bool = True,
+    ) -> float:
+        _ = pallet, future_boxes, selected_box, include_stand_bias
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return -1e9
+        family = str(getattr(placement, "orientation_family", "") or "").lower()
+        return 10.0 if family == "planar" else 5.0
+
+    scheduler._hard_floor_phase_score_preview = MethodType(planar_pref_score, scheduler)  # type: ignore[method-assign]
+
+    original_admit = scheduler_v1_module.admit_early_stands
+
+    def force_admit_first_stand(
+        *,
+        config: HardFloorEarlyStandConfig,
+        stand_candidates: list[tuple[int, PlacementPreview, Box]],
+        **_: object,
+    ) -> tuple[list[int], list[object], HardFloorFutureMetrics]:
+        baseline = HardFloorFutureMetrics(
+            placed_count=0,
+            largest_free_rect_area_mm2=0.0,
+            free_components=1,
+            inaccessible_pocket_area_mm2=0.0,
+            boundary_connected_free_area_mm2=0.0,
+            height_std_mm=0.0,
+            min_boundary_mouth_mm=float(config.min_access_mouth_mm),
+        )
+        if not stand_candidates:
+            return [], [], baseline
+        admitted_idx = int(stand_candidates[0][0])
+        decision = SimpleNamespace(
+            candidate_index=admitted_idx,
+            admitted=True,
+            reject_reason="",
+            projected_placed_loss=1,
+            projected_lfr_loss_ratio=0.2,
+            projected_height_std_increase_mm=15.0,
+            projected_access_mouth_delta_mm=-10.0,
+            projected_access_inaccessible_pocket_delta_mm2=100.0,
+            projected_access_boundary_connected_free_area_delta_mm2=-80.0,
             debug_payload=None,
         )
         return [admitted_idx], [decision], baseline
@@ -949,6 +1079,22 @@ def test_hard_floor_phase_regret_gated_ignores_legacy_stand_mix_bonus() -> None:
             hard_floor_phase_early_stand_policy="bonus",
         )
     )
+
+    def fail_regret_selector(
+        self: SchedulerV1,
+        *,
+        best_planar_pair: tuple[object, float],
+        best_admitted_pair: tuple[object, float],
+        best_admitted_decision: object | None,
+    ) -> int:
+        _ = self, best_planar_pair, best_admitted_pair, best_admitted_decision
+        raise AssertionError("regret-aware selector must not run in policy=bonus")
+
+    bonus_mode.choose_between_best_planar_and_best_admitted_stand = MethodType(  # type: ignore[method-assign]
+        fail_regret_selector,
+        bonus_mode,
+    )
+
     regret_mode = SchedulerV1(
         SchedulerConfig(
             lookahead_k=2,
