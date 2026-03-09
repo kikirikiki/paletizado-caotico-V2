@@ -7,6 +7,7 @@ from typing import Callable
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
 from palca.integration.policy_packer_sched import PolicyPackerScheduler
+from palca.scheduler.hard_floor_early_stand import HardFloorEarlyStandConfig, HardFloorFutureMetrics, passes_access_gate
 from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, SchedulerV1
 
 
@@ -141,6 +142,42 @@ def _sim_state(*, boxes: list[Box], pallet: FakePallet) -> SchedulerSimState:
         pallet_blocked=set(),
         remaining_total=len(boxes),
     )
+
+
+def _future_metrics_for_access_gate(*, mouth_mm: float) -> HardFloorFutureMetrics:
+    return HardFloorFutureMetrics(
+        placed_count=0,
+        largest_free_rect_area_mm2=0.0,
+        free_components=1,
+        inaccessible_pocket_area_mm2=0.0,
+        boundary_connected_free_area_mm2=1_000.0,
+        height_std_mm=0.0,
+        min_boundary_mouth_mm=float(mouth_mm),
+    )
+
+
+def test_access_gate_mouth_passes_when_baseline_below_threshold_and_stand_matches_baseline() -> None:
+    config = HardFloorEarlyStandConfig(min_access_mouth_mm=180)
+    baseline = _future_metrics_for_access_gate(mouth_mm=42.0)
+    stand = _future_metrics_for_access_gate(mouth_mm=42.0)
+
+    assert passes_access_gate(baseline=baseline, candidate=stand, config=config)
+
+
+def test_access_gate_mouth_fails_when_baseline_below_threshold_and_stand_is_worse() -> None:
+    config = HardFloorEarlyStandConfig(min_access_mouth_mm=180)
+    baseline = _future_metrics_for_access_gate(mouth_mm=42.0)
+    stand = _future_metrics_for_access_gate(mouth_mm=41.0)
+
+    assert not passes_access_gate(baseline=baseline, candidate=stand, config=config)
+
+
+def test_access_gate_mouth_fails_when_baseline_above_threshold_and_stand_drops_below_threshold() -> None:
+    config = HardFloorEarlyStandConfig(min_access_mouth_mm=180)
+    baseline = _future_metrics_for_access_gate(mouth_mm=200.0)
+    stand = _future_metrics_for_access_gate(mouth_mm=179.0)
+
+    assert not passes_access_gate(baseline=baseline, candidate=stand, config=config)
 
 
 def test_hard_floor_phase_never_chooses_stacking_while_floor_exists() -> None:
@@ -506,6 +543,11 @@ def test_hard_floor_phase_regret_gated_rejects_when_projected_placed_loss_increa
 
 
 def test_hard_floor_phase_regret_gated_rejects_when_access_mouth_is_too_small() -> None:
+    def block_stand_after_first_place(box: Box, placements: list[Placement]) -> bool:
+        if int(box.box_id) == 2 and placements:
+            return False
+        return True
+
     pallet = FakePallet(
         {
             1: PreviewSpec(
@@ -533,6 +575,7 @@ def test_hard_floor_phase_regret_gated_rejects_when_access_mouth_is_too_small() 
         },
         bin_length_mm=200,
         bin_width_mm=200,
+        feasible_if=block_stand_after_first_place,
     )
     scheduler = SchedulerV1(
         SchedulerConfig(
@@ -573,6 +616,11 @@ def test_hard_floor_phase_regret_gated_rejects_when_access_mouth_is_too_small() 
 
 
 def test_hard_floor_phase_regret_gated_rejected_stand_cannot_enter_legacy_pool() -> None:
+    def block_stand_after_first_place(box: Box, placements: list[Placement]) -> bool:
+        if int(box.box_id) == 2 and placements:
+            return False
+        return True
+
     pallet = FakePallet(
         {
             1: PreviewSpec(
@@ -600,6 +648,7 @@ def test_hard_floor_phase_regret_gated_rejected_stand_cannot_enter_legacy_pool()
         },
         bin_length_mm=200,
         bin_width_mm=200,
+        feasible_if=block_stand_after_first_place,
     )
     scheduler = SchedulerV1(
         SchedulerConfig(

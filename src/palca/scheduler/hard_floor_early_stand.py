@@ -342,11 +342,13 @@ def _evaluate_access_gate(
         checks.append("boundary_connected_free_area_mm2_drop")
         details.append(f"boundary_connected_free_area_mm2({candidate_connected:.1f}<{baseline_connected:.1f})")
 
+    baseline_mouth = float(baseline.min_boundary_mouth_mm)
     candidate_mouth = float(candidate.min_boundary_mouth_mm)
     min_mouth = float(config.min_access_mouth_mm)
-    if candidate_mouth < min_mouth:
+    required_mouth = min_mouth if baseline_mouth >= min_mouth else baseline_mouth
+    if candidate_mouth < required_mouth:
         checks.append("min_boundary_mouth_mm_below_threshold")
-        details.append(f"min_boundary_mouth_mm({candidate_mouth:.1f}<{min_mouth:.1f})")
+        details.append(f"min_boundary_mouth_mm({candidate_mouth:.1f}<{required_mouth:.1f})")
 
     return AccessGateEvaluation(
         passed=len(checks) == 0,
