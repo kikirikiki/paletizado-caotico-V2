@@ -550,6 +550,26 @@ def test_hard_floor_phase_regret_gated_rejects_when_access_mouth_is_too_small() 
     assert int(scheduler.early_stand_selected_total) == 0
     assert int(scheduler.hard_floor_phase_stand_hw_chosen_total) == 0
     assert int(scheduler.early_stand_reject_access_total) >= 1
+    assert int(scheduler.early_stand_reject_debug_total) >= 1
+    assert len(scheduler.early_stand_reject_debug_samples) >= 1
+    sample = scheduler.early_stand_reject_debug_samples[0]
+    assert str(sample["reject_reason"]) == "access"
+    assert "min_boundary_mouth_mm_below_threshold" in list(sample["access_reject_checks"])
+    assert "min_boundary_mouth_mm(" in str(sample["access_reject_reason"])
+    assert int(sample["step"]) == 0
+    assert int(sample["pallet_id"]) == 1
+    assert sample["boundary_connected_free_area_mm2"]["baseline"] is not None
+    assert sample["boundary_connected_free_area_mm2"]["stand"] is not None
+    assert sample["inaccessible_pocket_area_mm2"]["baseline"] is not None
+    assert sample["inaccessible_pocket_area_mm2"]["stand"] is not None
+    assert sample["min_boundary_mouth_mm"]["baseline"] is not None
+    assert sample["min_boundary_mouth_mm"]["stand"] is not None
+    assert sample["largest_free_rect_area_mm2"]["baseline"] is not None
+    assert sample["largest_free_rect_area_mm2"]["stand"] is not None
+    assert sample["placed_count"]["baseline"] is not None
+    assert sample["placed_count"]["stand"] is not None
+    assert sample["height_std_mm"]["baseline"] is not None
+    assert sample["height_std_mm"]["stand"] is not None
 
 
 def test_hard_floor_phase_regret_gated_rejected_stand_cannot_enter_legacy_pool() -> None:
@@ -871,6 +891,28 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.early_stand_projected_placed_loss_sum = 2.0
     policy._scheduler.early_stand_projected_lfr_loss_ratio_sum = 0.2
     policy._scheduler.early_stand_projected_height_std_increase_sum = 12.0
+    policy._scheduler.early_stand_reject_debug_limit = 2
+    policy._scheduler.early_stand_reject_debug_total = 3
+    policy._scheduler.early_stand_reject_debug_samples = [
+        {
+            "step": 0,
+            "pallet_id": 1,
+            "orientation": "stand_hw_lh",
+            "x": 0,
+            "y": 0,
+            "l": 40,
+            "w": 60,
+            "reject_reason": "access",
+            "access_reject_checks": ["min_boundary_mouth_mm_below_threshold"],
+            "access_reject_reason": "min_boundary_mouth_mm(120.0<180.0)",
+            "boundary_connected_free_area_mm2": {"baseline": 1000.0, "stand": 950.0},
+            "inaccessible_pocket_area_mm2": {"baseline": 0.0, "stand": 0.0},
+            "min_boundary_mouth_mm": {"baseline": 200.0, "stand": 120.0},
+            "largest_free_rect_area_mm2": {"baseline": 4000.0, "stand": 3600.0},
+            "placed_count": {"baseline": 4, "stand": 4},
+            "height_std_mm": {"baseline": 20.0, "stand": 30.0},
+        }
+    ]
 
     kpis = policy.collect_kpis()
 
@@ -894,3 +936,9 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["early_stand_reject_regret_total"]) == 1
     assert int(kpis["early_stand_reject_access_total"]) == 1
     assert int(kpis["early_stand_selected_step_first"]) == 0
+    assert int(kpis["early_stand_reject_debug_limit"]) == 2
+    assert int(kpis["early_stand_reject_debug_total"]) == 3
+    assert bool(kpis["early_stand_reject_debug_truncated"]) is True
+    samples = kpis["early_stand_reject_debug_samples"]
+    assert isinstance(samples, list) and len(samples) == 1
+    assert str(samples[0]["reject_reason"]) == "access"

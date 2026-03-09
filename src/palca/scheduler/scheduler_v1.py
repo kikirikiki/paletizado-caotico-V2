@@ -324,6 +324,9 @@ class SchedulerV1:
         self.early_stand_projected_placed_loss_sum = 0.0
         self.early_stand_projected_lfr_loss_ratio_sum = 0.0
         self.early_stand_projected_height_std_increase_sum = 0.0
+        self.early_stand_reject_debug_limit = 20
+        self.early_stand_reject_debug_total = 0
+        self.early_stand_reject_debug_samples: list[dict[str, Any]] = []
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -1532,6 +1535,14 @@ class SchedulerV1:
             self.early_stand_projected_height_std_increase_sum += float(
                 getattr(decision, "projected_height_std_increase_mm", 0.0) or 0.0
             )
+            if bool(getattr(decision, "admitted", False)):
+                continue
+            self.early_stand_reject_debug_total += 1
+            if len(self.early_stand_reject_debug_samples) >= int(self.early_stand_reject_debug_limit):
+                continue
+            payload = getattr(decision, "debug_payload", None)
+            if isinstance(payload, Mapping):
+                self.early_stand_reject_debug_samples.append(dict(payload))
 
     def _hard_floor_phase_rank_legacy_floor_inputs(
         self,
@@ -1575,6 +1586,7 @@ class SchedulerV1:
         pallet_id: int | str,
         pallet: PalletModel,
         group_inputs: Sequence[_HardFloorRankInput],
+        step_idx: int,
     ) -> list[_HardFloorRankedIndex]:
         min_floor = max(1, int(getattr(self.config, "hard_floor_phase_min_base_candidates", 1) or 1))
         floor_inputs = [item for item in group_inputs if self._preview_is_floor(item.preview)]
@@ -1680,6 +1692,8 @@ class SchedulerV1:
             preview_fn=self._preview_place,
             lookahead_items=max(1, int(getattr(self.config, "hard_floor_phase_lookahead_items", 8) or 8)),
             remaining_count=int(remaining_count),
+            step_idx=int(step_idx),
+            pallet_id=pallet_id,
         )
         self._hard_floor_phase_record_early_stand_decisions(decisions)
         admitted_set = set(int(idx) for idx in admitted_indices)
@@ -1741,6 +1755,7 @@ class SchedulerV1:
                 pallet_id=pallet_id,
                 pallet=pallet,
                 group_inputs=group_inputs,
+                step_idx=int(step_idx),
             )
             for ranked in ranked_group:
                 cand = candidates[int(ranked.index)]
@@ -1811,6 +1826,7 @@ class SchedulerV1:
                 pallet_id=pallet_id,
                 pallet=pallet,
                 group_inputs=group_inputs,
+                step_idx=int(step_idx),
             )
             for ranked in ranked_group:
                 exp = expansions[int(ranked.index)]
