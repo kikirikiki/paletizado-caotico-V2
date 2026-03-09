@@ -266,6 +266,16 @@ class _HardFloorRankedIndex:
     early_stand_admitted: bool = False
 
 
+@dataclass(frozen=True)
+class _HardFloorRegretAwareMetrics:
+    projected_placed_loss: int = 0
+    projected_lfr_loss_ratio: float = 0.0
+    projected_height_std_increase_mm: float = 0.0
+    projected_access_mouth_delta_mm: float = 0.0
+    projected_access_inaccessible_pocket_delta_mm2: float = 0.0
+    projected_access_boundary_connected_free_area_delta_mm2: float = 0.0
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -1563,6 +1573,70 @@ class SchedulerV1:
         item, score = pair
         return self._hard_floor_phase_rank_tuple(score=float(score), terms=item.terms)
 
+    @staticmethod
+    def _hard_floor_phase_regret_aware_metrics_from_decision(
+        decision: object | None,
+    ) -> _HardFloorRegretAwareMetrics:
+        if decision is None:
+            return _HardFloorRegretAwareMetrics()
+        return _HardFloorRegretAwareMetrics(
+            projected_placed_loss=int(getattr(decision, "projected_placed_loss", 0) or 0),
+            projected_lfr_loss_ratio=float(getattr(decision, "projected_lfr_loss_ratio", 0.0) or 0.0),
+            projected_height_std_increase_mm=float(getattr(decision, "projected_height_std_increase_mm", 0.0) or 0.0),
+            projected_access_mouth_delta_mm=float(getattr(decision, "projected_access_mouth_delta_mm", 0.0) or 0.0),
+            projected_access_inaccessible_pocket_delta_mm2=float(
+                getattr(decision, "projected_access_inaccessible_pocket_delta_mm2", 0.0) or 0.0
+            ),
+            projected_access_boundary_connected_free_area_delta_mm2=float(
+                getattr(decision, "projected_access_boundary_connected_free_area_delta_mm2", 0.0) or 0.0
+            ),
+        )
+
+    @staticmethod
+    def _hard_floor_phase_regret_aware_compare_key(
+        *,
+        metrics: _HardFloorRegretAwareMetrics,
+        score: float,
+        terms: _ScoreTerms,
+    ) -> tuple[float, float, float, float, float, float, float, float, float, float]:
+        return (
+            -float(metrics.projected_placed_loss),
+            -float(metrics.projected_lfr_loss_ratio),
+            -float(metrics.projected_height_std_increase_mm),
+            float(metrics.projected_access_mouth_delta_mm),
+            -float(metrics.projected_access_inaccessible_pocket_delta_mm2),
+            float(metrics.projected_access_boundary_connected_free_area_delta_mm2),
+            float(score),
+            float(terms.packing_gain),
+            -float(terms.fragmentation),
+            -float(terms.dt_extra),
+        )
+
+    def choose_between_best_planar_and_best_admitted_stand(
+        self,
+        *,
+        best_planar_pair: tuple[_HardFloorRankInput, float],
+        best_admitted_pair: tuple[_HardFloorRankInput, float],
+        best_admitted_decision: object | None,
+    ) -> int:
+        planar_item, planar_score = best_planar_pair
+        admitted_item, admitted_score = best_admitted_pair
+        planar_metrics = _HardFloorRegretAwareMetrics()
+        admitted_metrics = self._hard_floor_phase_regret_aware_metrics_from_decision(best_admitted_decision)
+        planar_key = self._hard_floor_phase_regret_aware_compare_key(
+            metrics=planar_metrics,
+            score=float(planar_score),
+            terms=planar_item.terms,
+        )
+        admitted_key = self._hard_floor_phase_regret_aware_compare_key(
+            metrics=admitted_metrics,
+            score=float(admitted_score),
+            terms=admitted_item.terms,
+        )
+        if admitted_key > planar_key:
+            return int(admitted_item.index)
+        return int(planar_item.index)
+
     def _hard_floor_phase_candidate_identity(
         self,
         *,
@@ -1820,6 +1894,11 @@ class SchedulerV1:
         admitted_set = set(int(idx) for idx in admitted_indices)
         if not admitted_set:
             return ranked_out
+        decision_by_index = {
+            int(getattr(decision, "candidate_index", -1)): decision
+            for decision in decisions
+            if bool(getattr(decision, "admitted", False))
+        }
         for item, score in top_stands:
             if int(item.index) not in admitted_set:
                 continue
@@ -1831,6 +1910,32 @@ class SchedulerV1:
                     early_stand_admitted=True,
                 )
             )
+
+        admitted_pairs = [(item, float(score)) for item, score in top_stands if int(item.index) in admitted_set]
+        best_admitted_pair = max(admitted_pairs, key=self._hard_floor_phase_rank_pair_key, default=None)
+        if best_admitted_pair is not None:
+            best_planar_pair = max(
+                floor_scored,
+                key=self._hard_floor_phase_rank_pair_key,
+            )
+            chosen_idx = self.choose_between_best_planar_and_best_admitted_stand(
+                best_planar_pair=best_planar_pair,
+                best_admitted_pair=best_admitted_pair,
+                best_admitted_decision=decision_by_index.get(int(best_admitted_pair[0].index)),
+            )
+            best_planar_idx = int(best_planar_pair[0].index)
+            best_admitted_idx = int(best_admitted_pair[0].index)
+            score_by_idx = {int(item.index): float(item.score) for item in ranked_out}
+            chosen_score = float(score_by_idx.get(int(chosen_idx), float("-inf")))
+            opponent_idx = int(best_admitted_idx) if int(chosen_idx) == int(best_planar_idx) else int(best_planar_idx)
+            opponent_score = float(score_by_idx.get(int(opponent_idx), float("-inf")))
+            if chosen_score <= opponent_score:
+                promoted_score = float(opponent_score) + 1e-6
+                ranked_out = [
+                    replace(ranked, score=float(promoted_score)) if int(ranked.index) == int(chosen_idx) else ranked
+                    for ranked in ranked_out
+                ]
+
         self._hard_floor_phase_record_admitted_ranking_debug(
             pallet_id=pallet_id,
             step_idx=int(step_idx),
