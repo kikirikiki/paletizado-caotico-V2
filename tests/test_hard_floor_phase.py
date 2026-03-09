@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MethodType, SimpleNamespace
+from typing import Callable
 
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
@@ -23,12 +25,34 @@ class PreviewSpec:
 
 
 class FakePallet:
-    def __init__(self, previews_by_box: dict[int, PreviewSpec], *, bin_area_mm2: int = 12_000) -> None:
+    def __init__(
+        self,
+        previews_by_box: dict[int, PreviewSpec],
+        *,
+        bin_area_mm2: int = 12_000,
+        bin_length_mm: int = 120,
+        bin_width_mm: int = 100,
+        feasible_if: Callable[[Box, list[Placement]], bool] | None = None,
+    ) -> None:
         self._previews_by_box = dict(previews_by_box)
+        self._feasible_if = feasible_if
         self.placements: list[Placement] = []
         self.bin_area_mm2 = int(bin_area_mm2)
+        self.spec = SimpleNamespace(
+            offset_mm=0,
+            bin_length_mm=int(bin_length_mm),
+            bin_width_mm=int(bin_width_mm),
+        )
 
     def preview_place(self, box: Box) -> PlacementPreview:
+        if self._feasible_if is not None and not bool(self._feasible_if(box, list(self.placements))):
+            return PlacementPreview(
+                feasible=False,
+                placement=None,
+                packing_gain=0.0,
+                fragmentation=0.0,
+                infeasible_reason="NO_SPACE",
+            )
         spec = self._previews_by_box.get(int(box.box_id))
         if spec is None:
             return PlacementPreview(
@@ -292,6 +316,340 @@ def test_hard_floor_phase_stand_mix_bonus_zero_keeps_current_behavior() -> None:
     assert int(with_zero_bonus.hard_floor_phase_stand_mix_chosen_total) == 0
 
 
+def test_hard_floor_phase_policy_off_keeps_legacy_behavior() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=60,
+            y_mm=0,
+            length_mm=60,
+            width_mm=40,
+            height_mm=50,
+            packing_gain=3.0,
+            orientation_family="planar",
+            orientation_name="planar_lw",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=40,
+            length_mm=40,
+            width_mm=60,
+            height_mm=30,
+            packing_gain=3.0,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_lh",
+        ),
+    }
+    pallet_legacy = FakePallet(previews)
+    pallet_off = FakePallet(previews)
+    seed = _placement(
+        box_id=100,
+        z_mm=0,
+        x_mm=0,
+        y_mm=0,
+        length_mm=60,
+        width_mm=40,
+        height_mm=30,
+        orientation_family="stand_hw",
+        orientation_name="stand_hw_seed",
+    )
+    pallet_legacy.placements.append(seed)
+    pallet_off.placements.append(seed)
+    legacy = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
+        )
+    )
+    policy_off = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
+            hard_floor_phase_early_stand_policy="off",
+        )
+    )
+    legacy_plan = legacy.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_legacy))
+    off_plan = policy_off.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_off))
+    assert legacy_plan is not None and off_plan is not None
+    assert str(legacy_plan.preview.placement.orientation_family) == "stand_hw"
+    assert str(off_plan.preview.placement.orientation_family) == str(legacy_plan.preview.placement.orientation_family)
+    assert int(policy_off.hard_floor_phase_stand_mix_bonus_applied_total) == 1
+
+
+def test_hard_floor_phase_regret_gated_rejects_when_projected_placed_loss_increases() -> None:
+    def feasible_if(box: Box, placements: list[Placement]) -> bool:
+        has_stand = any(str(getattr(p, "orientation_family", "") or "").lower() == "stand_hw" for p in placements)
+        box_id = int(box.box_id)
+        if box_id == 2:
+            return len(placements) == 0
+        if box_id in {1, 3}:
+            return not has_stand
+        return True
+
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=80,
+                width_mm=80,
+                height_mm=40,
+                packing_gain=4.0,
+                orientation_family="planar",
+                orientation_name="planar_base",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=80,
+                width_mm=80,
+                height_mm=40,
+                packing_gain=4.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_base",
+            ),
+            3: PreviewSpec(
+                z_mm=0,
+                x_mm=80,
+                y_mm=0,
+                length_mm=80,
+                width_mm=80,
+                height_mm=40,
+                packing_gain=3.5,
+                orientation_family="planar",
+                orientation_name="planar_followup",
+            ),
+        },
+        bin_length_mm=220,
+        bin_width_mm=220,
+        feasible_if=feasible_if,
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_max_placed_loss=0,
+        )
+    )
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2), _box(3)], pallet=pallet))
+    assert plan is not None
+    assert str(plan.preview.placement.orientation_family) == "planar"
+    assert int(scheduler.early_stand_reject_regret_total) >= 1
+
+
+def test_hard_floor_phase_regret_gated_rejects_when_access_mouth_is_too_small() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=90,
+                width_mm=90,
+                height_mm=40,
+                packing_gain=3.0,
+                orientation_family="planar",
+                orientation_name="planar_lw",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=180,
+                width_mm=20,
+                height_mm=40,
+                packing_gain=3.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_strip",
+            ),
+        },
+        bin_length_mm=200,
+        bin_width_mm=200,
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_min_access_mouth_mm=180,
+        )
+    )
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert str(plan.preview.placement.orientation_family) == "planar"
+    assert int(scheduler.early_stand_reject_access_total) >= 1
+
+
+def test_hard_floor_phase_regret_gated_limits_to_one_early_stand_per_pallet() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="planar",
+                orientation_name="planar_a",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_a",
+            ),
+            3: PreviewSpec(
+                z_mm=0,
+                x_mm=70,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="planar",
+                orientation_name="planar_b",
+            ),
+            4: PreviewSpec(
+                z_mm=0,
+                x_mm=70,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_b",
+            ),
+        },
+        bin_length_mm=240,
+        bin_width_mm=240,
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_max_count=1,
+            hard_floor_phase_early_stand_min_access_mouth_mm=20,
+        )
+    )
+
+    def stand_pref_score(
+        self: SchedulerV1,
+        *,
+        pallet: FakePallet,  # type: ignore[override]
+        preview: PlacementPreview,
+        future_boxes: list[Box] | None = None,
+        selected_box: Box | None = None,
+        include_stand_bias: bool = True,
+    ) -> float:
+        _ = pallet, future_boxes, selected_box, include_stand_bias
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return -1e9
+        family = str(getattr(placement, "orientation_family", "") or "").lower()
+        return 10.0 if family == "stand_hw" else 5.0
+
+    scheduler._hard_floor_phase_score_preview = MethodType(stand_pref_score, scheduler)  # type: ignore[method-assign]
+
+    plan1 = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan1 is not None
+    assert str(plan1.preview.placement.orientation_family) == "stand_hw"
+    pallet.commit_place(plan1.preview)
+
+    plan2 = scheduler.choose_action(_sim_state(boxes=[_box(3), _box(4)], pallet=pallet))
+    assert plan2 is not None
+    assert str(plan2.preview.placement.orientation_family) == "planar"
+    assert int(scheduler.early_stand_selected_total) == 1
+
+
+def test_hard_floor_phase_regret_gated_ignores_legacy_stand_mix_bonus() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=60,
+            y_mm=0,
+            length_mm=60,
+            width_mm=40,
+            height_mm=50,
+            packing_gain=3.0,
+            orientation_family="planar",
+            orientation_name="planar_lw",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=40,
+            length_mm=40,
+            width_mm=60,
+            height_mm=30,
+            packing_gain=3.0,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_lh",
+        ),
+    }
+    pallet_bonus = FakePallet(previews)
+    pallet_regret = FakePallet(previews)
+    seed = _placement(
+        box_id=100,
+        z_mm=0,
+        x_mm=0,
+        y_mm=0,
+        length_mm=60,
+        width_mm=40,
+        height_mm=30,
+        orientation_family="stand_hw",
+        orientation_name="stand_hw_seed",
+    )
+    pallet_bonus.placements.append(seed)
+    pallet_regret.placements.append(seed)
+
+    bonus_mode = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
+            hard_floor_phase_early_stand_policy="bonus",
+        )
+    )
+    regret_mode = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_min_access_mouth_mm=180,
+        )
+    )
+
+    bonus_plan = bonus_mode.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_bonus))
+    regret_plan = regret_mode.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_regret))
+    assert bonus_plan is not None and regret_plan is not None
+    assert str(bonus_plan.preview.placement.orientation_family) == "stand_hw"
+    assert str(regret_plan.preview.placement.orientation_family) == "planar"
+    assert int(regret_mode.hard_floor_phase_stand_mix_bonus_applied_total) == 0
+
+
 def test_hard_floor_phase_disabled_mode_keeps_existing_behavior() -> None:
     pallet_a = FakePallet(
         {
@@ -355,6 +713,13 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
         hard_floor_phase_min_base_candidates=1,
         hard_floor_phase_lookahead_items=9,
         hard_floor_phase_stand_mix_bonus=0.5,
+        hard_floor_phase_early_stand_policy="regret_gated",
+        hard_floor_phase_early_stand_max_count=1,
+        hard_floor_phase_early_stand_candidate_cap=3,
+        hard_floor_phase_early_stand_max_placed_loss=0,
+        hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio=0.08,
+        hard_floor_phase_early_stand_max_height_std_increase_mm=40.0,
+        hard_floor_phase_early_stand_min_access_mouth_mm=180,
     )
     policy._scheduler.hard_floor_phase_active_total = 3
     policy._scheduler.hard_floor_phase_floor_candidates_seen_total = 12
@@ -366,6 +731,17 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.hard_floor_phase_stand_mix_bonus_applied_total = 4
     policy._scheduler.hard_floor_phase_stand_mix_candidates_total = 6
     policy._scheduler.hard_floor_phase_stand_mix_chosen_total = 1
+    policy._scheduler.early_stand_candidates_total = 7
+    policy._scheduler.early_stand_eval_total = 5
+    policy._scheduler.early_stand_admitted_total = 2
+    policy._scheduler.early_stand_selected_total = 1
+    policy._scheduler.early_stand_reject_geom_total = 1
+    policy._scheduler.early_stand_reject_regret_total = 1
+    policy._scheduler.early_stand_reject_access_total = 1
+    policy._scheduler.early_stand_selected_step_first = 0
+    policy._scheduler.early_stand_projected_placed_loss_sum = 2.0
+    policy._scheduler.early_stand_projected_lfr_loss_ratio_sum = 0.2
+    policy._scheduler.early_stand_projected_height_std_increase_sum = 12.0
 
     kpis = policy.collect_kpis()
 
@@ -380,3 +756,12 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
     assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5
+    assert str(kpis["hard_floor_phase_early_stand_policy"]) == "regret_gated"
+    assert int(kpis["early_stand_candidates_total"]) == 7
+    assert int(kpis["early_stand_eval_total"]) == 5
+    assert int(kpis["early_stand_admitted_total"]) == 2
+    assert int(kpis["early_stand_selected_total"]) == 1
+    assert int(kpis["early_stand_reject_geom_total"]) == 1
+    assert int(kpis["early_stand_reject_regret_total"]) == 1
+    assert int(kpis["early_stand_reject_access_total"]) == 1
+    assert int(kpis["early_stand_selected_step_first"]) == 0
