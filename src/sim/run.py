@@ -221,6 +221,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bonus extra para candidatos stand_hw en suelo durante hard floor phase.",
     )
     parser.add_argument(
+        "--hard-floor-phase-early-stand-policy",
+        choices=["off", "bonus", "regret_gated"],
+        default="off",
+        help="Politica de early stand en hard-floor-phase.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-early-stand-max-count",
+        type=int,
+        default=1,
+        help="Maximo de early stands permitidos por pallet durante hard-floor-phase.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-early-stand-candidate-cap",
+        type=int,
+        default=3,
+        help="Maximo de candidatos stand evaluados por step en regret_gated.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-early-stand-max-placed-loss",
+        type=int,
+        default=0,
+        help="Perdida maxima permitida de placed_count proyectado contra baseline floor-only.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-early-stand-max-largest-free-rect-loss-ratio",
+        type=float,
+        default=0.08,
+        help="Ratio maximo permitido de perdida del largest free rect contra baseline floor-only.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-early-stand-max-height-std-increase-mm",
+        type=float,
+        default=40.0,
+        help="Incremento maximo permitido de desviacion estandar de altura (mm).",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-early-stand-min-access-mouth-mm",
+        type=int,
+        default=180,
+        help="Ancho minimo de boca accesible a frontera (mm) para admitir early stand.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -459,6 +501,13 @@ def run_simulation(
     hard_floor_phase_min_base_candidates: int = 1,
     hard_floor_phase_lookahead_items: int = 8,
     hard_floor_phase_stand_mix_bonus: float = 0.0,
+    hard_floor_phase_early_stand_policy: str = "off",
+    hard_floor_phase_early_stand_max_count: int = 1,
+    hard_floor_phase_early_stand_candidate_cap: int = 3,
+    hard_floor_phase_early_stand_max_placed_loss: int = 0,
+    hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio: float = 0.08,
+    hard_floor_phase_early_stand_max_height_std_increase_mm: float = 40.0,
+    hard_floor_phase_early_stand_min_access_mouth_mm: int = 180,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -658,6 +707,17 @@ def run_simulation(
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            hard_floor_phase_early_stand_policy=str(hard_floor_phase_early_stand_policy or "off"),
+            hard_floor_phase_early_stand_max_count=max(0, int(hard_floor_phase_early_stand_max_count)),
+            hard_floor_phase_early_stand_candidate_cap=max(1, int(hard_floor_phase_early_stand_candidate_cap)),
+            hard_floor_phase_early_stand_max_placed_loss=max(0, int(hard_floor_phase_early_stand_max_placed_loss)),
+            hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio=max(
+                0.0, float(hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio)
+            ),
+            hard_floor_phase_early_stand_max_height_std_increase_mm=max(
+                0.0, float(hard_floor_phase_early_stand_max_height_std_increase_mm)
+            ),
+            hard_floor_phase_early_stand_min_access_mouth_mm=max(0, int(hard_floor_phase_early_stand_min_access_mouth_mm)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -771,6 +831,19 @@ def run_simulation(
             "hard_floor_phase_min_base_candidates": int(max(1, int(hard_floor_phase_min_base_candidates))),
             "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
             "hard_floor_phase_stand_mix_bonus": float(max(0.0, float(hard_floor_phase_stand_mix_bonus))),
+            "hard_floor_phase_early_stand_policy": str(hard_floor_phase_early_stand_policy or "off"),
+            "hard_floor_phase_early_stand_max_count": int(max(0, int(hard_floor_phase_early_stand_max_count))),
+            "hard_floor_phase_early_stand_candidate_cap": int(max(1, int(hard_floor_phase_early_stand_candidate_cap))),
+            "hard_floor_phase_early_stand_max_placed_loss": int(max(0, int(hard_floor_phase_early_stand_max_placed_loss))),
+            "hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio": float(
+                max(0.0, float(hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio))
+            ),
+            "hard_floor_phase_early_stand_max_height_std_increase_mm": float(
+                max(0.0, float(hard_floor_phase_early_stand_max_height_std_increase_mm))
+            ),
+            "hard_floor_phase_early_stand_min_access_mouth_mm": int(
+                max(0, int(hard_floor_phase_early_stand_min_access_mouth_mm))
+            ),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -875,6 +948,17 @@ def main() -> None:
         hard_floor_phase_min_base_candidates=int(args.hard_floor_phase_min_base_candidates),
         hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
         hard_floor_phase_stand_mix_bonus=float(args.hard_floor_phase_stand_mix_bonus),
+        hard_floor_phase_early_stand_policy=str(args.hard_floor_phase_early_stand_policy),
+        hard_floor_phase_early_stand_max_count=int(args.hard_floor_phase_early_stand_max_count),
+        hard_floor_phase_early_stand_candidate_cap=int(args.hard_floor_phase_early_stand_candidate_cap),
+        hard_floor_phase_early_stand_max_placed_loss=int(args.hard_floor_phase_early_stand_max_placed_loss),
+        hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio=float(
+            args.hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio
+        ),
+        hard_floor_phase_early_stand_max_height_std_increase_mm=float(
+            args.hard_floor_phase_early_stand_max_height_std_increase_mm
+        ),
+        hard_floor_phase_early_stand_min_access_mouth_mm=int(args.hard_floor_phase_early_stand_min_access_mouth_mm),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
