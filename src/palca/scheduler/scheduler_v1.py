@@ -12,11 +12,13 @@ from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from .hard_floor_morphology import (
+    HardFloorBaseClosureState,
     HardFloorCandidateDecision,
     HardFloorMorphologyConfig,
     HardFloorMorphologyMetrics,
     compute_hard_floor_morphology_metrics,
     evaluate_hard_floor_candidate,
+    should_prefer_floor_over_stack,
 )
 from ..scoring.height_slack import (
     ScoreMode,
@@ -1484,6 +1486,27 @@ class SchedulerV1:
             mode=str(getattr(self.config, "hard_floor_phase_morphology_mode", "off") or "off"),
         )
 
+    def _hard_floor_phase_should_prefer_floor_over_stack(
+        self,
+        *,
+        baseline_metrics: HardFloorMorphologyMetrics,
+        floor_candidate_count: int,
+        step_idx: int,
+        morphology_cfg: HardFloorMorphologyConfig,
+    ) -> bool:
+        base_state = HardFloorBaseClosureState(
+            floor_candidate_count=max(0, int(floor_candidate_count)),
+            step_idx=max(0, int(step_idx)),
+            base_fill_ratio=float(baseline_metrics.base_fill_ratio),
+            largest_free_rect_area_mm2=max(0, int(baseline_metrics.largest_free_rect_area_mm2)),
+            occupied_base_zones=max(0, int(baseline_metrics.occupied_base_zones)),
+            bin_area_mm2=max(1, int(baseline_metrics.bin_area_mm2)),
+        )
+        return should_prefer_floor_over_stack(
+            state=base_state,
+            config=morphology_cfg,
+        )
+
     @staticmethod
     def _hard_floor_phase_placement_floor_tuple(placement: object | None) -> tuple[int, int, int, int, int, bool] | None:
         if placement is None:
@@ -1621,20 +1644,45 @@ class SchedulerV1:
             active_found = True
             floor_group = [cand for cand in group if self._preview_is_floor(cand.plan.preview)]
             self.hard_floor_phase_floor_candidates_seen_total += int(len(floor_group))
-            if len(floor_group) < int(min_floor):
-                self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
-                self.hard_floor_phase_exit_no_floor_total += 1
-                continue
-
             baseline_metrics = (
                 self._hard_floor_phase_compute_morphology_metrics(
                     pallet=pallet,
                     candidate_preview=None,
                     morphology_cfg=morphology_cfg,
                 )
-                if morphology_enabled
+                if morphology_enabled and floor_group
                 else None
             )
+            prefer_base_closure = False
+            if morphology_enabled and baseline_metrics is not None:
+                prefer_base_closure = self._hard_floor_phase_should_prefer_floor_over_stack(
+                    baseline_metrics=baseline_metrics,
+                    floor_candidate_count=len(floor_group),
+                    step_idx=step_idx,
+                    morphology_cfg=morphology_cfg,
+                )
+            if len(floor_group) < int(min_floor):
+                if morphology_enabled and baseline_metrics is not None:
+                    if prefer_base_closure and floor_group:
+                        pass
+                    else:
+                        self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
+                        self.hard_floor_phase_exit_no_floor_total += 1
+                        continue
+                else:
+                    self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
+                    self.hard_floor_phase_exit_no_floor_total += 1
+                    continue
+
+            if baseline_metrics is None and morphology_enabled:
+                baseline_metrics = self._hard_floor_phase_compute_morphology_metrics(
+                    pallet=pallet,
+                    candidate_preview=None,
+                    morphology_cfg=morphology_cfg,
+                )
+
+            before_group_count = len(scored)
+            legacy_floor_backups: list[tuple[_ScoredCandidate, float, object | None]] = []
             for cand in floor_group:
                 legacy_score = self._hard_floor_phase_score_preview(
                     pallet=pallet,
@@ -1668,8 +1716,11 @@ class SchedulerV1:
                         projected_density_proxy=float(projected_density_proxy),
                         legacy_score=float(legacy_score),
                         config=morphology_cfg,
+                        prefer_base_closure=bool(prefer_base_closure),
                     )
                     if not morphology_decision.accepted:
+                        if prefer_base_closure:
+                            legacy_floor_backups.append((cand, float(legacy_score), placement))
                         continue
 
                 is_stand_hw = self._placement_is_stand_hw(placement)
@@ -1691,6 +1742,25 @@ class SchedulerV1:
                         morphology_decision=morphology_decision,
                     )
                 )
+
+            if prefer_base_closure and len(scored) == before_group_count and legacy_floor_backups:
+                for cand, legacy_score, placement in legacy_floor_backups:
+                    scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                        base_score=float(legacy_score),
+                        placement=placement,
+                    )
+                    if stand_mix_bonus_applied:
+                        self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+                    new_terms = replace(cand.terms, scalar_score=float(scored_value))
+                    new_plan = replace(cand.plan, score=float(scored_value))
+                    scored.append(
+                        _HardFloorScoredCandidate(
+                            candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
+                            base_score=float(scored_value),
+                            stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                            morphology_decision=None,
+                        )
+                    )
 
         if active_found:
             self._hard_floor_phase_mark_active_decision()
@@ -1745,20 +1815,45 @@ class SchedulerV1:
                 if exp.node.first_plan is not None and self._preview_is_floor(exp.node.first_plan.preview)
             ]
             self.hard_floor_phase_floor_candidates_seen_total += int(len(floor_group))
-            if len(floor_group) < int(min_floor):
-                self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
-                self.hard_floor_phase_exit_no_floor_total += 1
-                continue
-
             baseline_metrics = (
                 self._hard_floor_phase_compute_morphology_metrics(
                     pallet=pallet,
                     candidate_preview=None,
                     morphology_cfg=morphology_cfg,
                 )
-                if morphology_enabled
+                if morphology_enabled and floor_group
                 else None
             )
+            prefer_base_closure = False
+            if morphology_enabled and baseline_metrics is not None:
+                prefer_base_closure = self._hard_floor_phase_should_prefer_floor_over_stack(
+                    baseline_metrics=baseline_metrics,
+                    floor_candidate_count=len(floor_group),
+                    step_idx=step_idx,
+                    morphology_cfg=morphology_cfg,
+                )
+            if len(floor_group) < int(min_floor):
+                if morphology_enabled and baseline_metrics is not None:
+                    if prefer_base_closure and floor_group:
+                        pass
+                    else:
+                        self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
+                        self.hard_floor_phase_exit_no_floor_total += 1
+                        continue
+                else:
+                    self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
+                    self.hard_floor_phase_exit_no_floor_total += 1
+                    continue
+
+            if baseline_metrics is None and morphology_enabled:
+                baseline_metrics = self._hard_floor_phase_compute_morphology_metrics(
+                    pallet=pallet,
+                    candidate_preview=None,
+                    morphology_cfg=morphology_cfg,
+                )
+
+            before_group_count = len(scored)
+            legacy_floor_backups: list[tuple[_BeamExpansion, float, object | None]] = []
             for exp in floor_group:
                 assert exp.node.first_plan is not None
                 legacy_score = self._hard_floor_phase_score_preview(
@@ -1793,8 +1888,11 @@ class SchedulerV1:
                         projected_density_proxy=float(projected_density_proxy),
                         legacy_score=float(legacy_score),
                         config=morphology_cfg,
+                        prefer_base_closure=bool(prefer_base_closure),
                     )
                     if not morphology_decision.accepted:
+                        if prefer_base_closure:
+                            legacy_floor_backups.append((exp, float(legacy_score), placement))
                         continue
 
                 is_stand_hw = self._placement_is_stand_hw(placement)
@@ -1817,6 +1915,27 @@ class SchedulerV1:
                         morphology_decision=morphology_decision,
                     )
                 )
+
+            if prefer_base_closure and len(scored) == before_group_count and legacy_floor_backups:
+                for exp, legacy_score, placement in legacy_floor_backups:
+                    scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                        base_score=float(legacy_score),
+                        placement=placement,
+                    )
+                    if stand_mix_bonus_applied:
+                        self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+                    exp.node.score_sum = float(scored_value)
+                    assert exp.node.first_plan is not None
+                    exp.node.first_plan = replace(exp.node.first_plan, score=float(scored_value))
+                    new_terms = replace(exp.terms, scalar_score=float(scored_value))
+                    scored.append(
+                        _HardFloorScoredExpansion(
+                            expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
+                            base_score=float(scored_value),
+                            stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                            morphology_decision=None,
+                        )
+                    )
 
         if active_found:
             self._hard_floor_phase_mark_active_decision()

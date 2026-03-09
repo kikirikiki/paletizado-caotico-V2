@@ -11,6 +11,8 @@ from ..packer.maxrects2d import Rect
 class HardFloorMorphologyMetrics:
     base_fill_ratio: float
     largest_free_rect_area_mm2: int
+    occupied_base_zones: int
+    bin_area_mm2: int
     boundary_connected_free_area_mm2: int
     inaccessible_pocket_area_mm2: int
     height_std_mm: float
@@ -37,12 +39,26 @@ class HardFloorMorphologyConfig:
     max_boundary_connected_loss_ratio: float = 0.25
     max_isolated_high_spots_increase: int = 0
     isolated_high_spot_delta_mm: float = 50.0
+    prefer_floor_while_open_base: bool = True
+    min_base_fill_ratio_before_stack: float = 0.52
+    min_base_zones_before_stack: int = 4
+    max_largest_free_rect_ratio_before_stack: float = 0.30
 
     def normalized_mode(self) -> str:
         mode = str(self.mode or "off").strip().lower()
         if mode not in {"off", "on"}:
             return "off"
         return mode
+
+
+@dataclass(frozen=True)
+class HardFloorBaseClosureState:
+    floor_candidate_count: int
+    step_idx: int
+    base_fill_ratio: float
+    largest_free_rect_area_mm2: int
+    occupied_base_zones: int
+    bin_area_mm2: int
 
 
 @dataclass(frozen=True)
@@ -91,6 +107,11 @@ def compute_hard_floor_morphology_metrics(
 
     occupied_area = sum(int(item.rect.area) for item in normalized)
     base_fill_ratio = float(occupied_area) / float(max(1, area_hint))
+    occupied_base_zones = _occupied_base_zone_count(
+        bin_w=bin_w,
+        bin_h=bin_h,
+        occupied_rects=[item.rect for item in normalized],
+    )
 
     height_std_mm, max_height_gap_mm = _height_dispersion(
         filled=[(int(item.rect.area), int(item.top_height_mm)) for item in normalized],
@@ -105,6 +126,8 @@ def compute_hard_floor_morphology_metrics(
     return HardFloorMorphologyMetrics(
         base_fill_ratio=float(base_fill_ratio),
         largest_free_rect_area_mm2=int(largest_free_rect),
+        occupied_base_zones=int(occupied_base_zones),
+        bin_area_mm2=int(area_hint),
         boundary_connected_free_area_mm2=int(connected_free_area),
         inaccessible_pocket_area_mm2=int(inaccessible_pocket_area),
         height_std_mm=float(height_std_mm),
@@ -121,6 +144,7 @@ def evaluate_hard_floor_candidate(
     projected_density_proxy: float,
     legacy_score: float,
     config: HardFloorMorphologyConfig,
+    prefer_base_closure: bool = False,
 ) -> HardFloorCandidateDecision:
     reject_reason: str | None = None
 
@@ -162,16 +186,32 @@ def evaluate_hard_floor_candidate(
         if float(candidate.boundary_connected_free_area_mm2) + 1e-6 < float(min_boundary):
             reject_reason = "boundary_continuity_broken"
 
+    if bool(prefer_base_closure) and reject_reason in {"inaccessible_pockets_worse", "boundary_continuity_broken"}:
+        # While the base is still open, allow softer continuity/pocket tradeoffs.
+        reject_reason = None
+
     accepted = reject_reason is None
-    rank_key = (
-        float(projected_density_proxy),
-        -float(candidate.max_height_gap_mm),
-        -float(candidate.height_std_mm),
-        float(candidate.boundary_connected_free_area_mm2),
-        -float(candidate.inaccessible_pocket_area_mm2),
-        float(candidate.largest_free_rect_area_mm2),
-        float(legacy_score),
-    )
+    if bool(prefer_base_closure):
+        largest_free_rect_ratio = float(candidate.largest_free_rect_area_mm2) / float(max(1, int(candidate.bin_area_mm2)))
+        rank_key = (
+            float(candidate.occupied_base_zones),
+            -float(largest_free_rect_ratio),
+            float(candidate.base_fill_ratio),
+            float(projected_density_proxy),
+            -float(candidate.max_height_gap_mm),
+            -float(candidate.height_std_mm),
+            float(legacy_score),
+        )
+    else:
+        rank_key = (
+            float(projected_density_proxy),
+            -float(candidate.max_height_gap_mm),
+            -float(candidate.height_std_mm),
+            float(candidate.boundary_connected_free_area_mm2),
+            -float(candidate.inaccessible_pocket_area_mm2),
+            float(candidate.largest_free_rect_area_mm2),
+            float(legacy_score),
+        )
 
     return HardFloorCandidateDecision(
         accepted=bool(accepted),
@@ -181,6 +221,47 @@ def evaluate_hard_floor_candidate(
         reject_reason=reject_reason,
         rank_key=rank_key,
     )
+
+
+def is_base_sufficiently_closed(
+    *,
+    state: HardFloorBaseClosureState,
+    config: HardFloorMorphologyConfig,
+) -> bool:
+    fill_ratio = float(state.base_fill_ratio)
+    occupied_zones = max(0, int(state.occupied_base_zones))
+    largest_free_rect = max(0, int(state.largest_free_rect_area_mm2))
+    bin_area = max(1, int(state.bin_area_mm2))
+    step_idx = max(0, int(state.step_idx))
+
+    min_fill = max(0.0, min(0.98, float(config.min_base_fill_ratio_before_stack)))
+    min_zones = max(1, int(config.min_base_zones_before_stack))
+    max_free_rect_ratio = max(0.0, min(1.0, float(config.max_largest_free_rect_ratio_before_stack)))
+
+    # Keep the closure gate stricter in very early steps.
+    if step_idx <= 1:
+        min_fill = min(0.98, float(min_fill) + 0.08)
+        min_zones += 1
+    elif step_idx == 2:
+        min_fill = min(0.98, float(min_fill) + 0.04)
+
+    fill_ok = float(fill_ratio) >= float(min_fill)
+    zones_ok = int(occupied_zones) >= int(min_zones)
+    free_rect_ratio = float(largest_free_rect) / float(max(1, bin_area))
+    free_rect_ok = float(free_rect_ratio) <= float(max_free_rect_ratio)
+    return bool((fill_ok and zones_ok) or (fill_ok and free_rect_ok))
+
+
+def should_prefer_floor_over_stack(
+    *,
+    state: HardFloorBaseClosureState,
+    config: HardFloorMorphologyConfig,
+) -> bool:
+    if not bool(config.prefer_floor_while_open_base):
+        return False
+    if int(state.floor_candidate_count) <= 0:
+        return False
+    return not is_base_sufficiently_closed(state=state, config=config)
 
 
 def _free_rects_from_occupied(*, bin_w: int, bin_h: int, occupied: Sequence[Rect]) -> list[Rect]:
@@ -227,6 +308,36 @@ def _boundary_connected_area(*, bin_w: int, bin_h: int, free_rects: Sequence[Rec
             if _rects_connected(rect, other):
                 stack.append(j)
     return int(connected_area)
+
+
+def _occupied_base_zone_count(*, bin_w: int, bin_h: int, occupied_rects: Sequence[Rect]) -> int:
+    if not occupied_rects:
+        return 0
+    zones_x = 3
+    zones_y = 2
+    touched = 0
+    for ix in range(zones_x):
+        zx0 = (int(ix) * int(bin_w)) // int(zones_x)
+        zx1 = ((int(ix) + 1) * int(bin_w)) // int(zones_x)
+        for iy in range(zones_y):
+            zy0 = (int(iy) * int(bin_h)) // int(zones_y)
+            zy1 = ((int(iy) + 1) * int(bin_h)) // int(zones_y)
+            zone = Rect(x=zx0, y=zy0, w=max(0, zx1 - zx0), h=max(0, zy1 - zy0))
+            if int(zone.w) <= 0 or int(zone.h) <= 0:
+                continue
+            if any(_rect_intersection_area(zone, rect) > 0 for rect in occupied_rects):
+                touched += 1
+    return int(touched)
+
+
+def _rect_intersection_area(a: Rect, b: Rect) -> int:
+    ix0 = max(int(a.x), int(b.x))
+    iy0 = max(int(a.y), int(b.y))
+    ix1 = min(int(a.x + a.w), int(b.x + b.w))
+    iy1 = min(int(a.y + a.h), int(b.y + b.h))
+    w = max(0, int(ix1) - int(ix0))
+    h = max(0, int(iy1) - int(iy0))
+    return int(w * h)
 
 
 def _height_dispersion(*, filled: Sequence[tuple[int, int]], total_area: int) -> tuple[float, int]:
