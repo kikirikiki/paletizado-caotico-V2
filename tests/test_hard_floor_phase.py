@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MethodType
 
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
@@ -292,6 +293,268 @@ def test_hard_floor_phase_stand_mix_bonus_zero_keeps_current_behavior() -> None:
     assert int(with_zero_bonus.hard_floor_phase_stand_mix_chosen_total) == 0
 
 
+def test_hard_floor_phase_morphology_can_win_with_worse_legacy_local_score() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=0,
+                length_mm=20,
+                width_mm=20,
+                height_mm=60,
+                packing_gain=9.0,
+                orientation_family="planar",
+                orientation_name="planar_small",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=20,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                packing_gain=1.0,
+                orientation_family="planar",
+                orientation_name="planar_dense",
+            ),
+        }
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=100,
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=60,
+            orientation_family="planar",
+            orientation_name="seed",
+        )
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    def prefer_box_1(self: SchedulerV1, *, preview: PlacementPreview, **_: object) -> float:
+        placement = getattr(preview, "placement", None)
+        box_id = int(getattr(placement, "box_id", 0) or 0)
+        return 10.0 if box_id == 1 else 1.0
+
+    scheduler._hard_floor_phase_score_preview = MethodType(prefer_box_1, scheduler)  # type: ignore[method-assign]
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+
+
+def test_hard_floor_phase_morphology_rejects_isolated_high_spot() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=80,
+                y_mm=0,
+                length_mm=20,
+                width_mm=20,
+                height_mm=120,
+                packing_gain=6.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_isolated",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                packing_gain=3.0,
+                orientation_family="planar",
+                orientation_name="planar_balanced",
+            ),
+        }
+    )
+    pallet.placements.extend(
+        [
+            _placement(
+                box_id=101,
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_a",
+            ),
+            _placement(
+                box_id=102,
+                z_mm=0,
+                x_mm=0,
+                y_mm=40,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_b",
+            ),
+        ]
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+
+
+def test_hard_floor_phase_morphology_rejects_strong_height_gap_increase() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=200,
+                packing_gain=8.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_tall",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=40,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                packing_gain=2.0,
+                orientation_family="planar",
+                orientation_name="planar_low",
+            ),
+        }
+    )
+    pallet.placements.extend(
+        [
+            _placement(
+                box_id=201,
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_a",
+            ),
+            _placement(
+                box_id=202,
+                z_mm=0,
+                x_mm=0,
+                y_mm=40,
+                length_mm=40,
+                width_mm=40,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_b",
+            ),
+        ]
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+
+
+def test_hard_floor_phase_morphology_mode_off_keeps_legacy_behavior() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=60,
+            y_mm=0,
+            length_mm=60,
+            width_mm=40,
+            height_mm=50,
+            packing_gain=3.0,
+            orientation_family="planar",
+            orientation_name="planar_lw",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=40,
+            length_mm=40,
+            width_mm=60,
+            height_mm=30,
+            packing_gain=3.0,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_lh",
+        ),
+    }
+    baseline_pallet = FakePallet(previews)
+    off_mode_pallet = FakePallet(previews)
+    seed = _placement(
+        box_id=300,
+        z_mm=0,
+        x_mm=0,
+        y_mm=0,
+        length_mm=60,
+        width_mm=40,
+        height_mm=30,
+        orientation_family="stand_hw",
+        orientation_name="stand_hw_seed",
+    )
+    baseline_pallet.placements.append(seed)
+    off_mode_pallet.placements.append(seed)
+
+    legacy = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
+        )
+    )
+    explicit_off = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=3,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_stand_mix_bonus=1.0,
+            hard_floor_phase_morphology_mode="off",
+        )
+    )
+
+    legacy_plan = legacy.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=baseline_pallet))
+    off_plan = explicit_off.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=off_mode_pallet))
+
+    assert legacy_plan is not None and off_plan is not None
+    assert int(legacy_plan.box_id) == int(off_plan.box_id)
+    assert str(legacy_plan.preview.placement.orientation_family) == str(off_plan.preview.placement.orientation_family)
+
+
 def test_hard_floor_phase_disabled_mode_keeps_existing_behavior() -> None:
     pallet_a = FakePallet(
         {
@@ -355,6 +618,7 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
         hard_floor_phase_min_base_candidates=1,
         hard_floor_phase_lookahead_items=9,
         hard_floor_phase_stand_mix_bonus=0.5,
+        hard_floor_phase_morphology_mode="on",
     )
     policy._scheduler.hard_floor_phase_active_total = 3
     policy._scheduler.hard_floor_phase_floor_candidates_seen_total = 12
@@ -366,6 +630,13 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.hard_floor_phase_stand_mix_bonus_applied_total = 4
     policy._scheduler.hard_floor_phase_stand_mix_candidates_total = 6
     policy._scheduler.hard_floor_phase_stand_mix_chosen_total = 1
+    policy._scheduler.hard_floor_base_metrics_samples_total = 2
+    policy._scheduler.hard_floor_base_height_gap_mm_sum = 150.0
+    policy._scheduler.hard_floor_base_height_gap_mm_max = 90
+    policy._scheduler.hard_floor_base_height_std_mm_sum = 45.0
+    policy._scheduler.hard_floor_inaccessible_pocket_area_mm2_max = 1800
+    policy._scheduler.hard_floor_boundary_connected_free_area_mm2_sum = 6400.0
+    policy._scheduler.hard_floor_isolated_high_spots_total = 3
 
     kpis = policy.collect_kpis()
 
@@ -376,7 +647,14 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_exit_no_floor_total"]) == 1
     assert int(kpis["hard_floor_phase_exit_end_step_total"]) == 1
     assert float(kpis["hard_floor_phase_stand_mix_bonus"]) == 0.5
+    assert str(kpis["hard_floor_phase_morphology_mode"]) == "on"
     assert int(kpis["hard_floor_phase_stand_mix_bonus_applied_total"]) == 4
     assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
     assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5
+    assert float(kpis["hard_floor_base_height_gap_mm_mean"]) == 75.0
+    assert int(kpis["hard_floor_base_height_gap_mm_max"]) == 90
+    assert float(kpis["hard_floor_base_height_std_mm_mean"]) == 22.5
+    assert int(kpis["hard_floor_inaccessible_pocket_area_mm2_max"]) == 1800
+    assert float(kpis["hard_floor_boundary_connected_free_area_mm2_mean"]) == 3200.0
+    assert int(kpis["hard_floor_isolated_high_spots_total"]) == 3
