@@ -1596,20 +1596,18 @@ class SchedulerV1:
         planar_floor_inputs = [
             item for item in floor_inputs if not self._placement_is_stand_hw(getattr(item.preview, "placement", None))
         ]
-        stand_inputs = [item for item in floor_inputs if item not in planar_floor_inputs]
+        stand_inputs = [
+            item for item in floor_inputs if self._placement_is_stand_hw(getattr(item.preview, "placement", None))
+        ]
         self.hard_floor_phase_stand_mix_candidates_total += int(len(stand_inputs))
         self.early_stand_candidates_total += int(len(stand_inputs))
 
-        # Si regret_gated no puede operar (sin planar-floor suficiente), mantener fallback exacto a legacy/off.
         if len(floor_inputs) < int(min_floor):
             self._hard_floor_phase_mark_exit_no_floor(pallet_id)
             return []
         if len(planar_floor_inputs) < int(min_floor):
-            return self._hard_floor_phase_rank_legacy_floor_inputs(
-                floor_inputs=floor_inputs,
-                pallet=pallet,
-                future_boxes=future_boxes,
-            )
+            self._hard_floor_phase_mark_exit_no_floor(pallet_id)
+            return []
 
         floor_scored: list[tuple[_HardFloorRankInput, float]] = []
         for item in planar_floor_inputs:
@@ -1618,7 +1616,7 @@ class SchedulerV1:
                 preview=item.preview,
                 future_boxes=future_boxes,
                 selected_box=item.box,
-                include_stand_bias=True,
+                include_stand_bias=False,
             )
             floor_scored.append((item, float(score)))
         if not floor_scored:
@@ -1686,11 +1684,7 @@ class SchedulerV1:
         self._hard_floor_phase_record_early_stand_decisions(decisions)
         admitted_set = set(int(idx) for idx in admitted_indices)
         if not admitted_set:
-            return self._hard_floor_phase_rank_legacy_floor_inputs(
-                floor_inputs=floor_inputs,
-                pallet=pallet,
-                future_boxes=future_boxes,
-            )
+            return ranked_out
         for item, score in top_stands:
             if int(item.index) not in admitted_set:
                 continue
@@ -1967,7 +1961,10 @@ class SchedulerV1:
         # regret_gated disables it for stand admission scoring.
         stand_mix_bonus = 0.0
         stand_early_bonus = 0.0
-        if include_stand_bias:
+        apply_stand_bias = bool(include_stand_bias)
+        if self._hard_floor_phase_early_stand_config().policy == "regret_gated":
+            apply_stand_bias = False
+        if apply_stand_bias:
             stand_after = int(stand_count) + (1 if self._placement_is_stand_hw(placement) else 0)
             stand_mix_ratio = float(stand_after) / float(total_floor)
             stand_mix_bonus = 1.0 - abs(stand_mix_ratio - 0.35)

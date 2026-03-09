@@ -379,9 +379,10 @@ def test_hard_floor_phase_policy_off_keeps_legacy_behavior() -> None:
     assert str(legacy_plan.preview.placement.orientation_family) == "stand_hw"
     assert str(off_plan.preview.placement.orientation_family) == str(legacy_plan.preview.placement.orientation_family)
     assert int(policy_off.hard_floor_phase_stand_mix_bonus_applied_total) == 1
+    assert int(policy_off.hard_floor_phase_stand_hw_chosen_total) == 1
 
 
-def test_hard_floor_phase_regret_gated_falls_back_to_legacy_when_only_stand_floor_exists() -> None:
+def test_hard_floor_phase_regret_gated_exits_hard_floor_when_only_stand_floor_exists() -> None:
     previews = {
         1: PreviewSpec(
             z_mm=0,
@@ -431,10 +432,11 @@ def test_hard_floor_phase_regret_gated_falls_back_to_legacy_when_only_stand_floo
     regret_plan = regret_mode.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_regret))
     assert off_plan is not None and regret_plan is not None
     assert str(off_plan.preview.placement.orientation_family) == "stand_hw"
-    assert str(regret_plan.preview.placement.orientation_family) == str(off_plan.preview.placement.orientation_family)
-    assert float(regret_plan.score) == float(off_plan.score)
-    assert int(regret_mode.hard_floor_phase_chosen_total) == int(off_mode.hard_floor_phase_chosen_total) == 1
-    assert int(regret_mode.hard_floor_phase_exit_no_floor_total) == 0
+    assert int(off_mode.hard_floor_phase_chosen_total) == 1
+    assert int(off_mode.hard_floor_phase_stand_hw_chosen_total) == 1
+    assert int(regret_mode.hard_floor_phase_chosen_total) == 0
+    assert int(regret_mode.hard_floor_phase_exit_no_floor_total) == 1
+    assert int(regret_mode.hard_floor_phase_stand_hw_chosen_total) == 0
     assert int(regret_mode.early_stand_selected_total) == 0
 
 
@@ -544,6 +546,74 @@ def test_hard_floor_phase_regret_gated_rejects_when_access_mouth_is_too_small() 
     plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
     assert plan is not None
     assert str(plan.preview.placement.orientation_family) == "planar"
+    assert int(scheduler.early_stand_admitted_total) == 0
+    assert int(scheduler.early_stand_selected_total) == 0
+    assert int(scheduler.hard_floor_phase_stand_hw_chosen_total) == 0
+    assert int(scheduler.early_stand_reject_access_total) >= 1
+
+
+def test_hard_floor_phase_regret_gated_rejected_stand_cannot_enter_legacy_pool() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=90,
+                width_mm=90,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="planar",
+                orientation_name="planar_lw",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=180,
+                width_mm=20,
+                height_mm=40,
+                packing_gain=8.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_strip",
+            ),
+        },
+        bin_length_mm=200,
+        bin_width_mm=200,
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_min_access_mouth_mm=180,
+        )
+    )
+
+    def stand_pref_score(
+        self: SchedulerV1,
+        *,
+        pallet: FakePallet,  # type: ignore[override]
+        preview: PlacementPreview,
+        future_boxes: list[Box] | None = None,
+        selected_box: Box | None = None,
+        include_stand_bias: bool = True,
+    ) -> float:
+        _ = pallet, future_boxes, selected_box, include_stand_bias
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return -1e9
+        family = str(getattr(placement, "orientation_family", "") or "").lower()
+        return 10.0 if family == "stand_hw" else 5.0
+
+    scheduler._hard_floor_phase_score_preview = MethodType(stand_pref_score, scheduler)  # type: ignore[method-assign]
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert str(plan.preview.placement.orientation_family) == "planar"
+    assert int(scheduler.early_stand_admitted_total) == 0
+    assert int(scheduler.early_stand_selected_total) == 0
+    assert int(scheduler.hard_floor_phase_stand_hw_chosen_total) == 0
     assert int(scheduler.early_stand_reject_access_total) >= 1
 
 
@@ -704,6 +774,8 @@ def test_hard_floor_phase_regret_gated_ignores_legacy_stand_mix_bonus() -> None:
     assert bonus_plan is not None and regret_plan is not None
     assert str(bonus_plan.preview.placement.orientation_family) == "stand_hw"
     assert str(regret_plan.preview.placement.orientation_family) == "planar"
+    assert int(bonus_mode.hard_floor_phase_stand_hw_chosen_total) == 1
+    assert int(bonus_mode.hard_floor_phase_stand_mix_bonus_applied_total) == 1
     assert int(regret_mode.hard_floor_phase_stand_mix_bonus_applied_total) == 0
 
 
