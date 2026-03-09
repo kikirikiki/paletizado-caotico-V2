@@ -838,6 +838,14 @@ class PolicyPackerScheduler:
         early_stand_eval_total = int(getattr(self._scheduler, "early_stand_eval_total", 0) or 0)
         early_stand_admitted_total = int(getattr(self._scheduler, "early_stand_admitted_total", 0) or 0)
         early_stand_selected_total = int(getattr(self._scheduler, "early_stand_selected_total", 0) or 0)
+        early_stand_admitted_but_not_selected_total = int(
+            getattr(
+                self._scheduler,
+                "early_stand_admitted_but_not_selected_total",
+                max(0, int(early_stand_admitted_total) - int(early_stand_selected_total)),
+            )
+            or 0
+        )
         early_stand_reject_geom_total = int(getattr(self._scheduler, "early_stand_reject_geom_total", 0) or 0)
         early_stand_reject_regret_total = int(getattr(self._scheduler, "early_stand_reject_regret_total", 0) or 0)
         early_stand_reject_access_total = int(getattr(self._scheduler, "early_stand_reject_access_total", 0) or 0)
@@ -857,6 +865,14 @@ class PolicyPackerScheduler:
         early_stand_reject_debug_samples = [
             dict(item)
             for item in list(early_stand_reject_debug_samples_raw)
+            if isinstance(item, Mapping)
+        ]
+        early_stand_ranking_debug_limit = int(getattr(self._scheduler, "early_stand_ranking_debug_limit", 20) or 20)
+        early_stand_ranking_debug_total = int(getattr(self._scheduler, "early_stand_ranking_debug_total", 0) or 0)
+        early_stand_ranking_debug_samples_raw = getattr(self._scheduler, "early_stand_ranking_debug_samples", []) or []
+        early_stand_ranking_debug_samples = [
+            dict(item)
+            for item in list(early_stand_ranking_debug_samples_raw)
             if isinstance(item, Mapping)
         ]
 
@@ -915,6 +931,7 @@ class PolicyPackerScheduler:
         kpis["early_stand_eval_total"] = int(early_stand_eval_total)
         kpis["early_stand_admitted_total"] = int(early_stand_admitted_total)
         kpis["early_stand_selected_total"] = int(early_stand_selected_total)
+        kpis["early_stand_admitted_but_not_selected_total"] = int(early_stand_admitted_but_not_selected_total)
         kpis["early_stand_reject_geom_total"] = int(early_stand_reject_geom_total)
         kpis["early_stand_reject_regret_total"] = int(early_stand_reject_regret_total)
         kpis["early_stand_reject_access_total"] = int(early_stand_reject_access_total)
@@ -928,6 +945,12 @@ class PolicyPackerScheduler:
             early_stand_reject_debug_total > len(early_stand_reject_debug_samples)
         )
         kpis["early_stand_reject_debug_samples"] = list(early_stand_reject_debug_samples)
+        kpis["early_stand_ranking_debug_limit"] = int(early_stand_ranking_debug_limit)
+        kpis["early_stand_ranking_debug_total"] = int(early_stand_ranking_debug_total)
+        kpis["early_stand_ranking_debug_truncated"] = bool(
+            early_stand_ranking_debug_total > len(early_stand_ranking_debug_samples)
+        )
+        kpis["early_stand_ranking_debug_samples"] = list(early_stand_ranking_debug_samples)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min

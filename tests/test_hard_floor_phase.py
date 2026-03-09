@@ -7,6 +7,7 @@ from typing import Callable
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
 from palca.integration.policy_packer_sched import PolicyPackerScheduler
+from palca.scheduler import scheduler_v1 as scheduler_v1_module
 from palca.scheduler.hard_floor_early_stand import HardFloorEarlyStandConfig, HardFloorFutureMetrics, passes_access_gate
 from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, SchedulerV1
 
@@ -775,6 +776,127 @@ def test_hard_floor_phase_regret_gated_limits_to_one_early_stand_per_pallet() ->
     assert plan2 is not None
     assert str(plan2.preview.placement.orientation_family) == "planar"
     assert int(scheduler.early_stand_selected_total) == 1
+    assert int(scheduler.early_stand_admitted_but_not_selected_total) == 0
+    assert int(scheduler.early_stand_ranking_debug_total) >= 1
+    assert len(scheduler.early_stand_ranking_debug_samples) >= 1
+    sample = scheduler.early_stand_ranking_debug_samples[0]
+    assert int(sample["planar_floor_candidates"]) >= 1
+    assert int(sample["stand_candidates"]) >= 1
+    assert int(sample["admitted_stand_candidates"]) >= 1
+    assert bool(sample["admitted_stand_reinserted_to_final_pool"]) is True
+    assert isinstance(sample["final_ranking_top_n"], list) and len(sample["final_ranking_top_n"]) >= 1
+    assert str(sample["final_chosen_candidate"]["type"]) == "stand_hw"
+
+
+def test_hard_floor_phase_regret_gated_admitted_stand_can_lose_vs_planar() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="planar",
+                orientation_name="planar_a",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=70,
+                y_mm=0,
+                length_mm=70,
+                width_mm=70,
+                height_mm=40,
+                packing_gain=2.0,
+                orientation_family="stand_hw",
+                orientation_name="stand_hw_a",
+            ),
+        },
+        bin_length_mm=240,
+        bin_width_mm=240,
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_max_count=1,
+            hard_floor_phase_early_stand_min_access_mouth_mm=20,
+        )
+    )
+
+    def planar_pref_score(
+        self: SchedulerV1,
+        *,
+        pallet: FakePallet,  # type: ignore[override]
+        preview: PlacementPreview,
+        future_boxes: list[Box] | None = None,
+        selected_box: Box | None = None,
+        include_stand_bias: bool = True,
+    ) -> float:
+        _ = pallet, future_boxes, selected_box, include_stand_bias
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return -1e9
+        family = str(getattr(placement, "orientation_family", "") or "").lower()
+        return 10.0 if family == "planar" else 5.0
+
+    scheduler._hard_floor_phase_score_preview = MethodType(planar_pref_score, scheduler)  # type: ignore[method-assign]
+
+    original_admit = scheduler_v1_module.admit_early_stands
+
+    def force_admit_first_stand(
+        *,
+        config: HardFloorEarlyStandConfig,
+        stand_candidates: list[tuple[int, PlacementPreview, Box]],
+        **_: object,
+    ) -> tuple[list[int], list[object], HardFloorFutureMetrics]:
+        baseline = HardFloorFutureMetrics(
+            placed_count=0,
+            largest_free_rect_area_mm2=0.0,
+            free_components=1,
+            inaccessible_pocket_area_mm2=0.0,
+            boundary_connected_free_area_mm2=0.0,
+            height_std_mm=0.0,
+            min_boundary_mouth_mm=float(config.min_access_mouth_mm),
+        )
+        if not stand_candidates:
+            return [], [], baseline
+        admitted_idx = int(stand_candidates[0][0])
+        decision = SimpleNamespace(
+            candidate_index=admitted_idx,
+            admitted=True,
+            reject_reason="",
+            projected_placed_loss=0,
+            projected_lfr_loss_ratio=0.0,
+            projected_height_std_increase_mm=0.0,
+            debug_payload=None,
+        )
+        return [admitted_idx], [decision], baseline
+
+    scheduler_v1_module.admit_early_stands = force_admit_first_stand  # type: ignore[assignment]
+    try:
+        plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    finally:
+        scheduler_v1_module.admit_early_stands = original_admit  # type: ignore[assignment]
+
+    assert plan is not None
+    assert str(plan.preview.placement.orientation_family) == "planar"
+    assert int(scheduler.early_stand_admitted_total) == 1
+    assert int(scheduler.early_stand_selected_total) == 0
+    assert int(scheduler.early_stand_admitted_but_not_selected_total) == 1
+    assert int(scheduler.hard_floor_phase_stand_hw_chosen_total) == 0
+    assert len(scheduler.early_stand_ranking_debug_samples) >= 1
+    sample = scheduler.early_stand_ranking_debug_samples[0]
+    assert bool(sample["admitted_stand_reinserted_to_final_pool"]) is True
+    assert float(sample["best_planar_final_score"]) > float(sample["best_admitted_stand_final_score"])
+    assert str(sample["final_chosen_candidate"]["type"]) == "planar"
+    top_n = sample["final_ranking_top_n"]
+    assert isinstance(top_n, list) and len(top_n) >= 2
+    assert any(bool(item["admitted_by_regret"]) for item in top_n)
 
 
 def test_hard_floor_phase_regret_gated_ignores_legacy_stand_mix_bonus() -> None:
@@ -933,6 +1055,7 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.early_stand_eval_total = 5
     policy._scheduler.early_stand_admitted_total = 2
     policy._scheduler.early_stand_selected_total = 1
+    policy._scheduler.early_stand_admitted_but_not_selected_total = 1
     policy._scheduler.early_stand_reject_geom_total = 1
     policy._scheduler.early_stand_reject_regret_total = 1
     policy._scheduler.early_stand_reject_access_total = 1
@@ -962,6 +1085,25 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
             "height_std_mm": {"baseline": 20.0, "stand": 30.0},
         }
     ]
+    policy._scheduler.early_stand_ranking_debug_limit = 2
+    policy._scheduler.early_stand_ranking_debug_total = 3
+    policy._scheduler.early_stand_ranking_debug_samples = [
+        {
+            "step": 0,
+            "pallet_id": 1,
+            "planar_floor_candidates": 3,
+            "stand_candidates": 1,
+            "admitted_stand_candidates": 1,
+            "best_planar_final_score": 7.0,
+            "best_admitted_stand_final_score": 5.5,
+            "admitted_stand_reinserted_to_final_pool": True,
+            "final_ranking_top_n": [
+                {"rank": 1, "type": "planar", "score": 7.0, "admitted_by_regret": False},
+                {"rank": 2, "type": "stand_hw", "score": 5.5, "admitted_by_regret": True},
+            ],
+            "final_chosen_candidate": {"type": "planar", "score": 7.0, "admitted_by_regret": False},
+        }
+    ]
 
     kpis = policy.collect_kpis()
 
@@ -981,6 +1123,7 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["early_stand_eval_total"]) == 5
     assert int(kpis["early_stand_admitted_total"]) == 2
     assert int(kpis["early_stand_selected_total"]) == 1
+    assert int(kpis["early_stand_admitted_but_not_selected_total"]) == 1
     assert int(kpis["early_stand_reject_geom_total"]) == 1
     assert int(kpis["early_stand_reject_regret_total"]) == 1
     assert int(kpis["early_stand_reject_access_total"]) == 1
@@ -991,3 +1134,9 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     samples = kpis["early_stand_reject_debug_samples"]
     assert isinstance(samples, list) and len(samples) == 1
     assert str(samples[0]["reject_reason"]) == "access"
+    assert int(kpis["early_stand_ranking_debug_limit"]) == 2
+    assert int(kpis["early_stand_ranking_debug_total"]) == 3
+    assert bool(kpis["early_stand_ranking_debug_truncated"]) is True
+    ranking_samples = kpis["early_stand_ranking_debug_samples"]
+    assert isinstance(ranking_samples, list) and len(ranking_samples) == 1
+    assert str(ranking_samples[0]["final_chosen_candidate"]["type"]) == "planar"

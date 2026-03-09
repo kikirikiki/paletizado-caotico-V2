@@ -317,6 +317,7 @@ class SchedulerV1:
         self.early_stand_eval_total = 0
         self.early_stand_admitted_total = 0
         self.early_stand_selected_total = 0
+        self.early_stand_admitted_but_not_selected_total = 0
         self.early_stand_reject_geom_total = 0
         self.early_stand_reject_regret_total = 0
         self.early_stand_reject_access_total = 0
@@ -327,6 +328,10 @@ class SchedulerV1:
         self.early_stand_reject_debug_limit = 20
         self.early_stand_reject_debug_total = 0
         self.early_stand_reject_debug_samples: list[dict[str, Any]] = []
+        self.early_stand_ranking_debug_limit = 20
+        self.early_stand_ranking_debug_top_n = 8
+        self.early_stand_ranking_debug_total = 0
+        self.early_stand_ranking_debug_samples: list[dict[str, Any]] = []
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -1519,6 +1524,7 @@ class SchedulerV1:
             self.early_stand_eval_total += 1
             if bool(getattr(decision, "admitted", False)):
                 self.early_stand_admitted_total += 1
+                self.early_stand_admitted_but_not_selected_total += 1
             reason = str(getattr(decision, "reject_reason", "") or "").strip().lower()
             if reason == "geom":
                 self.early_stand_reject_geom_total += 1
@@ -1543,6 +1549,131 @@ class SchedulerV1:
             payload = getattr(decision, "debug_payload", None)
             if isinstance(payload, Mapping):
                 self.early_stand_reject_debug_samples.append(dict(payload))
+
+    @staticmethod
+    def _hard_floor_phase_rank_tuple(*, score: float, terms: _ScoreTerms) -> tuple[float, float, float, float]:
+        return (
+            float(score),
+            float(terms.packing_gain),
+            -float(terms.fragmentation),
+            -float(terms.dt_extra),
+        )
+
+    def _hard_floor_phase_rank_pair_key(self, pair: tuple[_HardFloorRankInput, float]) -> tuple[float, float, float, float]:
+        item, score = pair
+        return self._hard_floor_phase_rank_tuple(score=float(score), terms=item.terms)
+
+    def _hard_floor_phase_candidate_identity(
+        self,
+        *,
+        item: _HardFloorRankInput,
+        score: float,
+        admitted_by_regret: bool,
+    ) -> dict[str, object]:
+        placement = getattr(item.preview, "placement", None)
+        orientation_family = str(getattr(placement, "orientation_family", "") or "")
+        orientation_name = str(getattr(placement, "orientation_name", "") or "")
+        orientation = orientation_name or orientation_family
+        return {
+            "candidate_index": int(item.index),
+            "box_id": getattr(item.box, "box_id", None),
+            "type": "stand_hw" if self._placement_is_stand_hw(placement) else "planar",
+            "orientation_family": orientation_family,
+            "orientation_name": orientation_name,
+            "orientation": orientation,
+            "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+            "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+            "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+            "score": float(score),
+            "admitted_by_regret": bool(admitted_by_regret),
+        }
+
+    def _hard_floor_phase_record_admitted_ranking_debug(
+        self,
+        *,
+        pallet_id: int | str,
+        step_idx: int,
+        group_inputs: Sequence[_HardFloorRankInput],
+        planar_floor_inputs: Sequence[_HardFloorRankInput],
+        stand_inputs: Sequence[_HardFloorRankInput],
+        floor_scored: Sequence[tuple[_HardFloorRankInput, float]],
+        stand_scored: Sequence[tuple[_HardFloorRankInput, float]],
+        admitted_set: set[int],
+        ranked_out: Sequence[_HardFloorRankedIndex],
+    ) -> None:
+        if not admitted_set:
+            return
+        self.early_stand_ranking_debug_total += 1
+        if len(self.early_stand_ranking_debug_samples) >= int(self.early_stand_ranking_debug_limit):
+            return
+
+        index_to_input = {int(item.index): item for item in group_inputs}
+        final_indices = {int(item.index) for item in ranked_out}
+        admitted_pairs = [(item, float(score)) for item, score in stand_scored if int(item.index) in admitted_set]
+        best_planar_pair = max(floor_scored, key=self._hard_floor_phase_rank_pair_key)
+        best_admitted_pair = max(admitted_pairs, key=self._hard_floor_phase_rank_pair_key, default=None)
+
+        ranked_with_input: list[tuple[_HardFloorRankedIndex, _HardFloorRankInput]] = []
+        for ranked in ranked_out:
+            maybe_item = index_to_input.get(int(ranked.index))
+            if maybe_item is None:
+                continue
+            ranked_with_input.append((ranked, maybe_item))
+        ranked_with_input.sort(
+            key=lambda pair: self._hard_floor_phase_rank_tuple(score=float(pair[0].score), terms=pair[1].terms),
+            reverse=True,
+        )
+        top_n = max(1, int(self.early_stand_ranking_debug_top_n))
+        ranking_top_n: list[dict[str, object]] = []
+        for pos, (ranked, ranked_item) in enumerate(ranked_with_input[:top_n], start=1):
+            identity = self._hard_floor_phase_candidate_identity(
+                item=ranked_item,
+                score=float(ranked.score),
+                admitted_by_regret=bool(ranked.early_stand_admitted),
+            )
+            identity["rank"] = int(pos)
+            ranking_top_n.append(identity)
+
+        chosen_candidate = ranking_top_n[0] if ranking_top_n else None
+        best_planar_item, best_planar_score = best_planar_pair
+        best_admitted_identity = None
+        best_admitted_score: float | None = None
+        if best_admitted_pair is not None:
+            best_admitted_item, best_admitted_score_value = best_admitted_pair
+            best_admitted_identity = self._hard_floor_phase_candidate_identity(
+                item=best_admitted_item,
+                score=float(best_admitted_score_value),
+                admitted_by_regret=True,
+            )
+            best_admitted_score = float(best_admitted_score_value)
+
+        if isinstance(pallet_id, int):
+            pallet_value: int | str = int(pallet_id)
+        else:
+            pallet_value = str(pallet_id)
+
+        self.early_stand_ranking_debug_samples.append(
+            {
+                "step": int(step_idx),
+                "pallet_id": pallet_value,
+                "planar_floor_candidates": int(len(planar_floor_inputs)),
+                "stand_candidates": int(len(stand_inputs)),
+                "admitted_stand_candidates": int(len(admitted_set)),
+                "best_planar_candidate": self._hard_floor_phase_candidate_identity(
+                    item=best_planar_item,
+                    score=float(best_planar_score),
+                    admitted_by_regret=False,
+                ),
+                "best_admitted_stand_candidate": best_admitted_identity,
+                "best_planar_final_score": float(best_planar_score),
+                "best_admitted_stand_final_score": best_admitted_score,
+                "admitted_stand_reinserted_to_final_pool": bool(admitted_set.issubset(final_indices)),
+                "admitted_stand_reinserted_count": int(len(admitted_set & final_indices)),
+                "admitted_stand_candidate_indices": sorted(int(idx) for idx in admitted_set),
+                "final_ranking_top_n": ranking_top_n,
+                "final_chosen_candidate": chosen_candidate,
+            }
+        )
 
     def _hard_floor_phase_rank_legacy_floor_inputs(
         self,
@@ -1652,12 +1783,7 @@ class SchedulerV1:
 
         baseline_item, _baseline_score = max(
             floor_scored,
-            key=lambda pair: (
-                float(pair[1]),
-                float(pair[0].terms.packing_gain),
-                -float(pair[0].terms.fragmentation),
-                -float(pair[0].terms.dt_extra),
-            ),
+            key=self._hard_floor_phase_rank_pair_key,
         )
 
         stand_scored: list[tuple[_HardFloorRankInput, float]] = []
@@ -1672,12 +1798,7 @@ class SchedulerV1:
             stand_scored.append((item, float(neutral_score)))
 
         stand_scored.sort(
-            key=lambda pair: (
-                float(pair[1]),
-                float(pair[0].terms.packing_gain),
-                -float(pair[0].terms.fragmentation),
-                -float(pair[0].terms.dt_extra),
-            ),
+            key=self._hard_floor_phase_rank_pair_key,
             reverse=True,
         )
         top_stands = stand_scored[: int(max(1, int(early_cfg.candidate_cap)))]
@@ -1710,6 +1831,17 @@ class SchedulerV1:
                     early_stand_admitted=True,
                 )
             )
+        self._hard_floor_phase_record_admitted_ranking_debug(
+            pallet_id=pallet_id,
+            step_idx=int(step_idx),
+            group_inputs=group_inputs,
+            planar_floor_inputs=planar_floor_inputs,
+            stand_inputs=stand_inputs,
+            floor_scored=floor_scored,
+            stand_scored=stand_scored,
+            admitted_set=admitted_set,
+            ranked_out=ranked_out,
+        )
         return ranked_out
 
     def _hard_floor_phase_filter_scored_candidates(
@@ -2052,6 +2184,10 @@ class SchedulerV1:
             ):
                 pallet_id = plan.pallet_id
                 self.early_stand_selected_total += 1
+                self.early_stand_admitted_but_not_selected_total = max(
+                    0,
+                    int(self.early_stand_admitted_but_not_selected_total) - 1,
+                )
                 current_count = int(self._hard_floor_phase_early_stand_selected_count_by_pallet.get(pallet_id, 0) or 0)
                 self._hard_floor_phase_early_stand_selected_count_by_pallet[pallet_id] = current_count + 1
                 if int(self.early_stand_selected_step_first) < 0:
