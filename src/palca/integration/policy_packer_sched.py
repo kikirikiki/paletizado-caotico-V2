@@ -851,6 +851,14 @@ class PolicyPackerScheduler:
         early_stand_projected_height_std_increase_sum = float(
             getattr(self._scheduler, "early_stand_projected_height_std_increase_sum", 0.0) or 0.0
         )
+        early_stand_reject_debug_limit = int(getattr(self._scheduler, "early_stand_reject_debug_limit", 20) or 20)
+        early_stand_reject_debug_total = int(getattr(self._scheduler, "early_stand_reject_debug_total", 0) or 0)
+        early_stand_reject_debug_samples_raw = getattr(self._scheduler, "early_stand_reject_debug_samples", []) or []
+        early_stand_reject_debug_samples = [
+            dict(item)
+            for item in list(early_stand_reject_debug_samples_raw)
+            if isinstance(item, Mapping)
+        ]
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -914,6 +922,12 @@ class PolicyPackerScheduler:
         kpis["early_stand_projected_placed_loss_sum"] = float(early_stand_projected_placed_loss_sum)
         kpis["early_stand_projected_lfr_loss_ratio_sum"] = float(early_stand_projected_lfr_loss_ratio_sum)
         kpis["early_stand_projected_height_std_increase_sum"] = float(early_stand_projected_height_std_increase_sum)
+        kpis["early_stand_reject_debug_limit"] = int(early_stand_reject_debug_limit)
+        kpis["early_stand_reject_debug_total"] = int(early_stand_reject_debug_total)
+        kpis["early_stand_reject_debug_truncated"] = bool(
+            early_stand_reject_debug_total > len(early_stand_reject_debug_samples)
+        )
+        kpis["early_stand_reject_debug_samples"] = list(early_stand_reject_debug_samples)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min

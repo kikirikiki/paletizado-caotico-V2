@@ -4,7 +4,7 @@ import copy
 from collections import deque
 from dataclasses import dataclass
 import math
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
@@ -40,6 +40,14 @@ class EarlyStandDecision:
     projected_placed_loss: int = 0
     projected_lfr_loss_ratio: float = 0.0
     projected_height_std_increase_mm: float = 0.0
+    debug_payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AccessGateEvaluation:
+    passed: bool
+    reject_checks: tuple[str, ...] = ()
+    reject_detail: str = ""
 
 
 def build_early_stand_config(
@@ -170,13 +178,7 @@ def passes_access_gate(
     candidate: HardFloorFutureMetrics,
     config: HardFloorEarlyStandConfig,
 ) -> bool:
-    if float(candidate.inaccessible_pocket_area_mm2) > float(baseline.inaccessible_pocket_area_mm2):
-        return False
-    if float(candidate.boundary_connected_free_area_mm2) < float(baseline.boundary_connected_free_area_mm2):
-        return False
-    if float(candidate.min_boundary_mouth_mm) < float(config.min_access_mouth_mm):
-        return False
-    return True
+    return _evaluate_access_gate(baseline=baseline, candidate=candidate, config=config).passed
 
 
 def admit_early_stands(
@@ -191,6 +193,8 @@ def admit_early_stands(
     preview_fn: Callable[[object, Box], PlacementPreview],
     lookahead_items: int,
     remaining_count: int,
+    step_idx: int,
+    pallet_id: int | str,
 ) -> tuple[list[int], list[EarlyStandDecision], HardFloorFutureMetrics]:
     baseline_metrics = simulate_floor_only_future(
         pallet=pallet,
@@ -224,6 +228,16 @@ def admit_early_stands(
                     candidate_index=int(candidate_index),
                     admitted=False,
                     reject_reason="geom",
+                    debug_payload=_build_reject_debug_payload(
+                        step_idx=int(step_idx),
+                        pallet_id=pallet_id,
+                        stand_preview=stand_preview,
+                        baseline_metrics=baseline_metrics,
+                        stand_metrics=None,
+                        reject_reason="geom",
+                        access_eval=None,
+                        config=config,
+                    ),
                 )
             )
             continue
@@ -250,11 +264,26 @@ def admit_early_stands(
                     projected_placed_loss=int(placed_loss),
                     projected_lfr_loss_ratio=float(lfr_loss_ratio),
                     projected_height_std_increase_mm=float(height_std_increase),
+                    debug_payload=_build_reject_debug_payload(
+                        step_idx=int(step_idx),
+                        pallet_id=pallet_id,
+                        stand_preview=stand_preview,
+                        baseline_metrics=baseline_metrics,
+                        stand_metrics=stand_metrics,
+                        reject_reason="regret",
+                        access_eval=None,
+                        config=config,
+                    ),
                 )
             )
             continue
 
-        if not passes_access_gate(baseline=baseline_metrics, candidate=stand_metrics, config=config):
+        access_eval = _evaluate_access_gate(
+            baseline=baseline_metrics,
+            candidate=stand_metrics,
+            config=config,
+        )
+        if not access_eval.passed:
             decisions.append(
                 EarlyStandDecision(
                     candidate_index=int(candidate_index),
@@ -263,6 +292,16 @@ def admit_early_stands(
                     projected_placed_loss=int(placed_loss),
                     projected_lfr_loss_ratio=float(lfr_loss_ratio),
                     projected_height_std_increase_mm=float(height_std_increase),
+                    debug_payload=_build_reject_debug_payload(
+                        step_idx=int(step_idx),
+                        pallet_id=pallet_id,
+                        stand_preview=stand_preview,
+                        baseline_metrics=baseline_metrics,
+                        stand_metrics=stand_metrics,
+                        reject_reason="access",
+                        access_eval=access_eval,
+                        config=config,
+                    ),
                 )
             )
             continue
@@ -280,6 +319,105 @@ def admit_early_stands(
         )
 
     return admitted, decisions, baseline_metrics
+
+
+def _evaluate_access_gate(
+    *,
+    baseline: HardFloorFutureMetrics,
+    candidate: HardFloorFutureMetrics,
+    config: HardFloorEarlyStandConfig,
+) -> AccessGateEvaluation:
+    checks: list[str] = []
+    details: list[str] = []
+
+    baseline_pocket = float(baseline.inaccessible_pocket_area_mm2)
+    candidate_pocket = float(candidate.inaccessible_pocket_area_mm2)
+    if candidate_pocket > baseline_pocket:
+        checks.append("inaccessible_pocket_area_mm2_increase")
+        details.append(f"inaccessible_pocket_area_mm2({candidate_pocket:.1f}>{baseline_pocket:.1f})")
+
+    baseline_connected = float(baseline.boundary_connected_free_area_mm2)
+    candidate_connected = float(candidate.boundary_connected_free_area_mm2)
+    if candidate_connected < baseline_connected:
+        checks.append("boundary_connected_free_area_mm2_drop")
+        details.append(f"boundary_connected_free_area_mm2({candidate_connected:.1f}<{baseline_connected:.1f})")
+
+    candidate_mouth = float(candidate.min_boundary_mouth_mm)
+    min_mouth = float(config.min_access_mouth_mm)
+    if candidate_mouth < min_mouth:
+        checks.append("min_boundary_mouth_mm_below_threshold")
+        details.append(f"min_boundary_mouth_mm({candidate_mouth:.1f}<{min_mouth:.1f})")
+
+    return AccessGateEvaluation(
+        passed=len(checks) == 0,
+        reject_checks=tuple(checks),
+        reject_detail="; ".join(details),
+    )
+
+
+def _build_reject_debug_payload(
+    *,
+    step_idx: int,
+    pallet_id: int | str,
+    stand_preview: PlacementPreview,
+    baseline_metrics: HardFloorFutureMetrics,
+    stand_metrics: HardFloorFutureMetrics | None,
+    reject_reason: str,
+    access_eval: AccessGateEvaluation | None,
+    config: HardFloorEarlyStandConfig,
+) -> dict[str, Any]:
+    placement = getattr(stand_preview, "placement", None)
+    orientation_family = str(getattr(placement, "orientation_family", "") or "")
+    orientation_name = str(getattr(placement, "orientation_name", "") or "")
+    orientation = orientation_name or orientation_family
+    x_mm = int(getattr(placement, "x_mm", 0) or 0)
+    y_mm = int(getattr(placement, "y_mm", 0) or 0)
+    l_mm = int(getattr(placement, "length_mm", 0) or 0)
+    w_mm = int(getattr(placement, "width_mm", 0) or 0)
+    if isinstance(pallet_id, int):
+        pallet_value: int | str = int(pallet_id)
+    else:
+        pallet_value = str(pallet_id)
+
+    return {
+        "step": int(step_idx),
+        "pallet_id": pallet_value,
+        "orientation": orientation,
+        "orientation_family": orientation_family,
+        "orientation_name": orientation_name,
+        "x": x_mm,
+        "y": y_mm,
+        "l": l_mm,
+        "w": w_mm,
+        "reject_reason": str(reject_reason or ""),
+        "access_reject_checks": list(access_eval.reject_checks) if access_eval is not None else [],
+        "access_reject_reason": str(access_eval.reject_detail or "") if access_eval is not None else "",
+        "access_min_mouth_threshold_mm": float(config.min_access_mouth_mm),
+        "boundary_connected_free_area_mm2": {
+            "baseline": float(baseline_metrics.boundary_connected_free_area_mm2),
+            "stand": float(stand_metrics.boundary_connected_free_area_mm2) if stand_metrics is not None else None,
+        },
+        "inaccessible_pocket_area_mm2": {
+            "baseline": float(baseline_metrics.inaccessible_pocket_area_mm2),
+            "stand": float(stand_metrics.inaccessible_pocket_area_mm2) if stand_metrics is not None else None,
+        },
+        "min_boundary_mouth_mm": {
+            "baseline": float(baseline_metrics.min_boundary_mouth_mm),
+            "stand": float(stand_metrics.min_boundary_mouth_mm) if stand_metrics is not None else None,
+        },
+        "largest_free_rect_area_mm2": {
+            "baseline": float(baseline_metrics.largest_free_rect_area_mm2),
+            "stand": float(stand_metrics.largest_free_rect_area_mm2) if stand_metrics is not None else None,
+        },
+        "placed_count": {
+            "baseline": int(baseline_metrics.placed_count),
+            "stand": int(stand_metrics.placed_count) if stand_metrics is not None else None,
+        },
+        "height_std_mm": {
+            "baseline": float(baseline_metrics.height_std_mm),
+            "stand": float(stand_metrics.height_std_mm) if stand_metrics is not None else None,
+        },
+    }
 
 
 def _simulate_future(
