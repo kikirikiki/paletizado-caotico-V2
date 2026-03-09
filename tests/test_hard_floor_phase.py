@@ -381,6 +381,63 @@ def test_hard_floor_phase_policy_off_keeps_legacy_behavior() -> None:
     assert int(policy_off.hard_floor_phase_stand_mix_bonus_applied_total) == 1
 
 
+def test_hard_floor_phase_regret_gated_falls_back_to_legacy_when_only_stand_floor_exists() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=90,
+            width_mm=70,
+            height_mm=40,
+            packing_gain=3.0,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_a",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=90,
+            y_mm=0,
+            length_mm=90,
+            width_mm=70,
+            height_mm=40,
+            packing_gain=2.5,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_b",
+        ),
+    }
+    pallet_off = FakePallet(previews, bin_length_mm=220, bin_width_mm=160)
+    pallet_regret = FakePallet(previews, bin_length_mm=220, bin_width_mm=160)
+
+    off_mode = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="off",
+        )
+    )
+    regret_mode = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_early_stand_policy="regret_gated",
+            hard_floor_phase_early_stand_min_access_mouth_mm=180,
+        )
+    )
+
+    off_plan = off_mode.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_off))
+    regret_plan = regret_mode.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet_regret))
+    assert off_plan is not None and regret_plan is not None
+    assert str(off_plan.preview.placement.orientation_family) == "stand_hw"
+    assert str(regret_plan.preview.placement.orientation_family) == str(off_plan.preview.placement.orientation_family)
+    assert float(regret_plan.score) == float(off_plan.score)
+    assert int(regret_mode.hard_floor_phase_chosen_total) == int(off_mode.hard_floor_phase_chosen_total) == 1
+    assert int(regret_mode.hard_floor_phase_exit_no_floor_total) == 0
+    assert int(regret_mode.early_stand_selected_total) == 0
+
+
 def test_hard_floor_phase_regret_gated_rejects_when_projected_placed_loss_increases() -> None:
     def feasible_if(box: Box, placements: list[Placement]) -> bool:
         has_stand = any(str(getattr(p, "orientation_family", "") or "").lower() == "stand_hw" for p in placements)

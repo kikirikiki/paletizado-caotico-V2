@@ -239,6 +239,7 @@ class _HardFloorScoredCandidate:
     candidate: _ScoredCandidate
     base_score: float
     stand_mix_bonus_applied: bool = False
+    early_stand_admitted: bool = False
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ class _HardFloorScoredExpansion:
     expansion: _BeamExpansion
     base_score: float
     stand_mix_bonus_applied: bool = False
+    early_stand_admitted: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,6 +263,7 @@ class _HardFloorRankedIndex:
     index: int
     score: float
     stand_mix_bonus_applied: bool = False
+    early_stand_admitted: bool = False
 
 
 class SchedulerV1:
@@ -618,6 +621,7 @@ class SchedulerV1:
                     selected.plan,
                     selected.terms.scalar_score,
                     stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
+                    early_stand_admitted=bool(hard_floor_selected.early_stand_admitted),
                 )
             else:
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
@@ -777,6 +781,7 @@ class SchedulerV1:
                                 chosen_plan,
                                 chosen.base_score,
                                 stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
+                                early_stand_admitted=bool(chosen.early_stand_admitted),
                             )
                             stats = {
                                 "enabled": True,
@@ -1528,6 +1533,42 @@ class SchedulerV1:
                 getattr(decision, "projected_height_std_increase_mm", 0.0) or 0.0
             )
 
+    def _hard_floor_phase_rank_legacy_floor_inputs(
+        self,
+        *,
+        floor_inputs: Sequence[_HardFloorRankInput],
+        pallet: PalletModel,
+        future_boxes: Sequence[Box],
+    ) -> list[_HardFloorRankedIndex]:
+        ranked_legacy: list[_HardFloorRankedIndex] = []
+        for item in floor_inputs:
+            base_score = self._hard_floor_phase_score_preview(
+                pallet=pallet,
+                preview=item.preview,
+                future_boxes=future_boxes,
+                selected_box=item.box,
+                include_stand_bias=True,
+            )
+            placement = getattr(item.preview, "placement", None)
+            is_stand_hw = self._placement_is_stand_hw(placement)
+            if is_stand_hw:
+                self.hard_floor_phase_stand_mix_candidates_total += 1
+            scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                base_score=float(base_score),
+                placement=placement,
+            )
+            if stand_mix_bonus_applied:
+                self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+            ranked_legacy.append(
+                _HardFloorRankedIndex(
+                    index=int(item.index),
+                    score=float(scored_value),
+                    stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                    early_stand_admitted=False,
+                )
+            )
+        return ranked_legacy
+
     def _hard_floor_phase_rank_group(
         self,
         *,
@@ -1546,33 +1587,11 @@ class SchedulerV1:
             if len(floor_inputs) < int(min_floor):
                 self._hard_floor_phase_mark_exit_no_floor(pallet_id)
                 return []
-            ranked_legacy: list[_HardFloorRankedIndex] = []
-            for item in floor_inputs:
-                base_score = self._hard_floor_phase_score_preview(
-                    pallet=pallet,
-                    preview=item.preview,
-                    future_boxes=future_boxes,
-                    selected_box=item.box,
-                    include_stand_bias=True,
-                )
-                placement = getattr(item.preview, "placement", None)
-                is_stand_hw = self._placement_is_stand_hw(placement)
-                if is_stand_hw:
-                    self.hard_floor_phase_stand_mix_candidates_total += 1
-                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
-                    base_score=float(base_score),
-                    placement=placement,
-                )
-                if stand_mix_bonus_applied:
-                    self.hard_floor_phase_stand_mix_bonus_applied_total += 1
-                ranked_legacy.append(
-                    _HardFloorRankedIndex(
-                        index=int(item.index),
-                        score=float(scored_value),
-                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
-                    )
-                )
-            return ranked_legacy
+            return self._hard_floor_phase_rank_legacy_floor_inputs(
+                floor_inputs=floor_inputs,
+                pallet=pallet,
+                future_boxes=future_boxes,
+            )
 
         planar_floor_inputs = [
             item for item in floor_inputs if not self._placement_is_stand_hw(getattr(item.preview, "placement", None))
@@ -1581,9 +1600,16 @@ class SchedulerV1:
         self.hard_floor_phase_stand_mix_candidates_total += int(len(stand_inputs))
         self.early_stand_candidates_total += int(len(stand_inputs))
 
-        if len(planar_floor_inputs) < int(min_floor):
+        # Si regret_gated no puede operar (sin planar-floor suficiente), mantener fallback exacto a legacy/off.
+        if len(floor_inputs) < int(min_floor):
             self._hard_floor_phase_mark_exit_no_floor(pallet_id)
             return []
+        if len(planar_floor_inputs) < int(min_floor):
+            return self._hard_floor_phase_rank_legacy_floor_inputs(
+                floor_inputs=floor_inputs,
+                pallet=pallet,
+                future_boxes=future_boxes,
+            )
 
         floor_scored: list[tuple[_HardFloorRankInput, float]] = []
         for item in planar_floor_inputs:
@@ -1600,7 +1626,12 @@ class SchedulerV1:
             return []
 
         ranked_out = [
-            _HardFloorRankedIndex(index=int(item.index), score=float(score), stand_mix_bonus_applied=False)
+            _HardFloorRankedIndex(
+                index=int(item.index),
+                score=float(score),
+                stand_mix_bonus_applied=False,
+                early_stand_admitted=False,
+            )
             for item, score in floor_scored
         ]
 
@@ -1654,11 +1685,22 @@ class SchedulerV1:
         )
         self._hard_floor_phase_record_early_stand_decisions(decisions)
         admitted_set = set(int(idx) for idx in admitted_indices)
+        if not admitted_set:
+            return self._hard_floor_phase_rank_legacy_floor_inputs(
+                floor_inputs=floor_inputs,
+                pallet=pallet,
+                future_boxes=future_boxes,
+            )
         for item, score in top_stands:
             if int(item.index) not in admitted_set:
                 continue
             ranked_out.append(
-                _HardFloorRankedIndex(index=int(item.index), score=float(score), stand_mix_bonus_applied=False)
+                _HardFloorRankedIndex(
+                    index=int(item.index),
+                    score=float(score),
+                    stand_mix_bonus_applied=False,
+                    early_stand_admitted=True,
+                )
             )
         return ranked_out
 
@@ -1715,6 +1757,7 @@ class SchedulerV1:
                         candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
                         base_score=float(ranked.score),
                         stand_mix_bonus_applied=bool(ranked.stand_mix_bonus_applied),
+                        early_stand_admitted=bool(ranked.early_stand_admitted),
                     )
                 )
 
@@ -1787,6 +1830,7 @@ class SchedulerV1:
                         expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
                         base_score=float(ranked.score),
                         stand_mix_bonus_applied=bool(ranked.stand_mix_bonus_applied),
+                        early_stand_admitted=bool(ranked.early_stand_admitted),
                     )
                 )
 
@@ -1980,6 +2024,7 @@ class SchedulerV1:
         base_score: float,
         *,
         stand_mix_bonus_applied: bool = False,
+        early_stand_admitted: bool = False,
     ) -> None:
         self.hard_floor_phase_chosen_total += 1
         self.hard_floor_phase_score_sum += float(base_score)
@@ -1988,7 +2033,10 @@ class SchedulerV1:
             self.hard_floor_phase_stand_hw_chosen_total += 1
             if stand_mix_bonus_applied:
                 self.hard_floor_phase_stand_mix_chosen_total += 1
-            if self._hard_floor_phase_early_stand_config().policy == "regret_gated":
+            if (
+                self._hard_floor_phase_early_stand_config().policy == "regret_gated"
+                and bool(early_stand_admitted)
+            ):
                 pallet_id = plan.pallet_id
                 self.early_stand_selected_total += 1
                 current_count = int(self._hard_floor_phase_early_stand_selected_count_by_pallet.get(pallet_id, 0) or 0)
