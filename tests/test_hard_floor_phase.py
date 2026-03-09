@@ -488,6 +488,135 @@ def test_hard_floor_phase_morphology_rejects_strong_height_gap_increase() -> Non
     assert int(plan.box_id) == 2
 
 
+def test_hard_floor_phase_morphology_prefers_floor_when_base_open_even_with_low_floor_count() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=120, x_mm=0, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=9.0),
+            2: PreviewSpec(z_mm=0, x_mm=40, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=0.1),
+        },
+        bin_area_mm2=12_000,
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=401,
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=60,
+            orientation_family="planar",
+            orientation_name="seed_open_base",
+        )
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=5,
+            hard_floor_phase_min_base_candidates=2,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.preview.placement.z_mm) == 0
+
+
+def test_hard_floor_phase_morphology_allows_stacking_when_base_is_closed() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=160, x_mm=0, y_mm=0, length_mm=40, width_mm=30, height_mm=40, packing_gain=9.0),
+            2: PreviewSpec(z_mm=0, x_mm=40, y_mm=30, length_mm=40, width_mm=30, height_mm=40, packing_gain=0.1),
+        },
+        bin_area_mm2=4_800,
+    )
+    pallet.placements.extend(
+        [
+            _placement(
+                box_id=501,
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=30,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_a",
+            ),
+            _placement(
+                box_id=502,
+                z_mm=0,
+                x_mm=40,
+                y_mm=0,
+                length_mm=40,
+                width_mm=30,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_b",
+            ),
+            _placement(
+                box_id=503,
+                z_mm=0,
+                x_mm=0,
+                y_mm=30,
+                length_mm=40,
+                width_mm=30,
+                height_mm=60,
+                orientation_family="planar",
+                orientation_name="seed_c",
+            ),
+        ]
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=2,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.preview.placement.z_mm) > 0
+
+
+def test_hard_floor_phase_morphology_floor_delay_policy_off_mode_keeps_legacy() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=120, x_mm=0, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=9.0),
+            2: PreviewSpec(z_mm=0, x_mm=40, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=0.1),
+        },
+        bin_area_mm2=12_000,
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=601,
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=60,
+            orientation_family="planar",
+            orientation_name="seed_open_base",
+        )
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=5,
+            hard_floor_phase_min_base_candidates=2,
+            hard_floor_phase_morphology_mode="off",
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.preview.placement.z_mm) > 0
+
+
 def test_hard_floor_phase_morphology_mode_off_keeps_legacy_behavior() -> None:
     previews = {
         1: PreviewSpec(
