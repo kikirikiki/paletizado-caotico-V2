@@ -45,6 +45,13 @@ class PalletStats:
     stand_hw_gate_blocks_total: int = 0
     stand_hw_gate_allows_total: int = 0
     stand_hw_rejected_support_total: int = 0
+    support_frontier_refine_attempts: int = 0
+    support_frontier_candidates_rescued: int = 0
+    support_frontier_rescued_support_ratio: int = 0
+    support_frontier_rescued_corner_support: int = 0
+    support_frontier_selected_placements: int = 0
+    support_frontier_selected_support_ratio: int = 0
+    support_frontier_selected_corner_support: int = 0
 
     def record_settle(self, settle_mm: float) -> None:
         self.settle_adjustments_count += 1
@@ -532,6 +539,12 @@ class PalletModel:
             settle_mm = preview.debug.get("settle_mm")
             if isinstance(settle_mm, (int, float)) and settle_mm > 0:
                 self.stats.record_settle(float(settle_mm))
+        if preview.debug and bool(preview.debug.get("support_frontier_rescued", False)):
+            self.stats.support_frontier_selected_placements += 1
+            if bool(preview.debug.get("support_frontier_rescue_reason_support", False)):
+                self.stats.support_frontier_selected_support_ratio += 1
+            if bool(preview.debug.get("support_frontier_rescue_reason_corners", False)):
+                self.stats.support_frontier_selected_corner_support += 1
         if self.stacking_mode == STACKING_MODE_HEIGHTFIELD:
             layer = self._ensure_heightfield_base_layer()
             cand = MaxRectsCandidate(
