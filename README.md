@@ -43,6 +43,11 @@ PYTHONPATH=src ./.venv/bin/python scripts/ablation_runner.py \
   --variants planar gate0 gate400 gate2400
 ```
 
+## Benchmark canónico 1-pallet (oficial)
+- Fuente de verdad: `configs/benchmarks/one_pallet_canonical.json`
+- Script oficial: `scripts/benchmark_one_pallet_canonical.py`
+- Guía y validación de discriminatividad: `docs/benchmarking.md`
+
 ## Reglas Git (resumen)
 - Cambios siempre en rama nueva: `feat/<tema>` o `fix/<tema>`
 - No commitear: `out/`, `outputs/`, `logs/`, `.venv/`, `__pycache__/`

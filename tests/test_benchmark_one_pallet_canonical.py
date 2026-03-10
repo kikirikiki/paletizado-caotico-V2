@@ -17,6 +17,11 @@ def test_load_profile_canonical_has_required_shape() -> None:
     assert set(profile["params"].keys()) == set(bench.REQUIRED_PARAM_KEYS)
 
 
+def test_required_profile_keys_align_run_simulation_signature() -> None:
+    expected = set(bench.RUN_SIMULATION_PARAM_KEYS - bench.RUN_SIM_EXCLUDED_PROFILE_KEYS)
+    assert set(bench.REQUIRED_PARAM_KEYS) == expected
+
+
 def test_load_profile_fails_when_required_param_missing(tmp_path: Path) -> None:
     src = Path("configs/benchmarks/one_pallet_canonical.json")
     payload = json.loads(src.read_text(encoding="utf-8"))
@@ -26,6 +31,18 @@ def test_load_profile_fails_when_required_param_missing(tmp_path: Path) -> None:
     broken_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="faltan parametros requeridos"):
+        bench.load_profile(broken_path)
+
+
+def test_load_profile_fails_when_unknown_param_present(tmp_path: Path) -> None:
+    src = Path("configs/benchmarks/one_pallet_canonical.json")
+    payload = json.loads(src.read_text(encoding="utf-8"))
+    payload["params"]["orphan_param"] = 123
+
+    broken_path = tmp_path / "broken_profile_unknown.json"
+    broken_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="parametros desconocidos/no usados"):
         bench.load_profile(broken_path)
 
 
@@ -45,6 +62,36 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
     assert merged["lookahead_k"] == 10
     assert merged["micro_width"] == 60
     assert merged["score_mode"] == "gain_frag"
+
+
+def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
+    profile = bench.load_profile("configs/benchmarks/one_pallet_canonical.json")
+    kwargs = bench.build_run_simulation_kwargs(
+        params=profile["params"],
+        excel_path=profile["excel"],
+        out_path=Path("/tmp/seed_50021.json"),
+        seed=50021,
+        dump_placements_path=Path("/tmp/seed_50021_placements.json"),
+    )
+    assert set(kwargs.keys()).issubset(set(bench.RUN_SIMULATION_PARAM_KEYS))
+    assert kwargs["lookahead_k"] == profile["params"]["lookahead_k"]
+    assert "k" not in kwargs
+    assert kwargs["episode_seed"] == 50021
+    assert kwargs["excel_path"] == profile["excel"]
+
+
+def test_build_run_simulation_kwargs_fails_on_orphan_param() -> None:
+    profile = bench.load_profile("configs/benchmarks/one_pallet_canonical.json")
+    params = dict(profile["params"])
+    params["orphan_param"] = "x"
+    with pytest.raises(ValueError, match="run_simulation no acepta"):
+        bench.build_run_simulation_kwargs(
+            params=params,
+            excel_path=profile["excel"],
+            out_path=Path("/tmp/seed_50021.json"),
+            seed=50021,
+            dump_placements_path=Path("/tmp/seed_50021_placements.json"),
+        )
 
 
 def test_run_benchmark_generates_summary_with_expected_structure(
@@ -112,6 +159,13 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     assert summary["runs"]["variant"]["overrides"]["lookahead_k"] == 10
     assert summary["runs"]["baseline"]["effective_config_hash"] != summary["runs"]["variant"]["effective_config_hash"]
+    assert summary["param_contract"]["missing_required_in_profile"] == []
+    assert summary["param_contract"]["unknown_in_profile"] == []
+    assert "lookahead_k" in summary["param_contract"]["run_simulation_param_keys"]
+    assert summary["discriminative"]["baseline"]["is_flat_processed_boxes"] is False
+    assert summary["discriminative"]["variant"]["is_flat_processed_boxes"] is False
+    assert summary["runs"]["baseline"]["effective_params"]["lookahead_k"] == 15
+    assert summary["runs"]["variant"]["effective_params"]["lookahead_k"] == 10
 
     summary_csv = Path(summary["files"]["summary_csv"])
     summary_json = Path(summary["files"]["summary_json"])
