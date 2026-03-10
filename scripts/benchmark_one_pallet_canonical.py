@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from palca.integration.reentry_diagnostics import (
+    build_consolidated_reentry_report,
+    build_seed_reentry_report_from_dump,
+)
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -602,6 +606,72 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         )
 
 
+def _write_reentry_autopsy_artifacts(
+    *,
+    rows: list[SeedSummary],
+    run_output_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    by_run: dict[str, list[dict[str, Any]]] = {}
+
+    for row in rows:
+        dump_path = Path(str(row.placements_json))
+        if not dump_path.exists():
+            continue
+        try:
+            dump_payload = json.loads(dump_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        seed_report = build_seed_reentry_report_from_dump(
+            dump_payload=dump_payload,
+            seed=int(row.seed),
+        )
+        by_run.setdefault(str(row.run_label), []).append(seed_report)
+
+        seed_report_path = dump_path.with_name(f"seed_{int(row.seed)}_reentry_autopsy.json")
+        seed_report_path.write_text(
+            json.dumps(seed_report, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    consolidated: dict[str, Any] = {}
+    files: dict[str, Any] = {}
+    for run_label, reports in by_run.items():
+        reports_sorted = sorted(reports, key=lambda item: int(item.get("seed", 0)))
+        consolidated_payload = build_consolidated_reentry_report(reports_sorted)
+        consolidated[run_label] = consolidated_payload
+
+        json_path = run_output_dir / f"reentry_autopsy_{run_label}.json"
+        json_path.write_text(
+            json.dumps(consolidated_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+        csv_path = run_output_dir / f"reentry_autopsy_{run_label}.csv"
+        rows_csv = list(consolidated_payload.get("rows", []) or [])
+        headers = [
+            "seed",
+            "step",
+            "drop_mm",
+            "box_id",
+            "had_alternative_without_reentry",
+            "dominant_cause",
+            "classification",
+        ]
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers)
+            writer.writeheader()
+            for item in rows_csv:
+                writer.writerow({key: item.get(key) for key in headers})
+
+        files[run_label] = {
+            "json": str(json_path),
+            "csv": str(csv_path),
+        }
+
+    return consolidated, files
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -697,6 +767,11 @@ def run_benchmark(
         for row in rows_sorted:
             writer.writerow(asdict(row))
 
+    reentry_autopsy, reentry_autopsy_files = _write_reentry_autopsy_artifacts(
+        rows=rows_sorted,
+        run_output_dir=run_output_dir,
+    )
+
     aggregates = _aggregate_rows(rows_sorted)
     discriminative = _discriminative_status(rows_sorted)
     baseline_flat = bool(discriminative.get("baseline", {}).get("is_flat_processed_boxes"))
@@ -746,10 +821,12 @@ def run_benchmark(
         },
         "aggregates": aggregates,
         "discriminative": discriminative,
+        "reentry_autopsy": reentry_autopsy,
         "rows": [asdict(r) for r in rows_sorted],
         "files": {
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
+            "reentry_autopsy": reentry_autopsy_files,
         },
     }
 
