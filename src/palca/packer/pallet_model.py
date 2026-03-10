@@ -429,6 +429,49 @@ class PalletModel:
                     best_tie = tie
             return best
 
+        def _candidate_summary_rows(candidates: list[_LayerCandidate], *, limit: int = 12) -> list[dict[str, Any]]:
+            ranked = sorted(
+                candidates,
+                key=lambda cand: (
+                    float(_objective(cand)),
+                    int(cand.layer_id),
+                    -int(cand.candidate.x),
+                    -int(cand.candidate.y),
+                ),
+                reverse=True,
+            )[: max(1, int(limit))]
+            rows: list[dict[str, Any]] = []
+            for cand in ranked:
+                placement = cand.placement
+                rows.append(
+                    {
+                        "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                        "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                        "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                        "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                        "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                        "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                        "layer_id": int(cand.layer_id),
+                        "objective": float(_objective(cand)),
+                    }
+                )
+            return rows
+
+        def _attach_candidate_summary(
+            best: _LayerCandidate,
+            *,
+            candidates: list[_LayerCandidate],
+            scope: str,
+        ) -> None:
+            if not candidates:
+                return
+            z_values = [int(getattr(cand.placement, "z_mm", 0) or 0) for cand in candidates if cand.placement is not None]
+            best.debug["candidate_layer_scope"] = str(scope)
+            best.debug["feasible_candidates_count"] = int(len(candidates))
+            best.debug["feasible_candidates_min_z_mm"] = int(min(z_values)) if z_values else None
+            best.debug["feasible_candidates_max_z_mm"] = int(max(z_values)) if z_values else None
+            best.debug["feasible_candidates_top"] = _candidate_summary_rows(candidates)
+
         def _build_preview(best: _LayerCandidate) -> PlacementPreview:
             placement = best.placement
             debug = dict(best.debug)
@@ -463,6 +506,7 @@ class PalletModel:
             evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
+                _attach_candidate_summary(best, candidates=layer_candidates, scope="active_layer")
                 return _build_preview(best)
 
         if self._can_open_new_layer_for_orientations(orientation_variants):
@@ -484,6 +528,7 @@ class PalletModel:
             evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
+                _attach_candidate_summary(best, candidates=layer_candidates, scope="new_layer")
                 return _build_preview(best)
 
         reason = "NO_SPACE"
@@ -807,6 +852,8 @@ class PalletModel:
                     score_delta += float(result.score_delta)
                     adjusted = result.placement
                     if not result.feasible:
+                        if result.reason:
+                            debug["rejection_reason"] = str(result.reason)
                         rejected_by_controls += 1
                         feasible = False
                         break
@@ -866,11 +913,41 @@ class PalletModel:
                     "y": int(adjusted.y_mm),
                     "w": int(adjusted.length_mm),
                     "h": int(adjusted.width_mm),
+                    "x_mm": int(adjusted.x_mm),
+                    "y_mm": int(adjusted.y_mm),
+                    "z_mm": int(adjusted.z_mm),
+                    "length_mm": int(adjusted.length_mm),
+                    "width_mm": int(adjusted.width_mm),
+                    "height_mm": int(adjusted.height_mm),
+                    "top_z_mm": int(adjusted.z_mm) + int(adjusted.height_mm),
+                    "layer_id": int(getattr(adjusted, "layer_id", 0) or 0),
+                    "orientation_family": getattr(adjusted, "orientation_family", None),
+                    "orientation_name": getattr(adjusted, "orientation_name", None),
                 }
                 if "support_ratio" in debug:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
+                if "required_support_ratio" in debug:
+                    candidate_info["required_support_ratio"] = float(debug["required_support_ratio"])
+                if "support_area_mm2" in debug:
+                    candidate_info["support_area_mm2"] = float(debug["support_area_mm2"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "corners_supported" in debug:
+                    candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "supported_overlaps_count" in debug:
+                    candidate_info["supported_overlaps_count"] = int(debug["supported_overlaps_count"])
+                if "settle_mm" in debug:
+                    candidate_info["settle_mm"] = float(debug["settle_mm"])
+                if "settled_z_before_mm" in debug:
+                    candidate_info["settled_z_before_mm"] = float(debug["settled_z_before_mm"])
+                if "settled_z_after_mm" in debug:
+                    candidate_info["settled_z_after_mm"] = float(debug["settled_z_after_mm"])
+                if "loadbear_ratio" in debug:
+                    candidate_info["loadbear_ratio"] = float(debug["loadbear_ratio"])
+                if "support_capacity" in debug:
+                    candidate_info["support_capacity"] = float(debug["support_capacity"])
+                if "rejection_reason" in debug:
+                    candidate_info["rejection_reason"] = str(debug["rejection_reason"])
                 evaluated_candidates.append((float(objective), candidate_info))
 
                 if not feasible:
@@ -1022,6 +1099,7 @@ class PalletModel:
 
         rejected_by_controls = 0
         rejected_by_height = 0
+        height_limit_candidates: list[dict[str, Any]] = []
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         candidates: list[_LayerCandidate] = []
         coverage_enabled = (
@@ -1094,6 +1172,34 @@ class PalletModel:
                     best_tie = tie
             return best
 
+        def _candidate_summary_rows(candidates_local: list[_LayerCandidate], *, limit: int = 12) -> list[dict[str, Any]]:
+            ranked = sorted(
+                candidates_local,
+                key=lambda cand: (
+                    float(_objective(cand)),
+                    int(cand.layer_id),
+                    -int(cand.candidate.x),
+                    -int(cand.candidate.y),
+                ),
+                reverse=True,
+            )[: max(1, int(limit))]
+            rows: list[dict[str, Any]] = []
+            for cand in ranked:
+                placement = cand.placement
+                rows.append(
+                    {
+                        "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                        "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                        "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                        "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                        "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                        "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                        "layer_id": int(cand.layer_id),
+                        "objective": float(_objective(cand)),
+                    }
+                )
+            return rows
+
         stop_search = False
         for orientation in orientation_variants:
             if budget is not None and budget.should_stop():
@@ -1118,6 +1224,22 @@ class PalletModel:
                 top_z = int(z_mm) + int(h_mm)
                 if top_z > max_height:
                     rejected_by_height += 1
+                    height_limit_candidates.append(
+                        {
+                            "x_mm": int(x_mm),
+                            "y_mm": int(y_mm),
+                            "z_mm": int(z_mm),
+                            "length_mm": int(l_mm),
+                            "width_mm": int(w_mm),
+                            "height_mm": int(h_mm),
+                            "layer_id": 0,
+                            "top_z_mm": int(top_z),
+                            "max_height_mm": int(max_height),
+                            "overflow_mm": int(top_z - max_height),
+                            "orientation_family": str(orientation.family),
+                            "orientation_name": str(orientation.name),
+                        }
+                    )
                     continue
 
                 rect_candidate = MaxRectsCandidate(
@@ -1174,6 +1296,8 @@ class PalletModel:
                     score_delta += float(result.score_delta)
                     adjusted = result.placement
                     if not result.feasible:
+                        if result.reason:
+                            debug["rejection_reason"] = str(result.reason)
                         rejected_by_controls += 1
                         feasible = False
                         break
@@ -1234,11 +1358,41 @@ class PalletModel:
                     "y": int(adjusted.y_mm),
                     "w": int(adjusted.length_mm),
                     "h": int(adjusted.width_mm),
+                    "x_mm": int(adjusted.x_mm),
+                    "y_mm": int(adjusted.y_mm),
+                    "z_mm": int(adjusted.z_mm),
+                    "length_mm": int(adjusted.length_mm),
+                    "width_mm": int(adjusted.width_mm),
+                    "height_mm": int(adjusted.height_mm),
+                    "top_z_mm": int(adjusted.z_mm) + int(adjusted.height_mm),
+                    "layer_id": int(getattr(adjusted, "layer_id", 0) or 0),
+                    "orientation_family": getattr(adjusted, "orientation_family", None),
+                    "orientation_name": getattr(adjusted, "orientation_name", None),
                 }
                 if "support_ratio" in debug:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
+                if "required_support_ratio" in debug:
+                    candidate_info["required_support_ratio"] = float(debug["required_support_ratio"])
+                if "support_area_mm2" in debug:
+                    candidate_info["support_area_mm2"] = float(debug["support_area_mm2"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "corners_supported" in debug:
+                    candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "supported_overlaps_count" in debug:
+                    candidate_info["supported_overlaps_count"] = int(debug["supported_overlaps_count"])
+                if "settle_mm" in debug:
+                    candidate_info["settle_mm"] = float(debug["settle_mm"])
+                if "settled_z_before_mm" in debug:
+                    candidate_info["settled_z_before_mm"] = float(debug["settled_z_before_mm"])
+                if "settled_z_after_mm" in debug:
+                    candidate_info["settled_z_after_mm"] = float(debug["settled_z_after_mm"])
+                if "loadbear_ratio" in debug:
+                    candidate_info["loadbear_ratio"] = float(debug["loadbear_ratio"])
+                if "support_capacity" in debug:
+                    candidate_info["support_capacity"] = float(debug["support_capacity"])
+                if "rejection_reason" in debug:
+                    candidate_info["rejection_reason"] = str(debug["rejection_reason"])
                 evaluated_candidates.append((float(objective), candidate_info))
 
                 if not feasible:
@@ -1288,6 +1442,12 @@ class PalletModel:
         if candidates:
             best = _select_best(candidates)
             debug = dict(best.debug)
+            z_values = [int(getattr(cand.placement, "z_mm", 0) or 0) for cand in candidates if cand.placement is not None]
+            debug["candidate_layer_scope"] = "heightfield_projection"
+            debug["feasible_candidates_count"] = int(len(candidates))
+            debug["feasible_candidates_min_z_mm"] = int(min(z_values)) if z_values else None
+            debug["feasible_candidates_max_z_mm"] = int(max(z_values)) if z_values else None
+            debug["feasible_candidates_top"] = _candidate_summary_rows(candidates)
             debug["rejected_by_controls"] = rejected_by_controls
             if self.z_band_mm is not None:
                 debug["z_band_enabled"] = True
@@ -1324,6 +1484,16 @@ class PalletModel:
                 reason = "CANDIDATE_LIMIT"
 
         debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
+        if reason == "HEIGHT_LIMIT" and height_limit_candidates:
+            height_limit_candidates.sort(
+                key=lambda item: (
+                    int(item.get("overflow_mm", 0)),
+                    -int(item.get("z_mm", 0)),
+                    int(item.get("x_mm", 0)),
+                    int(item.get("y_mm", 0)),
+                )
+            )
+            debug["height_limit_candidates"] = [dict(item) for item in height_limit_candidates[:12]]
         if self.z_band_mm is not None:
             debug["z_band_enabled"] = True
             debug["z_band_mm"] = int(self.z_band_mm)
