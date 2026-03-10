@@ -214,6 +214,7 @@ class SchedulerV1:
         self.last_deadlock = False
         self.last_deadlock_item: dict[str, Any] | None = None
         self.last_eval_stats: dict[str, Any] = {}
+        self.last_decision_diagnostics: dict[str, Any] = {}
         self.last_micro_plan_stats: dict[str, Any] = {}
         self.last_micro_feasible_first_candidates = 0
         self._logger = logging.getLogger(__name__)
@@ -268,6 +269,7 @@ class SchedulerV1:
         self.last_deadlock = False
         self.last_deadlock_item = None
         self.last_eval_stats = {}
+        self.last_decision_diagnostics = {}
         self.last_micro_plan_stats = {}
         self.last_micro_feasible_first_candidates = 0
         self._hard_floor_phase_active_counted_this_decision = False
@@ -360,6 +362,7 @@ class SchedulerV1:
         feasible_candidates: list[_ScoredCandidate] = []
         window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
+        evaluated_items: list[dict[str, Any]] = []
 
         for ramp_id, ramp in sim_state.ramps.items():
             ramp_items = list(ramp)[: max(1, int(lookahead_k))]
@@ -397,6 +400,13 @@ class SchedulerV1:
 
                 items_evaluated += 1
                 preview = self._preview_place(pallet, box)
+                item_record: dict[str, Any] = {
+                    "ramp_id": int(ramp_id),
+                    "buffer_index": int(idx),
+                    "box_id": getattr(box, "box_id", None),
+                    "pallet_id": pallet_id,
+                    "preview": self._preview_dict(preview),
+                }
 
                 if next_heartbeat is not None and time.perf_counter() >= next_heartbeat:
                     dims = (
@@ -448,6 +458,7 @@ class SchedulerV1:
                     next_heartbeat = time.perf_counter() + heartbeat_sec
 
                 if not preview.feasible:
+                    item_record["feasible"] = False
                     if preview.infeasible_reason in ("NO_SPACE", "HEIGHT_LIMIT"):
                         self.last_blocked_pallets[pallet_id] = preview.infeasible_reason
                     else:
@@ -462,8 +473,10 @@ class SchedulerV1:
                                     getattr(box, "height_mm", None),
                                 ),
                             }
+                    evaluated_items.append(item_record)
                     continue
                 items_feasible += 1
+                item_record["feasible"] = True
 
                 height_after_mm = self._resolve_height_after_mm(preview, pallet)
 
@@ -475,6 +488,8 @@ class SchedulerV1:
                     max_priority=max_priority,
                     height_after_mm=height_after_mm,
                 )
+                item_record["terms"] = self._score_terms_dict(terms)
+                evaluated_items.append(item_record)
                 feasible_candidates.append(
                     _ScoredCandidate(
                         plan=PickPlan(
@@ -527,6 +542,9 @@ class SchedulerV1:
         }
 
         best_plan: PickPlan | None = None
+        selected_diag: dict[str, Any] | None = None
+        selection_pool_dicts: list[dict[str, Any]] = []
+        selection_mode = "none"
         if feasible_candidates:
             hard_floor_candidates = self._hard_floor_phase_filter_scored_candidates(
                 candidates=feasible_candidates,
@@ -535,6 +553,9 @@ class SchedulerV1:
             selected: _ScoredCandidate | None = None
             slack_stats: SlackDecisionStats | None = None
             if hard_floor_candidates:
+                selection_mode = "hard_floor_phase"
+                selection_pool = [item.candidate for item in hard_floor_candidates]
+                selection_pool_dicts = [self._scored_candidate_dict(candidate) for candidate in selection_pool]
                 hard_floor_selected = max(
                     hard_floor_candidates,
                     key=lambda item: (
@@ -545,18 +566,21 @@ class SchedulerV1:
                     ),
                 )
                 selected = hard_floor_selected.candidate
+                selected_diag = self._scored_candidate_dict(selected)
                 self._record_hard_floor_phase_choice(
                     selected.plan,
                     selected.terms.scalar_score,
                     stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
                 )
             else:
+                selection_mode = "greedy"
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
                 min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
                 feasible_candidates = self._apply_tower_z_penalty_scored_candidates(
                     candidates=feasible_candidates,
                     min_feasible_height_after_mm=int(min_feasible_height_after_mm),
                 )
+                selection_pool_dicts = [self._scored_candidate_dict(candidate) for candidate in feasible_candidates]
                 best_by_slack, slack_stats = choose_with_height_slack(
                     candidates=feasible_candidates,
                     score_mode=self.config.score_mode,
@@ -574,6 +598,8 @@ class SchedulerV1:
 
             if selected is not None:
                 best_plan = selected.plan
+                if selected_diag is None:
+                    selected_diag = self._scored_candidate_dict(selected)
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
                     min_feasible_height=(
@@ -590,6 +616,22 @@ class SchedulerV1:
                 "reason": "NO_FEASIBLE_PLACEMENT",
                 "dims": None,
             }
+
+        self.last_decision_diagnostics = {
+            "mode": "greedy",
+            "selection_mode": selection_mode,
+            "items_evaluated": int(items_evaluated),
+            "items_feasible": int(items_feasible),
+            "cutoff": bool(cutoff),
+            "cutoff_reason": cutoff_reason,
+            "evaluated_items": evaluated_items,
+            "selection_pool": selection_pool_dicts,
+            "selected": (
+                dict(selected_diag)
+                if selected_diag is not None
+                else self._selected_from_pool(selected_plan=best_plan, pool=selection_pool_dicts)
+            ),
+        }
 
         return best_plan
 
@@ -630,6 +672,9 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        root_evaluated_items: list[dict[str, Any]] = []
+        root_selection_pool: list[dict[str, Any]] = []
+        root_selection_mode = "micro"
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -658,6 +703,7 @@ class SchedulerV1:
                         node=node,
                         action=action,
                         sim_state=sim_state,
+                        diagnostics=(root_evaluated_items if depth == 0 and node.first_plan is None else None),
                     )
                     if expansion is None:
                         continue
@@ -688,11 +734,16 @@ class SchedulerV1:
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    root_selection_pool = [self._beam_expansion_dict(exp) for exp in expansions]
                     hard_floor_expansions = self._hard_floor_phase_filter_beam_expansions(
                         expansions=expansions,
                         pallets=node.pallets,
                     )
                     if hard_floor_expansions:
+                        root_selection_mode = "hard_floor_phase"
+                        root_selection_pool = [
+                            self._beam_expansion_dict(item.expansion) for item in hard_floor_expansions
+                        ]
                         chosen = max(
                             hard_floor_expansions,
                             key=lambda item: (
@@ -731,6 +782,20 @@ class SchedulerV1:
                                 "batchfill_selected_layer_boxes_mean": float(
                                     float(batchfill_selected_boxes_sum_local)
                                     / max(1, int(batchfill_selected_boxes_count_local))
+                                ),
+                            }
+                            self.last_decision_diagnostics = {
+                                "mode": "micro",
+                                "selection_mode": root_selection_mode,
+                                "items_evaluated": int(len(root_evaluated_items)),
+                                "items_feasible": int(len(root_selection_pool)),
+                                "cutoff": bool(cutoff),
+                                "cutoff_reason": str(cutoff_reason),
+                                "evaluated_items": [dict(item) for item in root_evaluated_items],
+                                "selection_pool": [dict(item) for item in root_selection_pool],
+                                "selected": self._selected_from_pool(
+                                    selected_plan=chosen_plan,
+                                    pool=root_selection_pool,
                                 ),
                             }
                             return chosen_plan, stats, None
@@ -814,6 +879,23 @@ class SchedulerV1:
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
             ),
+        }
+
+        selected_plan = best_node.first_plan if best_node.first_plan is not None else None
+        self.last_decision_diagnostics = {
+            "mode": "micro",
+            "selection_mode": root_selection_mode,
+            "items_evaluated": int(len(root_evaluated_items)),
+            "items_feasible": int(len(root_selection_pool)),
+            "cutoff": bool(cutoff),
+            "cutoff_reason": str(cutoff_reason),
+            "evaluated_items": [dict(item) for item in root_evaluated_items],
+            "selection_pool": [dict(item) for item in root_selection_pool],
+            "selected": self._selected_from_pool(
+                selected_plan=selected_plan,
+                pool=root_selection_pool,
+            ),
+            "micro_stats": dict(stats),
         }
 
         if best_node.first_plan is None:
@@ -928,6 +1010,7 @@ class SchedulerV1:
         node: _BeamNode,
         action: _BeamAction,
         sim_state: SchedulerSimState,
+        diagnostics: list[dict[str, Any]] | None = None,
     ) -> _BeamExpansion | None:
         ramp = node.ramps.get(action.ramp_id)
         if ramp is None:
@@ -948,7 +1031,17 @@ class SchedulerV1:
             return None
 
         preview = self._preview_place(pallet, box)
+        record: dict[str, Any] = {
+            "ramp_id": int(action.ramp_id),
+            "buffer_index": int(idx),
+            "box_id": getattr(box, "box_id", None),
+            "pallet_id": pallet_id,
+            "preview": self._preview_dict(preview),
+        }
         if not preview.feasible:
+            record["feasible"] = False
+            if diagnostics is not None:
+                diagnostics.append(record)
             return None
 
         height_after_mm = self._resolve_height_after_mm(preview, pallet)
@@ -960,6 +1053,10 @@ class SchedulerV1:
             max_priority=float(action.max_priority),
             height_after_mm=height_after_mm,
         )
+        record["feasible"] = True
+        record["terms"] = self._score_terms_dict(terms)
+        if diagnostics is not None:
+            diagnostics.append(record)
 
         first_plan = node.first_plan
         if first_plan is None:
@@ -2061,6 +2158,115 @@ class SchedulerV1:
             scalar_score=float(score),
             height_after_mm=int(height_after_mm),
         )
+
+    @staticmethod
+    def _placement_dict(placement: Any | None) -> dict[str, Any] | None:
+        if placement is None:
+            return None
+        return {
+            "box_id": getattr(placement, "box_id", None),
+            "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+            "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+            "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+            "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+            "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+            "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+            "layer_id": int(getattr(placement, "layer_id", 0) or 0),
+            "rot90": bool(getattr(placement, "rot90", False)),
+            "orientation_name": getattr(placement, "orientation_name", None),
+            "orientation_family": getattr(placement, "orientation_family", None),
+        }
+
+    @staticmethod
+    def _preview_dict(preview: PlacementPreview) -> dict[str, Any]:
+        return {
+            "feasible": bool(getattr(preview, "feasible", False)),
+            "infeasible_reason": getattr(preview, "infeasible_reason", None),
+            "packing_gain": float(getattr(preview, "packing_gain", 0.0) or 0.0),
+            "fragmentation": float(getattr(preview, "fragmentation", 0.0) or 0.0),
+            "score_adjustment": float(getattr(preview, "score_adjustment", 0.0) or 0.0),
+            "height_after_mm": (
+                int(getattr(preview, "height_after_mm"))
+                if getattr(preview, "height_after_mm", None) is not None
+                else None
+            ),
+            "placement": SchedulerV1._placement_dict(getattr(preview, "placement", None)),
+            "debug": dict(getattr(preview, "debug", {}) or {}),
+        }
+
+    @staticmethod
+    def _score_terms_dict(terms: _ScoreTerms) -> dict[str, Any]:
+        return {
+            "packing_gain": float(terms.packing_gain),
+            "fragmentation": float(terms.fragmentation),
+            "score_adjustment": float(terms.score_adjustment),
+            "dt_extra": float(terms.dt_extra),
+            "time_cost": float(terms.time_cost),
+            "starv_cost": float(terms.starv_cost),
+            "priority_score": float(terms.priority_score),
+            "scalar_score": float(terms.scalar_score),
+            "height_after_mm": int(terms.height_after_mm),
+            "tower_z_delta_mm": int(terms.tower_z_delta_mm),
+            "tower_z_penalty": float(terms.tower_z_penalty),
+            "spatial_tower_delta": int(terms.spatial_tower_delta),
+            "spatial_tower_penalty": float(terms.spatial_tower_penalty),
+        }
+
+    @classmethod
+    def _scored_candidate_dict(cls, candidate: _ScoredCandidate) -> dict[str, Any]:
+        return {
+            "ramp_id": int(candidate.plan.ramp_id),
+            "buffer_index": int(candidate.plan.buffer_index),
+            "box_id": candidate.plan.box_id,
+            "pallet_id": candidate.plan.pallet_id,
+            "preview": cls._preview_dict(candidate.plan.preview),
+            "terms": cls._score_terms_dict(candidate.terms),
+            "score": float(candidate.plan.score),
+            "dt_extra": float(candidate.plan.dt_extra),
+        }
+
+    @classmethod
+    def _beam_expansion_dict(cls, expansion: _BeamExpansion) -> dict[str, Any]:
+        plan = expansion.node.first_plan
+        if plan is None:
+            return {}
+        return {
+            "ramp_id": int(plan.ramp_id),
+            "buffer_index": int(plan.buffer_index),
+            "box_id": plan.box_id,
+            "pallet_id": plan.pallet_id,
+            "preview": cls._preview_dict(plan.preview),
+            "terms": cls._score_terms_dict(expansion.terms),
+            "score": float(plan.score),
+            "dt_extra": float(plan.dt_extra),
+        }
+
+    @staticmethod
+    def _plan_identity(plan: PickPlan | None) -> tuple[Any, ...] | None:
+        if plan is None:
+            return None
+        return (int(plan.ramp_id), int(plan.buffer_index), plan.box_id, plan.pallet_id)
+
+    @classmethod
+    def _selected_from_pool(
+        cls,
+        *,
+        selected_plan: PickPlan | None,
+        pool: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        selected_id = cls._plan_identity(selected_plan)
+        if selected_id is None:
+            return None
+        for candidate in pool:
+            cand_id = (
+                int(candidate.get("ramp_id", 0)),
+                int(candidate.get("buffer_index", 0)),
+                candidate.get("box_id"),
+                candidate.get("pallet_id"),
+            )
+            if cand_id == selected_id:
+                return dict(candidate)
+        return None
 
     @staticmethod
     def _gain_frag_sort_key(terms: _ScoreTerms, box: Box) -> tuple[Any, ...]:

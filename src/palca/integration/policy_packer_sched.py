@@ -87,6 +87,7 @@ class PolicyPackerScheduler:
         self._completed: dict[int | str, list[PalletModel]] = {}
         self._pending_closures: dict[int | str, str] = {}
         self._committed_placements: dict[int | str, list[dict[str, object]]] = {}
+        self._decision_trace: dict[int | str, list[dict[str, object]]] = {}
         self._viewer = None
         self._viewer_rect_cls = None
         self._viewer_event_count = 0
@@ -495,6 +496,7 @@ class PolicyPackerScheduler:
             if pid is not None:
                 seq = self._committed_placements.setdefault(pid, [])
                 step_index = int(len(seq))
+                step_decisions = self._decision_trace.setdefault(pid, [])
                 entry: dict[str, object] = {
                     "pallet_id": pid,
                     "step_index": step_index,
@@ -526,6 +528,26 @@ class PolicyPackerScheduler:
                     entry["priority"] = float(priority)
 
                 seq.append(entry)
+
+                raw_diag = getattr(self._scheduler, "last_decision_diagnostics", None)
+                if isinstance(raw_diag, dict):
+                    diag_entry: dict[str, object] = deepcopy(raw_diag)
+                    diag_entry["pallet_id"] = pid
+                    diag_entry["step_index"] = int(step_index)
+                    diag_entry["committed_box_id"] = getattr(placement, "box_id", None)
+                    diag_entry["committed_placement"] = {
+                        "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                        "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                        "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                        "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                        "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                        "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                        "layer_id": int(getattr(placement, "layer_id", 0) or 0),
+                        "rot90": bool(getattr(placement, "rot90", False)),
+                        "orientation_family": getattr(placement, "orientation_family", None),
+                        "orientation_name": getattr(placement, "orientation_name", None),
+                    }
+                    step_decisions.append(diag_entry)
         except Exception:
             self._logger.exception("record committed placement failed pid=%s", pid)
 
@@ -1184,6 +1206,13 @@ class PolicyPackerScheduler:
         """Return committed placements grouped by pallet_id (keys are strings for JSON)."""
         out: dict[str, list[dict[str, object]]] = {}
         for pid, seq in self._committed_placements.items():
+            out[str(pid)] = [dict(item) for item in seq]
+        return out
+
+    def export_decision_trace(self) -> dict[str, list[dict[str, object]]]:
+        """Return scheduler decision trace grouped by pallet_id (keys are strings for JSON)."""
+        out: dict[str, list[dict[str, object]]] = {}
+        for pid, seq in self._decision_trace.items():
             out[str(pid)] = [dict(item) for item in seq]
         return out
 

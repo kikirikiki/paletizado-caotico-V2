@@ -952,6 +952,7 @@ def _git_head() -> str | None:
 
 def _build_placements_dump(*, decision_policy: Any | None, params: dict[str, Any]) -> dict[str, Any]:
     pallets: dict[str, Any] = {}
+    decision_trace: dict[str, Any] = {}
     if decision_policy is not None and hasattr(decision_policy, "export_committed_placements"):
         try:
             exported = decision_policy.export_committed_placements()  # type: ignore[attr-defined]
@@ -959,11 +960,19 @@ def _build_placements_dump(*, decision_policy: Any | None, params: dict[str, Any
                 pallets = dict(exported)
         except Exception:
             pallets = {}
+    if decision_policy is not None and hasattr(decision_policy, "export_decision_trace"):
+        try:
+            exported_trace = decision_policy.export_decision_trace()  # type: ignore[attr-defined]
+            if isinstance(exported_trace, dict):
+                decision_trace = dict(exported_trace)
+        except Exception:
+            decision_trace = {}
     return {
         "schema_version": 1,
         "git_head": _git_head(),
         "params": dict(params),
         "pallets": pallets,
+        "decision_trace": decision_trace,
     }
 
 

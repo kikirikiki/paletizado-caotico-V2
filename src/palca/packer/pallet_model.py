@@ -429,6 +429,49 @@ class PalletModel:
                     best_tie = tie
             return best
 
+        def _candidate_summary_rows(candidates: list[_LayerCandidate], *, limit: int = 12) -> list[dict[str, Any]]:
+            ranked = sorted(
+                candidates,
+                key=lambda cand: (
+                    float(_objective(cand)),
+                    int(cand.layer_id),
+                    -int(cand.candidate.x),
+                    -int(cand.candidate.y),
+                ),
+                reverse=True,
+            )[: max(1, int(limit))]
+            rows: list[dict[str, Any]] = []
+            for cand in ranked:
+                placement = cand.placement
+                rows.append(
+                    {
+                        "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                        "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                        "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                        "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                        "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                        "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                        "layer_id": int(cand.layer_id),
+                        "objective": float(_objective(cand)),
+                    }
+                )
+            return rows
+
+        def _attach_candidate_summary(
+            best: _LayerCandidate,
+            *,
+            candidates: list[_LayerCandidate],
+            scope: str,
+        ) -> None:
+            if not candidates:
+                return
+            z_values = [int(getattr(cand.placement, "z_mm", 0) or 0) for cand in candidates if cand.placement is not None]
+            best.debug["candidate_layer_scope"] = str(scope)
+            best.debug["feasible_candidates_count"] = int(len(candidates))
+            best.debug["feasible_candidates_min_z_mm"] = int(min(z_values)) if z_values else None
+            best.debug["feasible_candidates_max_z_mm"] = int(max(z_values)) if z_values else None
+            best.debug["feasible_candidates_top"] = _candidate_summary_rows(candidates)
+
         def _build_preview(best: _LayerCandidate) -> PlacementPreview:
             placement = best.placement
             debug = dict(best.debug)
@@ -463,6 +506,7 @@ class PalletModel:
             evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
+                _attach_candidate_summary(best, candidates=layer_candidates, scope="active_layer")
                 return _build_preview(best)
 
         if self._can_open_new_layer_for_orientations(orientation_variants):
@@ -484,6 +528,7 @@ class PalletModel:
             evaluated_candidates.extend(layer_evaluated)
             if layer_candidates:
                 best = _select_best(layer_candidates)
+                _attach_candidate_summary(best, candidates=layer_candidates, scope="new_layer")
                 return _build_preview(best)
 
         reason = "NO_SPACE"
@@ -807,6 +852,8 @@ class PalletModel:
                     score_delta += float(result.score_delta)
                     adjusted = result.placement
                     if not result.feasible:
+                        if result.reason:
+                            debug["rejection_reason"] = str(result.reason)
                         rejected_by_controls += 1
                         feasible = False
                         break
@@ -871,6 +918,8 @@ class PalletModel:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "rejection_reason" in debug:
+                    candidate_info["rejection_reason"] = str(debug["rejection_reason"])
                 evaluated_candidates.append((float(objective), candidate_info))
 
                 if not feasible:
@@ -1094,6 +1143,34 @@ class PalletModel:
                     best_tie = tie
             return best
 
+        def _candidate_summary_rows(candidates_local: list[_LayerCandidate], *, limit: int = 12) -> list[dict[str, Any]]:
+            ranked = sorted(
+                candidates_local,
+                key=lambda cand: (
+                    float(_objective(cand)),
+                    int(cand.layer_id),
+                    -int(cand.candidate.x),
+                    -int(cand.candidate.y),
+                ),
+                reverse=True,
+            )[: max(1, int(limit))]
+            rows: list[dict[str, Any]] = []
+            for cand in ranked:
+                placement = cand.placement
+                rows.append(
+                    {
+                        "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                        "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                        "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                        "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                        "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                        "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                        "layer_id": int(cand.layer_id),
+                        "objective": float(_objective(cand)),
+                    }
+                )
+            return rows
+
         stop_search = False
         for orientation in orientation_variants:
             if budget is not None and budget.should_stop():
@@ -1174,6 +1251,8 @@ class PalletModel:
                     score_delta += float(result.score_delta)
                     adjusted = result.placement
                     if not result.feasible:
+                        if result.reason:
+                            debug["rejection_reason"] = str(result.reason)
                         rejected_by_controls += 1
                         feasible = False
                         break
@@ -1239,6 +1318,8 @@ class PalletModel:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "rejection_reason" in debug:
+                    candidate_info["rejection_reason"] = str(debug["rejection_reason"])
                 evaluated_candidates.append((float(objective), candidate_info))
 
                 if not feasible:
@@ -1288,6 +1369,12 @@ class PalletModel:
         if candidates:
             best = _select_best(candidates)
             debug = dict(best.debug)
+            z_values = [int(getattr(cand.placement, "z_mm", 0) or 0) for cand in candidates if cand.placement is not None]
+            debug["candidate_layer_scope"] = "heightfield_projection"
+            debug["feasible_candidates_count"] = int(len(candidates))
+            debug["feasible_candidates_min_z_mm"] = int(min(z_values)) if z_values else None
+            debug["feasible_candidates_max_z_mm"] = int(max(z_values)) if z_values else None
+            debug["feasible_candidates_top"] = _candidate_summary_rows(candidates)
             debug["rejected_by_controls"] = rejected_by_controls
             if self.z_band_mm is not None:
                 debug["z_band_enabled"] = True
