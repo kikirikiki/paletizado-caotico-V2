@@ -425,31 +425,39 @@ def _map_rejection_reason(
     if reason == "CORNER_SUPPORT":
         com_supported = bool(debug.get("com_supported", False))
         corners_supported = bool(debug.get("corners_supported", False))
+        corners_supported_count = _as_int(
+            debug.get("corners_supported_count"),
+            default=(4 if corners_supported else 0),
+        )
+        com_margin_mm = _as_float(
+            debug.get("com_margin_mm"),
+            default=(0.0 if com_supported else -1.0),
+        )
         if not corners_supported:
             return (
                 "corners_unsupported",
-                None,
-                None,
-                "corners_supported",
-                0,
-                "corners support check failed",
+                "corners_required_count",
+                4,
+                "corners_supported_count",
+                int(corners_supported_count),
+                f"corners support check failed ({int(corners_supported_count)}/4)",
             )
         if not com_supported:
             return (
                 "com_margin_fail",
-                None,
-                None,
-                "com_supported",
-                0,
+                "com_margin_min_mm",
+                0.0,
+                "com_margin_mm",
+                float(com_margin_mm),
                 "center of mass not supported",
             )
         return (
             "corners_unsupported",
-            None,
-            None,
-            None,
-            None,
-            None,
+            "corners_required_count",
+            4,
+            "corners_supported_count",
+            int(corners_supported_count),
+            "corners support check failed",
         )
     if reason == "LOADBEAR":
         max_over = _as_float(params.get("max_overweight_ratio"), default=1.5)
