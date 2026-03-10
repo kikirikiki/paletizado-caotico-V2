@@ -4,6 +4,7 @@ from statistics import mean
 from typing import Iterable
 
 from ..packer.pallet_model import PalletModel
+from .layer_monotonicity import compute_layer_monotonicity_metrics
 
 
 def _base_layer_coverage_metrics(pallet: PalletModel) -> tuple[int, float, float, int, int]:
@@ -96,6 +97,7 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     stand_hw_gate_blocks_total = 0
     stand_hw_gate_allows_total = 0
     stand_hw_rejected_support_total = 0
+    layer_monotonicity_first_pallet_by_dest: dict[int, dict[str, object]] = {}
 
     for dest, pallets in pallets_by_dest.items():
         pallet_list = list(pallets)
@@ -104,6 +106,14 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             volume_by_dest[dest] = 0.0
             layer_util_by_dest[dest] = {}
             continue
+
+        first_pallet = pallet_list[0]
+        layer_monotonicity_first_pallet_by_dest[dest] = compute_layer_monotonicity_metrics(
+            first_pallet.placements,
+            layer_band_mm=100,
+            bin_area_mm2=int(first_pallet.bin_area_mm2),
+            relevant_steps_limit=40,
+        )
 
         vol_values = [volume_utilization(pallet) for pallet in pallet_list]
         volume_by_dest[dest] = mean(vol_values) if vol_values else 0.0
@@ -167,6 +177,8 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         float(mean(com_dy)) if com_dy else 0.0,
     )
 
+    first_dest = min(layer_monotonicity_first_pallet_by_dest) if layer_monotonicity_first_pallet_by_dest else None
+
     return {
         "pallets_count": pallets_count,
         "pallet_volume_utilization": volume_by_dest,
@@ -203,4 +215,15 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         "stand_hw_gate_blocks_total": int(stand_hw_gate_blocks_total),
         "stand_hw_gate_allows_total": int(stand_hw_gate_allows_total),
         "stand_hw_rejected_support_total": int(stand_hw_rejected_support_total),
+        "layer_monotonicity_first_pallet_by_dest": {
+            int(dest): dict(values) for dest, values in layer_monotonicity_first_pallet_by_dest.items()
+        },
+        "layer_monotonicity_first_pallet_dest": (
+            int(first_dest) if first_dest is not None else None
+        ),
+        "layer_monotonicity_first_pallet": (
+            dict(layer_monotonicity_first_pallet_by_dest[first_dest])
+            if first_dest is not None
+            else {}
+        ),
     }
