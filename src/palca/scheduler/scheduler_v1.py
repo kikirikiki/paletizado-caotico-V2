@@ -12,11 +12,16 @@ from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from .hard_floor_morphology import (
+    BaseProbeSlot,
     HardFloorCandidateDecision,
     HardFloorMorphologyConfig,
     HardFloorMorphologyMetrics,
+    candidate_similar_boxes_for_slot,
     compute_hard_floor_morphology_metrics,
+    detect_base_probe_slots,
     evaluate_hard_floor_candidate,
+    merge_probe_candidates_into_hard_floor_candidates,
+    probe_local_stand_candidates_for_slot,
 )
 from ..scoring.height_slack import (
     ScoreMode,
@@ -58,6 +63,12 @@ class SchedulerConfig:
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
     hard_floor_phase_morphology_mode: str = "off"
+    hard_floor_phase_local_slot_probe_enabled: bool = False
+    hard_floor_phase_local_slot_probe_max_slots: int = 2
+    hard_floor_phase_local_slot_probe_max_boxes_per_slot: int = 2
+    hard_floor_phase_local_slot_probe_max_anchors_per_box: int = 6
+    hard_floor_phase_local_slot_probe_anchor_offset_mm: int = 25
+    hard_floor_phase_local_slot_probe_similarity_tolerance_mm: int = 40
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -109,6 +120,36 @@ class SchedulerConfig:
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
         object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
+        object.__setattr__(
+            self,
+            "hard_floor_phase_local_slot_probe_enabled",
+            bool(self.hard_floor_phase_local_slot_probe_enabled),
+        )
+        object.__setattr__(
+            self,
+            "hard_floor_phase_local_slot_probe_max_slots",
+            max(0, int(self.hard_floor_phase_local_slot_probe_max_slots)),
+        )
+        object.__setattr__(
+            self,
+            "hard_floor_phase_local_slot_probe_max_boxes_per_slot",
+            max(0, int(self.hard_floor_phase_local_slot_probe_max_boxes_per_slot)),
+        )
+        object.__setattr__(
+            self,
+            "hard_floor_phase_local_slot_probe_max_anchors_per_box",
+            max(1, int(self.hard_floor_phase_local_slot_probe_max_anchors_per_box)),
+        )
+        object.__setattr__(
+            self,
+            "hard_floor_phase_local_slot_probe_anchor_offset_mm",
+            max(0, int(self.hard_floor_phase_local_slot_probe_anchor_offset_mm)),
+        )
+        object.__setattr__(
+            self,
+            "hard_floor_phase_local_slot_probe_similarity_tolerance_mm",
+            max(0, int(self.hard_floor_phase_local_slot_probe_similarity_tolerance_mm)),
+        )
         hard_floor_morphology_mode = str(self.hard_floor_phase_morphology_mode or "off").strip().lower()
         if hard_floor_morphology_mode not in {"off", "on"}:
             raise ValueError(
@@ -214,6 +255,7 @@ class _HardFloorScoredCandidate:
     base_score: float
     stand_mix_bonus_applied: bool = False
     morphology_decision: HardFloorCandidateDecision | None = None
+    from_local_slot_probe: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,6 +264,7 @@ class _HardFloorScoredExpansion:
     base_score: float
     stand_mix_bonus_applied: bool = False
     morphology_decision: HardFloorCandidateDecision | None = None
+    from_local_slot_probe: bool = False
 
 
 class SchedulerV1:
@@ -278,6 +321,10 @@ class SchedulerV1:
         self.hard_floor_inaccessible_pocket_area_mm2_max = 0
         self.hard_floor_boundary_connected_free_area_mm2_sum = 0.0
         self.hard_floor_isolated_high_spots_total = 0
+        self.hard_floor_local_slot_probe_attempts_total = 0
+        self.hard_floor_local_slot_probe_hits_total = 0
+        self.hard_floor_local_slot_probe_candidates_total = 0
+        self.hard_floor_local_slot_probe_selected_total = 0
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -575,6 +622,8 @@ class SchedulerV1:
                         else None
                     ),
                 )
+                if bool(hard_floor_selected.from_local_slot_probe):
+                    self.hard_floor_local_slot_probe_selected_total += 1
             else:
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
                 min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
@@ -734,6 +783,8 @@ class SchedulerV1:
                                     else None
                                 ),
                             )
+                            if bool(chosen.from_local_slot_probe):
+                                self.hard_floor_local_slot_probe_selected_total += 1
                             stats = {
                                 "enabled": True,
                                 "score_mode": str(self.config.score_mode),
@@ -1578,6 +1629,351 @@ class SchedulerV1:
             config=(morphology_cfg or self._hard_floor_phase_morphology_config()),
         )
 
+    def _hard_floor_phase_local_slot_probe_enabled_for_pallet(self, pallet: PalletModel) -> bool:
+        if not self._hard_floor_phase_morphology_enabled():
+            return False
+        if not bool(getattr(self.config, "hard_floor_phase_local_slot_probe_enabled", False)):
+            return False
+        if int(getattr(self.config, "hard_floor_phase_local_slot_probe_max_slots", 0) or 0) <= 0:
+            return False
+        if int(getattr(self.config, "hard_floor_phase_local_slot_probe_max_boxes_per_slot", 0) or 0) <= 0:
+            return False
+        stacking_mode = str(getattr(pallet, "stacking_mode", "") or "").strip().lower()
+        return stacking_mode == "heightfield"
+
+    @staticmethod
+    def _hard_floor_phase_floor_footprints(pallet: PalletModel) -> list[tuple[int, int, int, int]]:
+        floor_rects: list[tuple[int, int, int, int]] = []
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                if int(getattr(placement, "z_mm", 0) or 0) != 0:
+                    continue
+                x_mm = int(getattr(placement, "x_mm", 0) or 0)
+                y_mm = int(getattr(placement, "y_mm", 0) or 0)
+                length_mm = int(getattr(placement, "length_mm", 0) or 0)
+                width_mm = int(getattr(placement, "width_mm", 0) or 0)
+            except Exception:
+                continue
+            if length_mm <= 0 or width_mm <= 0:
+                continue
+            floor_rects.append((int(x_mm), int(y_mm), int(length_mm), int(width_mm)))
+        return floor_rects
+
+    @staticmethod
+    def _hard_floor_phase_stand_hw_footprints_for_box(box: Box, pallet: PalletModel) -> list[tuple[int, int]]:
+        try:
+            l_mm = int(getattr(box, "length_mm", 0) or 0)
+            w_mm = int(getattr(box, "width_mm", 0) or 0)
+            h_mm = int(getattr(box, "height_mm", 0) or 0)
+        except Exception:
+            return []
+        if l_mm <= 0 or w_mm <= 0 or h_mm <= 0:
+            return []
+        allow_rotate = bool(getattr(getattr(pallet, "spec", None), "allow_rotate", False))
+        out = [(int(h_mm), int(w_mm))]
+        if allow_rotate and h_mm != w_mm:
+            out.append((int(w_mm), int(h_mm)))
+        return out
+
+    @staticmethod
+    def _hard_floor_phase_scored_candidate_key(cand: _ScoredCandidate) -> tuple[object, ...]:
+        placement = getattr(cand.plan.preview, "placement", None)
+        if placement is None:
+            return ("none", int(cand.plan.ramp_id), int(cand.plan.buffer_index), cand.plan.box_id)
+        return (
+            int(cand.plan.ramp_id),
+            int(cand.plan.buffer_index),
+            cand.plan.box_id,
+            int(getattr(placement, "x_mm", 0) or 0),
+            int(getattr(placement, "y_mm", 0) or 0),
+            int(getattr(placement, "z_mm", 0) or 0),
+            int(getattr(placement, "length_mm", 0) or 0),
+            int(getattr(placement, "width_mm", 0) or 0),
+            int(getattr(placement, "height_mm", 0) or 0),
+            str(getattr(placement, "orientation_name", "") or ""),
+        )
+
+    @staticmethod
+    def _hard_floor_phase_expansion_key(exp: _BeamExpansion) -> tuple[object, ...]:
+        first_plan = exp.node.first_plan
+        placement = getattr(first_plan.preview, "placement", None) if first_plan is not None else None
+        if first_plan is None or placement is None:
+            return ("none", getattr(exp.box, "box_id", None))
+        return (
+            int(first_plan.ramp_id),
+            int(first_plan.buffer_index),
+            first_plan.box_id,
+            int(getattr(placement, "x_mm", 0) or 0),
+            int(getattr(placement, "y_mm", 0) or 0),
+            int(getattr(placement, "z_mm", 0) or 0),
+            int(getattr(placement, "length_mm", 0) or 0),
+            int(getattr(placement, "width_mm", 0) or 0),
+            int(getattr(placement, "height_mm", 0) or 0),
+            str(getattr(placement, "orientation_name", "") or ""),
+        )
+
+    def _hard_floor_phase_probe_preview_for_slot(
+        self,
+        *,
+        pallet: PalletModel,
+        box: Box,
+        slot: BaseProbeSlot,
+    ) -> PlacementPreview | None:
+        try:
+            probe_pallet = copy.deepcopy(pallet)
+        except Exception:
+            return None
+
+        stand_footprints = self._hard_floor_phase_stand_hw_footprints_for_box(box, probe_pallet)
+        if not stand_footprints:
+            return None
+
+        anchor_cap = max(1, int(getattr(self.config, "hard_floor_phase_local_slot_probe_max_anchors_per_box", 6) or 6))
+        anchor_offset = max(0, int(getattr(self.config, "hard_floor_phase_local_slot_probe_anchor_offset_mm", 25) or 25))
+        probes = probe_local_stand_candidates_for_slot(
+            slot=slot,
+            stand_footprints=stand_footprints,
+            max_anchor_points_per_footprint=anchor_cap,
+            anchor_offset_mm=anchor_offset,
+        )
+        if not probes:
+            return None
+
+        original_orientations_fn = getattr(probe_pallet, "_orientations", None)
+        original_xy_fn = getattr(probe_pallet, "_heightfield_xy_candidates", None)
+        if not callable(original_orientations_fn) or not callable(original_xy_fn):
+            return None
+
+        bin_l = int(getattr(getattr(probe_pallet, "spec", None), "bin_length_mm", 0) or 0)
+        bin_w = int(getattr(getattr(probe_pallet, "spec", None), "bin_width_mm", 0) or 0)
+        points_by_dims: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for x_mm, y_mm, l_mm, w_mm in probes:
+            l = int(l_mm)
+            w = int(w_mm)
+            if l <= 0 or w <= 0:
+                continue
+            max_x = max(0, bin_l - l) if bin_l > 0 else int(x_mm)
+            max_y = max(0, bin_w - w) if bin_w > 0 else int(y_mm)
+            cx = int(x_mm) if bin_l <= 0 else min(max(int(x_mm), 0), int(max_x))
+            cy = int(y_mm) if bin_w <= 0 else min(max(int(y_mm), 0), int(max_y))
+            key = (int(l), int(w))
+            points_by_dims.setdefault(key, []).append((int(cx), int(cy)))
+        if not points_by_dims:
+            return None
+        for key, points in list(points_by_dims.items()):
+            deduped = sorted(set((int(x), int(y)) for x, y in points), key=lambda pt: (int(pt[0]), int(pt[1])))
+            points_by_dims[key] = deduped[:anchor_cap]
+
+        original_stand_gate = int(getattr(probe_pallet, "stand_hw_height_margin_gate_mm", 0) or 0)
+        try:
+            setattr(probe_pallet, "stand_hw_height_margin_gate_mm", max(int(original_stand_gate), 1_000_000_000))
+
+            def _probe_orientations(this: PalletModel, length_mm: int, width_mm: int, height_mm: int) -> list[Any]:
+                variants = list(original_orientations_fn(length_mm, width_mm, height_mm))
+                return [item for item in variants if str(getattr(item, "family", "") or "").lower() == "stand_hw"]
+
+            def _probe_xy(
+                this: PalletModel,
+                l_mm: int,
+                w_mm: int,
+                *,
+                cap: int = 120,
+            ) -> list[tuple[int, int]]:
+                key = (int(l_mm), int(w_mm))
+                points = list(points_by_dims.get(key, []))
+                if not points:
+                    return []
+                return points[: max(1, int(cap))]
+
+            setattr(probe_pallet, "_orientations", _probe_orientations.__get__(probe_pallet, type(probe_pallet)))
+            setattr(probe_pallet, "_heightfield_xy_candidates", _probe_xy.__get__(probe_pallet, type(probe_pallet)))
+            preview = probe_pallet.preview_place(box)
+        except Exception:
+            preview = None
+        finally:
+            try:
+                setattr(probe_pallet, "stand_hw_height_margin_gate_mm", int(original_stand_gate))
+            except Exception:
+                pass
+
+        if preview is None or not bool(getattr(preview, "feasible", False)):
+            return None
+        if not self._preview_is_floor(preview):
+            return None
+        placement = getattr(preview, "placement", None)
+        if not self._placement_is_stand_hw(placement):
+            return None
+        if placement is None:
+            return None
+
+        tol_mm = max(0, int(anchor_offset))
+        px0 = int(getattr(placement, "x_mm", 0) or 0)
+        py0 = int(getattr(placement, "y_mm", 0) or 0)
+        px1 = int(px0) + int(getattr(placement, "length_mm", 0) or 0)
+        py1 = int(py0) + int(getattr(placement, "width_mm", 0) or 0)
+        sx0 = int(slot.x_mm) - int(tol_mm)
+        sy0 = int(slot.y_mm) - int(tol_mm)
+        sx1 = int(slot.x_mm) + int(slot.length_mm) + int(tol_mm)
+        sy1 = int(slot.y_mm) + int(slot.width_mm) + int(tol_mm)
+        if px1 <= sx0 or py1 <= sy0 or px0 >= sx1 or py0 >= sy1:
+            return None
+        return preview
+
+    def _hard_floor_phase_local_slot_probe_scored_candidates(
+        self,
+        *,
+        pallet: PalletModel,
+        group: list[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        if not self._hard_floor_phase_local_slot_probe_enabled_for_pallet(pallet):
+            return []
+        if not group:
+            return []
+
+        floor_tuples: list[tuple[int, int, int, int, int, bool]] = []
+        for placement in list(getattr(pallet, "placements", []) or []):
+            item = self._hard_floor_phase_placement_floor_tuple(placement)
+            if item is not None:
+                floor_tuples.append(item)
+        if not floor_tuples:
+            return []
+        bin_l, bin_w, _bin_area = self._hard_floor_phase_resolve_bin_dims(pallet=pallet, floor_tuples=floor_tuples)
+        floor_rects = self._hard_floor_phase_floor_footprints(pallet)
+        slots = detect_base_probe_slots(
+            floor_rects=floor_rects,
+            bin_width_mm=int(bin_l),
+            bin_height_mm=int(bin_w),
+            max_slots=int(getattr(self.config, "hard_floor_phase_local_slot_probe_max_slots", 2) or 2),
+        )
+        if not slots:
+            return []
+
+        probe_candidates: list[_ScoredCandidate] = []
+        for slot in slots:
+            similar = candidate_similar_boxes_for_slot(
+                slot=slot,
+                candidates=group,
+                stand_footprints_fn=lambda cand: self._hard_floor_phase_stand_hw_footprints_for_box(cand.box, pallet),
+                max_candidates=int(
+                    getattr(self.config, "hard_floor_phase_local_slot_probe_max_boxes_per_slot", 2) or 2
+                ),
+                similarity_tolerance_mm=int(
+                    getattr(self.config, "hard_floor_phase_local_slot_probe_similarity_tolerance_mm", 40) or 40
+                ),
+            )
+            for source in similar:
+                self.hard_floor_local_slot_probe_attempts_total += 1
+                preview = self._hard_floor_phase_probe_preview_for_slot(pallet=pallet, box=source.box, slot=slot)
+                if preview is None:
+                    continue
+                self.hard_floor_local_slot_probe_hits_total += 1
+                height_after = self._resolve_height_after_mm(preview, pallet)
+                new_terms = replace(
+                    source.terms,
+                    packing_gain=float(preview.packing_gain),
+                    fragmentation=float(preview.fragmentation),
+                    score_adjustment=float(getattr(preview, "score_adjustment", 0.0) or 0.0),
+                    height_after_mm=int(height_after),
+                )
+                new_plan = replace(source.plan, preview=preview, score=float(new_terms.scalar_score))
+                probe_candidates.append(
+                    _ScoredCandidate(
+                        plan=new_plan,
+                        box=source.box,
+                        terms=new_terms,
+                    )
+                )
+
+        if probe_candidates:
+            self.hard_floor_local_slot_probe_candidates_total += int(len(probe_candidates))
+        return probe_candidates
+
+    def _hard_floor_phase_local_slot_probe_expansions(
+        self,
+        *,
+        pallet: PalletModel,
+        group: list[_BeamExpansion],
+    ) -> list[_BeamExpansion]:
+        if not self._hard_floor_phase_local_slot_probe_enabled_for_pallet(pallet):
+            return []
+        if not group:
+            return []
+
+        floor_tuples: list[tuple[int, int, int, int, int, bool]] = []
+        for placement in list(getattr(pallet, "placements", []) or []):
+            item = self._hard_floor_phase_placement_floor_tuple(placement)
+            if item is not None:
+                floor_tuples.append(item)
+        if not floor_tuples:
+            return []
+        bin_l, bin_w, _bin_area = self._hard_floor_phase_resolve_bin_dims(pallet=pallet, floor_tuples=floor_tuples)
+        floor_rects = self._hard_floor_phase_floor_footprints(pallet)
+        slots = detect_base_probe_slots(
+            floor_rects=floor_rects,
+            bin_width_mm=int(bin_l),
+            bin_height_mm=int(bin_w),
+            max_slots=int(getattr(self.config, "hard_floor_phase_local_slot_probe_max_slots", 2) or 2),
+        )
+        if not slots:
+            return []
+
+        probe_expansions: list[_BeamExpansion] = []
+        for slot in slots:
+            similar = candidate_similar_boxes_for_slot(
+                slot=slot,
+                candidates=group,
+                stand_footprints_fn=lambda exp: self._hard_floor_phase_stand_hw_footprints_for_box(exp.box, pallet),
+                max_candidates=int(
+                    getattr(self.config, "hard_floor_phase_local_slot_probe_max_boxes_per_slot", 2) or 2
+                ),
+                similarity_tolerance_mm=int(
+                    getattr(self.config, "hard_floor_phase_local_slot_probe_similarity_tolerance_mm", 40) or 40
+                ),
+            )
+            for source in similar:
+                self.hard_floor_local_slot_probe_attempts_total += 1
+                preview = self._hard_floor_phase_probe_preview_for_slot(pallet=pallet, box=source.box, slot=slot)
+                if preview is None:
+                    continue
+                first_plan = source.node.first_plan
+                if first_plan is None:
+                    continue
+                self.hard_floor_local_slot_probe_hits_total += 1
+                height_after = self._resolve_height_after_mm(preview, pallet)
+                new_terms = replace(
+                    source.terms,
+                    packing_gain=float(preview.packing_gain),
+                    fragmentation=float(preview.fragmentation),
+                    score_adjustment=float(getattr(preview, "score_adjustment", 0.0) or 0.0),
+                    height_after_mm=int(height_after),
+                )
+                new_plan = replace(first_plan, preview=preview, score=float(new_terms.scalar_score))
+                new_node = _BeamNode(
+                    ramps=source.node.ramps,
+                    pallets=source.node.pallets,
+                    score_sum=float(source.node.score_sum),
+                    gain_sum=float(source.node.gain_sum),
+                    fragmentation_sum=float(source.node.fragmentation_sum),
+                    score_adjustment_sum=float(source.node.score_adjustment_sum),
+                    time_cost_sum=float(source.node.time_cost_sum),
+                    starv_cost_sum=float(source.node.starv_cost_sum),
+                    priority_sum=float(source.node.priority_sum),
+                    height_after_mm=int(source.node.height_after_mm),
+                    placed_count=int(source.node.placed_count),
+                    first_plan=new_plan,
+                )
+                probe_expansions.append(
+                    _BeamExpansion(
+                        node=new_node,
+                        box=source.box,
+                        terms=new_terms,
+                    )
+                )
+
+        if probe_expansions:
+            self.hard_floor_local_slot_probe_candidates_total += int(len(probe_expansions))
+        return probe_expansions
+
     def _hard_floor_phase_filter_scored_candidates(
         self,
         *,
@@ -1619,7 +2015,20 @@ class SchedulerV1:
                 continue
 
             active_found = True
-            floor_group = [cand for cand in group if self._preview_is_floor(cand.plan.preview)]
+            baseline_floor_group = [cand for cand in group if self._preview_is_floor(cand.plan.preview)]
+            probe_group = self._hard_floor_phase_local_slot_probe_scored_candidates(
+                pallet=pallet,
+                group=group,
+            )
+            floor_group = merge_probe_candidates_into_hard_floor_candidates(
+                baseline_candidates=baseline_floor_group,
+                probe_candidates=probe_group,
+                key_fn=self._hard_floor_phase_scored_candidate_key,
+            )
+            probe_keys = {
+                self._hard_floor_phase_scored_candidate_key(item)
+                for item in probe_group
+            }
             self.hard_floor_phase_floor_candidates_seen_total += int(len(floor_group))
             if len(floor_group) < int(min_floor):
                 self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
@@ -1683,12 +2092,14 @@ class SchedulerV1:
                     self.hard_floor_phase_stand_mix_bonus_applied_total += 1
                 new_terms = replace(cand.terms, scalar_score=float(scored_value))
                 new_plan = replace(cand.plan, score=float(scored_value))
+                cand_key = self._hard_floor_phase_scored_candidate_key(cand)
                 scored.append(
                     _HardFloorScoredCandidate(
                         candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
                         base_score=float(scored_value),
                         stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
                         morphology_decision=morphology_decision,
+                        from_local_slot_probe=bool(cand_key in probe_keys),
                     )
                 )
 
@@ -1739,11 +2150,24 @@ class SchedulerV1:
                 continue
 
             active_found = True
-            floor_group = [
+            baseline_floor_group = [
                 exp
                 for exp in group
                 if exp.node.first_plan is not None and self._preview_is_floor(exp.node.first_plan.preview)
             ]
+            probe_group = self._hard_floor_phase_local_slot_probe_expansions(
+                pallet=pallet,
+                group=group,
+            )
+            floor_group = merge_probe_candidates_into_hard_floor_candidates(
+                baseline_candidates=baseline_floor_group,
+                probe_candidates=probe_group,
+                key_fn=self._hard_floor_phase_expansion_key,
+            )
+            probe_keys = {
+                self._hard_floor_phase_expansion_key(item)
+                for item in probe_group
+            }
             self.hard_floor_phase_floor_candidates_seen_total += int(len(floor_group))
             if len(floor_group) < int(min_floor):
                 self._hard_floor_phase_exited_no_floor_pallets.add(pallet_id)
@@ -1809,12 +2233,14 @@ class SchedulerV1:
                 exp.node.score_sum = float(scored_value)
                 exp.node.first_plan = replace(exp.node.first_plan, score=float(scored_value))
                 new_terms = replace(exp.terms, scalar_score=float(scored_value))
+                exp_key = self._hard_floor_phase_expansion_key(exp)
                 scored.append(
                     _HardFloorScoredExpansion(
                         expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
                         base_score=float(scored_value),
                         stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
                         morphology_decision=morphology_decision,
+                        from_local_slot_probe=bool(exp_key in probe_keys),
                     )
                 )
 

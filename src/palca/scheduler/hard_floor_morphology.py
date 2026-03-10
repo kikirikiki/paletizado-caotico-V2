@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Sequence
+from typing import Callable, Sequence, TypeVar
 
 from ..packer.maxrects2d import Rect
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,206 @@ class _FloorRect:
     rect: Rect
     top_height_mm: int
     is_stand_hw: bool
+
+
+@dataclass(frozen=True)
+class BaseProbeSlot:
+    x_mm: int
+    y_mm: int
+    length_mm: int
+    width_mm: int
+    area_mm2: int
+    adjacency_count: int
+    boundary_contacts: int
+
+
+def detect_base_probe_slots(
+    *,
+    floor_rects: Sequence[tuple[int, int, int, int]],
+    bin_width_mm: int,
+    bin_height_mm: int,
+    max_slots: int = 2,
+    min_slot_side_mm: int = 20,
+    min_slot_area_mm2: int = 2_000,
+) -> list[BaseProbeSlot]:
+    slot_cap = max(0, int(max_slots))
+    if slot_cap <= 0:
+        return []
+
+    bin_w = max(1, int(bin_width_mm))
+    bin_h = max(1, int(bin_height_mm))
+    min_side = max(1, int(min_slot_side_mm))
+    min_area = max(1, int(min_slot_area_mm2))
+
+    occupied: list[Rect] = []
+    for x_mm, y_mm, length_mm, width_mm in floor_rects:
+        clipped = _clip_rect(Rect(int(x_mm), int(y_mm), int(length_mm), int(width_mm)), bin_w=bin_w, bin_h=bin_h)
+        if clipped is None:
+            continue
+        occupied.append(clipped)
+
+    free_rects = _free_rects_from_occupied(bin_w=bin_w, bin_h=bin_h, occupied=occupied)
+    ranked: list[tuple[tuple[int, int, int, int], BaseProbeSlot]] = []
+    for free in free_rects:
+        w = int(free.w)
+        h = int(free.h)
+        area = int(free.area)
+        if w < min_side or h < min_side or area < min_area:
+            continue
+        adjacency = sum(1 for occ in occupied if _rects_connected(free, occ))
+        if adjacency <= 0:
+            continue
+        boundary_contacts = int(free.x == 0) + int(free.y == 0) + int((free.x + free.w) == bin_w) + int(
+            (free.y + free.h) == bin_h
+        )
+        slot = BaseProbeSlot(
+            x_mm=int(free.x),
+            y_mm=int(free.y),
+            length_mm=int(w),
+            width_mm=int(h),
+            area_mm2=int(area),
+            adjacency_count=int(adjacency),
+            boundary_contacts=int(boundary_contacts),
+        )
+        rank_key = (
+            int(adjacency),
+            -int(boundary_contacts),
+            int(area),
+            min(int(w), int(h)),
+        )
+        ranked.append((rank_key, slot))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [slot for _key, slot in ranked[:slot_cap]]
+
+
+def candidate_similar_boxes_for_slot(
+    *,
+    slot: BaseProbeSlot,
+    candidates: Sequence[T],
+    stand_footprints_fn: Callable[[T], Sequence[tuple[int, int]]],
+    max_candidates: int = 2,
+    similarity_tolerance_mm: int = 40,
+) -> list[T]:
+    cap = max(0, int(max_candidates))
+    if cap <= 0:
+        return []
+
+    tolerance = max(0, int(similarity_tolerance_mm))
+    slot_l = max(1, int(slot.length_mm))
+    slot_w = max(1, int(slot.width_mm))
+    slot_area = max(1, int(slot.area_mm2))
+
+    ranked: list[tuple[tuple[int, int, int, float], int, T]] = []
+    for idx, item in enumerate(candidates):
+        footprints = list(stand_footprints_fn(item))
+        if not footprints:
+            continue
+        best_key: tuple[int, int, int, float] | None = None
+        for l_mm, w_mm in footprints:
+            l = max(0, int(l_mm))
+            w = max(0, int(w_mm))
+            if l <= 0 or w <= 0:
+                continue
+            overflow_l = max(0, l - slot_l)
+            overflow_w = max(0, w - slot_w)
+            overflow = max(int(overflow_l), int(overflow_w))
+            if overflow > tolerance:
+                continue
+            overlap_l = max(0, min(slot_l, l))
+            overlap_w = max(0, min(slot_w, w))
+            overlap_area = int(overlap_l) * int(overlap_w)
+            fill_ratio = float(overlap_area) / float(slot_area)
+            size_delta = abs(int(slot_l) - int(l)) + abs(int(slot_w) - int(w))
+            residual = max(0, int(slot_area) - int(overlap_area))
+            key = (int(overflow), int(size_delta), int(residual), -float(fill_ratio))
+            if best_key is None or key < best_key:
+                best_key = key
+        if best_key is None:
+            continue
+        ranked.append((best_key, int(idx), item))
+
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [item for _key, _idx, item in ranked[:cap]]
+
+
+def probe_local_stand_candidates_for_slot(
+    *,
+    slot: BaseProbeSlot,
+    stand_footprints: Sequence[tuple[int, int]],
+    max_anchor_points_per_footprint: int = 6,
+    anchor_offset_mm: int = 20,
+) -> list[tuple[int, int, int, int]]:
+    cap = max(1, int(max_anchor_points_per_footprint))
+    anchor_offset = max(0, int(anchor_offset_mm))
+    slot_x0 = int(slot.x_mm)
+    slot_y0 = int(slot.y_mm)
+    slot_x1 = int(slot.x_mm) + int(slot.length_mm)
+    slot_y1 = int(slot.y_mm) + int(slot.width_mm)
+
+    out: list[tuple[int, int, int, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for l_mm, w_mm in stand_footprints:
+        l = int(l_mm)
+        w = int(w_mm)
+        if l <= 0 or w <= 0:
+            continue
+
+        center_x = slot_x0 + max(0, (int(slot.length_mm) - int(l)) // 2)
+        center_y = slot_y0 + max(0, (int(slot.width_mm) - int(w)) // 2)
+        anchors = [
+            (slot_x0, slot_y0),
+            (slot_x1 - l, slot_y0),
+            (slot_x0, slot_y1 - w),
+            (slot_x1 - l, slot_y1 - w),
+            (center_x, center_y),
+            (slot_x0 + anchor_offset, slot_y0),
+            (slot_x0, slot_y0 + anchor_offset),
+            (slot_x1 - l - anchor_offset, slot_y1 - w),
+            (slot_x1 - l, slot_y1 - w - anchor_offset),
+            (slot_x0 - anchor_offset, slot_y0),
+            (slot_x0, slot_y0 - anchor_offset),
+            (slot_x1 - l + anchor_offset, slot_y1 - w),
+            (slot_x1 - l, slot_y1 - w + anchor_offset),
+        ]
+
+        ranked_points = sorted(
+            anchors,
+            key=lambda pt: (
+                abs(int(pt[0]) - int(slot_x0)),
+                abs(int(pt[1]) - int(slot_y0)),
+                int(pt[0]),
+                int(pt[1]),
+            ),
+        )
+        accepted = 0
+        for x_mm, y_mm in ranked_points:
+            key = (int(x_mm), int(y_mm), int(l), int(w))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+            accepted += 1
+            if accepted >= cap:
+                break
+    return out
+
+
+def merge_probe_candidates_into_hard_floor_candidates(
+    *,
+    baseline_candidates: Sequence[T],
+    probe_candidates: Sequence[T],
+    key_fn: Callable[[T], tuple[object, ...] | str],
+) -> list[T]:
+    merged: list[T] = list(baseline_candidates)
+    seen: set[tuple[object, ...] | str] = {key_fn(item) for item in baseline_candidates}
+    for item in probe_candidates:
+        key = key_fn(item)
+        if key in seen:
+            continue
+        merged.append(item)
+        seen.add(key)
+    return merged
 
 
 def compute_hard_floor_morphology_metrics(

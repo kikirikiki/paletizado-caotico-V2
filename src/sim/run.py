@@ -227,6 +227,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Activa comparador morfologico en hard-floor-phase (off/on).",
     )
     parser.add_argument(
+        "--hard-floor-phase-local-slot-probe-enabled",
+        action="store_true",
+        help="Activa probe geometrico local de slots de base dentro de hard-floor morphology.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-local-slot-probe-max-slots",
+        type=int,
+        default=2,
+        help="Maximo de huecos base a probar por decision.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-local-slot-probe-max-boxes-per-slot",
+        type=int,
+        default=2,
+        help="Maximo de cajas similares evaluadas por hueco del probe local.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-local-slot-probe-max-anchors-per-box",
+        type=int,
+        default=6,
+        help="Maximo de anclas por caja durante el probe local.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-local-slot-probe-anchor-offset-mm",
+        type=int,
+        default=25,
+        help="Offset local (mm) para anclas cercanas al hueco base.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-local-slot-probe-similarity-tolerance-mm",
+        type=int,
+        default=40,
+        help="Tolerancia (mm) de similitud huella-caja en el probe local.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -466,6 +501,12 @@ def run_simulation(
     hard_floor_phase_lookahead_items: int = 8,
     hard_floor_phase_stand_mix_bonus: float = 0.0,
     hard_floor_phase_morphology_mode: str = "off",
+    hard_floor_phase_local_slot_probe_enabled: bool = False,
+    hard_floor_phase_local_slot_probe_max_slots: int = 2,
+    hard_floor_phase_local_slot_probe_max_boxes_per_slot: int = 2,
+    hard_floor_phase_local_slot_probe_max_anchors_per_box: int = 6,
+    hard_floor_phase_local_slot_probe_anchor_offset_mm: int = 25,
+    hard_floor_phase_local_slot_probe_similarity_tolerance_mm: int = 40,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -666,6 +707,20 @@ def run_simulation(
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
             hard_floor_phase_morphology_mode=str(hard_floor_phase_morphology_mode or "off"),
+            hard_floor_phase_local_slot_probe_enabled=bool(hard_floor_phase_local_slot_probe_enabled),
+            hard_floor_phase_local_slot_probe_max_slots=max(0, int(hard_floor_phase_local_slot_probe_max_slots)),
+            hard_floor_phase_local_slot_probe_max_boxes_per_slot=max(
+                0, int(hard_floor_phase_local_slot_probe_max_boxes_per_slot)
+            ),
+            hard_floor_phase_local_slot_probe_max_anchors_per_box=max(
+                1, int(hard_floor_phase_local_slot_probe_max_anchors_per_box)
+            ),
+            hard_floor_phase_local_slot_probe_anchor_offset_mm=max(
+                0, int(hard_floor_phase_local_slot_probe_anchor_offset_mm)
+            ),
+            hard_floor_phase_local_slot_probe_similarity_tolerance_mm=max(
+                0, int(hard_floor_phase_local_slot_probe_similarity_tolerance_mm)
+            ),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -780,6 +835,20 @@ def run_simulation(
             "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
             "hard_floor_phase_stand_mix_bonus": float(max(0.0, float(hard_floor_phase_stand_mix_bonus))),
             "hard_floor_phase_morphology_mode": str(hard_floor_phase_morphology_mode or "off"),
+            "hard_floor_phase_local_slot_probe_enabled": bool(hard_floor_phase_local_slot_probe_enabled),
+            "hard_floor_phase_local_slot_probe_max_slots": int(max(0, int(hard_floor_phase_local_slot_probe_max_slots))),
+            "hard_floor_phase_local_slot_probe_max_boxes_per_slot": int(
+                max(0, int(hard_floor_phase_local_slot_probe_max_boxes_per_slot))
+            ),
+            "hard_floor_phase_local_slot_probe_max_anchors_per_box": int(
+                max(1, int(hard_floor_phase_local_slot_probe_max_anchors_per_box))
+            ),
+            "hard_floor_phase_local_slot_probe_anchor_offset_mm": int(
+                max(0, int(hard_floor_phase_local_slot_probe_anchor_offset_mm))
+            ),
+            "hard_floor_phase_local_slot_probe_similarity_tolerance_mm": int(
+                max(0, int(hard_floor_phase_local_slot_probe_similarity_tolerance_mm))
+            ),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -885,6 +954,14 @@ def main() -> None:
         hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
         hard_floor_phase_stand_mix_bonus=float(args.hard_floor_phase_stand_mix_bonus),
         hard_floor_phase_morphology_mode=str(args.hard_floor_phase_morphology_mode),
+        hard_floor_phase_local_slot_probe_enabled=bool(args.hard_floor_phase_local_slot_probe_enabled),
+        hard_floor_phase_local_slot_probe_max_slots=int(args.hard_floor_phase_local_slot_probe_max_slots),
+        hard_floor_phase_local_slot_probe_max_boxes_per_slot=int(args.hard_floor_phase_local_slot_probe_max_boxes_per_slot),
+        hard_floor_phase_local_slot_probe_max_anchors_per_box=int(args.hard_floor_phase_local_slot_probe_max_anchors_per_box),
+        hard_floor_phase_local_slot_probe_anchor_offset_mm=int(args.hard_floor_phase_local_slot_probe_anchor_offset_mm),
+        hard_floor_phase_local_slot_probe_similarity_tolerance_mm=int(
+            args.hard_floor_phase_local_slot_probe_similarity_tolerance_mm
+        ),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
