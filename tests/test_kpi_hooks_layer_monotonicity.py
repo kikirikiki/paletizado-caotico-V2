@@ -24,3 +24,21 @@ def test_aggregate_pallet_kpis_exposes_first_pallet_layer_monotonicity() -> None
     assert "layer_band_fill_progress" in mono
     assert "active_layers_over_time" in mono
     assert "layer_monotonicity_first_pallet" in kpis
+
+
+def test_aggregate_pallet_kpis_exposes_support_frontier_refinement_counters() -> None:
+    pallet = PalletModel()
+    pallet.stats.support_frontier_refine_attempts = 4
+    pallet.stats.support_frontier_candidates_rescued = 2
+    pallet.stats.support_frontier_rescued_support_ratio = 1
+    pallet.stats.support_frontier_rescued_corner_support = 1
+    pallet.stats.support_frontier_selected_placements = 1
+    pallet.stats.support_frontier_selected_support_ratio = 1
+    pallet.stats.support_frontier_selected_corner_support = 0
+
+    kpis = aggregate_pallet_kpis({1: [pallet]})
+    assert int(kpis.get("support_frontier_refine_attempts_count", -1)) == 4
+    assert int(kpis.get("support_frontier_rescued_candidates_count", -1)) == 2
+    assert int(kpis.get("support_frontier_rescued_by_support_ratio_count", -1)) == 1
+    assert int(kpis.get("support_frontier_rescued_by_corner_support_count", -1)) == 1
+    assert int(kpis.get("support_frontier_selected_placements_count", -1)) == 1

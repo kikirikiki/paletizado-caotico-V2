@@ -75,6 +75,13 @@ class SeedSummary:
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
+    support_frontier_refine_attempts: int | None
+    support_frontier_rescued_candidates: int | None
+    support_frontier_rescued_by_support_ratio: int | None
+    support_frontier_rescued_by_corner_support: int | None
+    support_frontier_selected_placements: int | None
+    support_frontier_selected_by_support_ratio: int | None
+    support_frontier_selected_by_corner_support: int | None
     max_z_seen_last_mm: int | None
     lower_layer_reentry_count: int | None
     lower_layer_reentry_total_drop_mm: int | None
@@ -426,6 +433,41 @@ def run_seed(
         if isinstance(pallet_kpis, dict)
         else None
     )
+    support_frontier_refine_attempts = (
+        _safe_int(pallet_kpis.get("support_frontier_refine_attempts_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_frontier_rescued_candidates = (
+        _safe_int(pallet_kpis.get("support_frontier_rescued_candidates_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_frontier_rescued_by_support_ratio = (
+        _safe_int(pallet_kpis.get("support_frontier_rescued_by_support_ratio_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_frontier_rescued_by_corner_support = (
+        _safe_int(pallet_kpis.get("support_frontier_rescued_by_corner_support_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_frontier_selected_placements = (
+        _safe_int(pallet_kpis.get("support_frontier_selected_placements_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_frontier_selected_by_support_ratio = (
+        _safe_int(pallet_kpis.get("support_frontier_selected_by_support_ratio_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_frontier_selected_by_corner_support = (
+        _safe_int(pallet_kpis.get("support_frontier_selected_by_corner_support_count"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
 
     forced_destination = _safe_int(params.get("force_destination"))
     first_stack_step, first_stand_hw_step = _first_steps_from_placements(
@@ -463,6 +505,13 @@ def run_seed(
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
+        support_frontier_refine_attempts=support_frontier_refine_attempts,
+        support_frontier_rescued_candidates=support_frontier_rescued_candidates,
+        support_frontier_rescued_by_support_ratio=support_frontier_rescued_by_support_ratio,
+        support_frontier_rescued_by_corner_support=support_frontier_rescued_by_corner_support,
+        support_frontier_selected_placements=support_frontier_selected_placements,
+        support_frontier_selected_by_support_ratio=support_frontier_selected_by_support_ratio,
+        support_frontier_selected_by_corner_support=support_frontier_selected_by_corner_support,
         max_z_seen_last_mm=max_z_seen_last_mm,
         lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
         lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
@@ -515,6 +564,25 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),
             "hard_floor_phase_stand_hw_chosen_total_mean": _mean(
                 [v.hard_floor_phase_stand_hw_chosen_total for v in values_sorted]
+            ),
+            "support_frontier_refine_attempts_mean": _mean([v.support_frontier_refine_attempts for v in values_sorted]),
+            "support_frontier_rescued_candidates_mean": _mean(
+                [v.support_frontier_rescued_candidates for v in values_sorted]
+            ),
+            "support_frontier_rescued_by_support_ratio_mean": _mean(
+                [v.support_frontier_rescued_by_support_ratio for v in values_sorted]
+            ),
+            "support_frontier_rescued_by_corner_support_mean": _mean(
+                [v.support_frontier_rescued_by_corner_support for v in values_sorted]
+            ),
+            "support_frontier_selected_placements_mean": _mean(
+                [v.support_frontier_selected_placements for v in values_sorted]
+            ),
+            "support_frontier_selected_by_support_ratio_mean": _mean(
+                [v.support_frontier_selected_by_support_ratio for v in values_sorted]
+            ),
+            "support_frontier_selected_by_corner_support_mean": _mean(
+                [v.support_frontier_selected_by_corner_support for v in values_sorted]
             ),
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),

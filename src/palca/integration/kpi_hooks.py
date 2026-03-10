@@ -97,6 +97,13 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     stand_hw_gate_blocks_total = 0
     stand_hw_gate_allows_total = 0
     stand_hw_rejected_support_total = 0
+    support_frontier_refine_attempts = 0
+    support_frontier_candidates_rescued = 0
+    support_frontier_rescued_support_ratio = 0
+    support_frontier_rescued_corner_support = 0
+    support_frontier_selected_placements = 0
+    support_frontier_selected_support_ratio = 0
+    support_frontier_selected_corner_support = 0
     layer_monotonicity_first_pallet_by_dest: dict[int, dict[str, object]] = {}
 
     for dest, pallets in pallets_by_dest.items():
@@ -144,6 +151,25 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             stand_hw_gate_blocks_total += int(getattr(pallet.stats, "stand_hw_gate_blocks_total", 0))
             stand_hw_gate_allows_total += int(getattr(pallet.stats, "stand_hw_gate_allows_total", 0))
             stand_hw_rejected_support_total += int(getattr(pallet.stats, "stand_hw_rejected_support_total", 0))
+            support_frontier_refine_attempts += int(getattr(pallet.stats, "support_frontier_refine_attempts", 0))
+            support_frontier_candidates_rescued += int(
+                getattr(pallet.stats, "support_frontier_candidates_rescued", 0)
+            )
+            support_frontier_rescued_support_ratio += int(
+                getattr(pallet.stats, "support_frontier_rescued_support_ratio", 0)
+            )
+            support_frontier_rescued_corner_support += int(
+                getattr(pallet.stats, "support_frontier_rescued_corner_support", 0)
+            )
+            support_frontier_selected_placements += int(
+                getattr(pallet.stats, "support_frontier_selected_placements", 0)
+            )
+            support_frontier_selected_support_ratio += int(
+                getattr(pallet.stats, "support_frontier_selected_support_ratio", 0)
+            )
+            support_frontier_selected_corner_support += int(
+                getattr(pallet.stats, "support_frontier_selected_corner_support", 0)
+            )
 
             metrics = pallet.balance_metrics()
             for i, val in enumerate(metrics.quadrant_weights):
@@ -215,6 +241,13 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         "stand_hw_gate_blocks_total": int(stand_hw_gate_blocks_total),
         "stand_hw_gate_allows_total": int(stand_hw_gate_allows_total),
         "stand_hw_rejected_support_total": int(stand_hw_rejected_support_total),
+        "support_frontier_refine_attempts_count": int(support_frontier_refine_attempts),
+        "support_frontier_rescued_candidates_count": int(support_frontier_candidates_rescued),
+        "support_frontier_rescued_by_support_ratio_count": int(support_frontier_rescued_support_ratio),
+        "support_frontier_rescued_by_corner_support_count": int(support_frontier_rescued_corner_support),
+        "support_frontier_selected_placements_count": int(support_frontier_selected_placements),
+        "support_frontier_selected_by_support_ratio_count": int(support_frontier_selected_support_ratio),
+        "support_frontier_selected_by_corner_support_count": int(support_frontier_selected_corner_support),
         "layer_monotonicity_first_pallet_by_dest": {
             int(dest): dict(values) for dest, values in layer_monotonicity_first_pallet_by_dest.items()
         },
