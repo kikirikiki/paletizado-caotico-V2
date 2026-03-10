@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 import inspect
 import logging
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
@@ -20,6 +20,9 @@ from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalt
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
+EQUIVALENT_FOOTPRINT_SCORE_MARGIN = 0.05
+EQUIVALENT_FOOTPRINT_DIM_TOL_MM = 2
+EQUIVALENT_FOOTPRINT_Z_TOL_MM = 5
 
 
 @dataclass(frozen=True)
@@ -253,6 +256,8 @@ class SchedulerV1:
         self.hard_floor_phase_stand_mix_bonus_applied_total = 0
         self.hard_floor_phase_stand_mix_candidates_total = 0
         self.hard_floor_phase_stand_mix_chosen_total = 0
+        self.equivalent_footprint_tiebreak_opportunities_total = 0
+        self.equivalent_footprint_tiebreak_applied_total = 0
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -544,6 +549,18 @@ class SchedulerV1:
                         -float(item.candidate.terms.dt_extra),
                     ),
                 )
+                hard_floor_selected = self._equivalent_footprint_scarcity_tiebreak(
+                    candidates=hard_floor_candidates,
+                    selected=hard_floor_selected,
+                    primary_score_fn=lambda item: float(item.base_score),
+                    placement_fn=lambda item: getattr(item.candidate.plan.preview, "placement", None),
+                    pallet_id_fn=lambda item: item.candidate.plan.pallet_id,
+                    scarcity_rank_fn=lambda item: (
+                        float(item.candidate.terms.packing_gain),
+                        -float(item.candidate.terms.fragmentation),
+                        -float(item.candidate.terms.dt_extra),
+                    ),
+                )
                 selected = hard_floor_selected.candidate
                 self._record_hard_floor_phase_choice(
                     selected.plan,
@@ -571,6 +588,19 @@ class SchedulerV1:
                     )
                 else:
                     selected = best_by_slack
+                if selected is not None:
+                    selected = self._equivalent_footprint_scarcity_tiebreak(
+                        candidates=feasible_candidates,
+                        selected=selected,
+                        primary_score_fn=lambda candidate: float(candidate.terms.scalar_score),
+                        placement_fn=lambda candidate: getattr(candidate.plan.preview, "placement", None),
+                        pallet_id_fn=lambda candidate: candidate.plan.pallet_id,
+                        scarcity_rank_fn=lambda candidate: (
+                            float(candidate.terms.packing_gain),
+                            -float(candidate.terms.fragmentation),
+                            -float(candidate.terms.dt_extra),
+                        ),
+                    )
 
             if selected is not None:
                 best_plan = selected.plan
@@ -697,6 +727,22 @@ class SchedulerV1:
                             hard_floor_expansions,
                             key=lambda item: (
                                 float(item.base_score),
+                                float(item.expansion.terms.packing_gain),
+                                -float(item.expansion.terms.fragmentation),
+                                -float(item.expansion.terms.dt_extra),
+                            ),
+                        )
+                        chosen = self._equivalent_footprint_scarcity_tiebreak(
+                            candidates=hard_floor_expansions,
+                            selected=chosen,
+                            primary_score_fn=lambda item: float(item.base_score),
+                            placement_fn=lambda item: (
+                                getattr(item.expansion.node.first_plan.preview, "placement", None)
+                                if item.expansion.node.first_plan is not None
+                                else None
+                            ),
+                            pallet_id_fn=lambda item: item.expansion.box.destination,
+                            scarcity_rank_fn=lambda item: (
                                 float(item.expansion.terms.packing_gain),
                                 -float(item.expansion.terms.fragmentation),
                                 -float(item.expansion.terms.dt_extra),
@@ -1606,6 +1652,154 @@ class SchedulerV1:
         if bonus <= 0.0 or not self._placement_is_stand_hw(placement):
             return float(base_score), False
         return float(base_score) + float(bonus), True
+
+    @staticmethod
+    def _placement_footprint_dims(placement: object | None) -> tuple[int, int] | None:
+        if placement is None:
+            return None
+        try:
+            length_mm = int(getattr(placement, "length_mm"))
+            width_mm = int(getattr(placement, "width_mm"))
+        except Exception:
+            return None
+        if length_mm <= 0 or width_mm <= 0:
+            return None
+        lo, hi = sorted((length_mm, width_mm))
+        return int(lo), int(hi)
+
+    @staticmethod
+    def _placement_stack_bucket(placement: object | None) -> int | None:
+        if placement is None:
+            return None
+        try:
+            z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        except Exception:
+            return None
+        return 0 if int(z_mm) == 0 else 1
+
+    @staticmethod
+    def _placement_footprint_signature(placement: object | None) -> tuple[str, int, int, int] | None:
+        dims = SchedulerV1._placement_footprint_dims(placement)
+        bucket = SchedulerV1._placement_stack_bucket(placement)
+        if dims is None or bucket is None:
+            return None
+        family = str(getattr(placement, "orientation_family", "") or "").strip().lower()
+        if not family:
+            family = str(getattr(placement, "orientation_name", "") or "").strip().lower()
+        if not family:
+            family = "unknown"
+        return (family, int(dims[0]), int(dims[1]), int(bucket))
+
+    def _placements_are_equivalent_footprint(
+        self,
+        placement_a: object | None,
+        placement_b: object | None,
+    ) -> bool:
+        if placement_a is None or placement_b is None:
+            return False
+        if self._placement_stack_bucket(placement_a) != self._placement_stack_bucket(placement_b):
+            return False
+
+        family_a = str(getattr(placement_a, "orientation_family", "") or "").strip().lower()
+        family_b = str(getattr(placement_b, "orientation_family", "") or "").strip().lower()
+        if family_a != family_b:
+            return False
+
+        dims_a = self._placement_footprint_dims(placement_a)
+        dims_b = self._placement_footprint_dims(placement_b)
+        if dims_a is None or dims_b is None:
+            return False
+        tol = max(0, int(EQUIVALENT_FOOTPRINT_DIM_TOL_MM))
+        if abs(int(dims_a[0]) - int(dims_b[0])) > tol:
+            return False
+        if abs(int(dims_a[1]) - int(dims_b[1])) > tol:
+            return False
+
+        try:
+            z_a = int(getattr(placement_a, "z_mm", 0) or 0)
+            z_b = int(getattr(placement_b, "z_mm", 0) or 0)
+        except Exception:
+            return False
+        if abs(int(z_a) - int(z_b)) > int(EQUIVALENT_FOOTPRINT_Z_TOL_MM):
+            return False
+
+        layer_a = getattr(placement_a, "layer_id", None)
+        layer_b = getattr(placement_b, "layer_id", None)
+        if layer_a is None or layer_b is None:
+            return True
+        try:
+            return int(layer_a) == int(layer_b)
+        except Exception:
+            return True
+
+    def _equivalent_footprint_scarcity_tiebreak(
+        self,
+        *,
+        candidates: Sequence[Any],
+        selected: Any,
+        primary_score_fn: Callable[[Any], float],
+        placement_fn: Callable[[Any], object | None],
+        pallet_id_fn: Callable[[Any], Any],
+        scarcity_rank_fn: Callable[[Any], tuple[Any, ...]],
+    ) -> Any:
+        if selected is None or len(candidates) < 2:
+            return selected
+
+        selected_placement = placement_fn(selected)
+        selected_pallet_id = pallet_id_fn(selected)
+        if selected_placement is None or selected_pallet_id is None:
+            return selected
+
+        same_pallet = [item for item in candidates if pallet_id_fn(item) == selected_pallet_id]
+        if len(same_pallet) < 2:
+            return selected
+
+        selected_score = float(primary_score_fn(selected))
+        score_margin = float(EQUIVALENT_FOOTPRINT_SCORE_MARGIN)
+        marginal = [
+            item for item in same_pallet if float(primary_score_fn(item)) >= (float(selected_score) - float(score_margin))
+        ]
+        if len(marginal) < 2:
+            return selected
+
+        equivalent = [
+            item
+            for item in marginal
+            if self._placements_are_equivalent_footprint(selected_placement, placement_fn(item))
+        ]
+        if len(equivalent) < 2:
+            return selected
+        self.equivalent_footprint_tiebreak_opportunities_total += 1
+
+        signature_counts: dict[tuple[str, int, int, int], int] = {}
+        for item in same_pallet:
+            sig = self._placement_footprint_signature(placement_fn(item))
+            if sig is None:
+                continue
+            signature_counts[sig] = int(signature_counts.get(sig, 0)) + 1
+
+        selected_sig = self._placement_footprint_signature(selected_placement)
+        if selected_sig is None:
+            return selected
+        selected_count = int(signature_counts.get(selected_sig, 0))
+
+        def _item_key(item: Any) -> tuple[Any, ...]:
+            sig = self._placement_footprint_signature(placement_fn(item))
+            abundance = int(signature_counts.get(sig, 0)) if sig is not None else 0
+            return (
+                int(abundance),
+                float(primary_score_fn(item)),
+                *scarcity_rank_fn(item),
+            )
+
+        best = max(equivalent, key=_item_key)
+        best_sig = self._placement_footprint_signature(placement_fn(best))
+        best_count = int(signature_counts.get(best_sig, 0)) if best_sig is not None else 0
+        if best_count <= selected_count:
+            return selected
+
+        self.equivalent_footprint_tiebreak_applied_total += 1
+        return best
 
     @staticmethod
     def _rectangles_touch(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
