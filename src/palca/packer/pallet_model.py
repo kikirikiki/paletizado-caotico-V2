@@ -452,6 +452,9 @@ class PalletModel:
                         "width_mm": int(getattr(placement, "width_mm", 0) or 0),
                         "height_mm": int(getattr(placement, "height_mm", 0) or 0),
                         "layer_id": int(cand.layer_id),
+                        "rot90": bool(getattr(placement, "rot90", False)),
+                        "orientation_name": getattr(placement, "orientation_name", None),
+                        "orientation_family": getattr(placement, "orientation_family", None),
                         "objective": float(_objective(cand)),
                     }
                 )
@@ -1195,6 +1198,9 @@ class PalletModel:
                         "width_mm": int(getattr(placement, "width_mm", 0) or 0),
                         "height_mm": int(getattr(placement, "height_mm", 0) or 0),
                         "layer_id": int(cand.layer_id),
+                        "rot90": bool(getattr(placement, "rot90", False)),
+                        "orientation_name": getattr(placement, "orientation_name", None),
+                        "orientation_family": getattr(placement, "orientation_family", None),
                         "objective": float(_objective(cand)),
                     }
                 )

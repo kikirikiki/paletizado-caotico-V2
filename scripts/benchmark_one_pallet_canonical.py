@@ -18,6 +18,10 @@ from palca.integration.reentry_diagnostics import (
     build_consolidated_reentry_report,
     build_seed_reentry_report_from_dump,
 )
+from palca.integration.late_stand_diagnostics import (
+    build_consolidated_late_stand_report,
+    build_seed_late_stand_report_from_dump,
+)
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -760,6 +764,128 @@ def _write_reentry_autopsy_artifacts(
     return consolidated, files
 
 
+def _write_late_stand_audit_artifacts(
+    *,
+    rows: list[SeedSummary],
+    run_output_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    by_run: dict[str, list[dict[str, Any]]] = {}
+
+    for row in rows:
+        dump_path = Path(str(row.placements_json))
+        if not dump_path.exists():
+            continue
+        try:
+            dump_payload = json.loads(dump_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        seed_report = build_seed_late_stand_report_from_dump(
+            dump_payload=dump_payload,
+            seed=int(row.seed),
+            critical_start_step=15,
+            max_critical_steps=3,
+        )
+        by_run.setdefault(str(row.run_label), []).append(seed_report)
+
+        seed_report_path = dump_path.with_name(f"seed_{int(row.seed)}_late_stand_audit.json")
+        seed_report_path.write_text(
+            json.dumps(seed_report, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    consolidated: dict[str, Any] = {}
+    files: dict[str, Any] = {}
+    for run_label, reports in by_run.items():
+        reports_sorted = sorted(reports, key=lambda item: int(item.get("seed", 0)))
+        consolidated_payload = build_consolidated_late_stand_report(reports_sorted)
+        consolidated[run_label] = consolidated_payload
+
+        json_path = run_output_dir / f"late_stand_audit_{run_label}.json"
+        json_path.write_text(
+            json.dumps(consolidated_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+        breakdown_csv_path = run_output_dir / f"late_stand_breakdown_{run_label}.csv"
+        breakdown_rows = list(consolidated_payload.get("breakdown_rows", []) or [])
+        breakdown_headers = [
+            "seed",
+            "step",
+            "reentry_placement",
+            "stand_candidate",
+            "candidate_box_id",
+            "candidate_origin",
+            "generated",
+            "feasible",
+            "non_reentry_candidate",
+            "rejected_reason_exact",
+            "threshold_name",
+            "threshold_value",
+            "observed_name",
+            "observed_value",
+            "classification",
+            "detail",
+            "source_reason",
+            "ramp_id",
+            "buffer_index",
+        ]
+        with breakdown_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=breakdown_headers)
+            writer.writeheader()
+            for item in breakdown_rows:
+                out_row = {key: item.get(key) for key in breakdown_headers}
+                out_row["reentry_placement"] = json.dumps(item.get("reentry_placement", {}), ensure_ascii=True)
+                out_row["stand_candidate"] = json.dumps(item.get("stand_candidate", {}), ensure_ascii=True)
+                writer.writerow(out_row)
+
+        summary_csv_path = run_output_dir / f"late_stand_critical_steps_{run_label}.csv"
+        summary_rows = list(consolidated_payload.get("rows", []) or [])
+        summary_headers = [
+            "seed",
+            "step",
+            "drop_mm",
+            "classification",
+            "late_stand_alternative_without_reentry",
+            "reentry_placement",
+            "top_feasible_candidates_current",
+        ]
+        with summary_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=summary_headers)
+            writer.writeheader()
+            for item in summary_rows:
+                out_row = {key: item.get(key) for key in summary_headers}
+                out_row["reentry_placement"] = json.dumps(item.get("reentry_placement", {}), ensure_ascii=True)
+                out_row["top_feasible_candidates_current"] = json.dumps(
+                    item.get("top_feasible_candidates_current", []),
+                    ensure_ascii=True,
+                )
+                writer.writerow(out_row)
+
+        pareto_csv_path = run_output_dir / f"late_stand_pareto_{run_label}.csv"
+        pareto_rows = list(consolidated_payload.get("summary", {}).get("reason_pareto", []) or [])
+        with pareto_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["reason", "count", "pct"])
+            writer.writeheader()
+            for item in pareto_rows:
+                writer.writerow(
+                    {
+                        "reason": item.get("reason"),
+                        "count": item.get("count"),
+                        "pct": item.get("pct"),
+                    }
+                )
+
+        files[run_label] = {
+            "json": str(json_path),
+            "breakdown_csv": str(breakdown_csv_path),
+            "critical_steps_csv": str(summary_csv_path),
+            "pareto_csv": str(pareto_csv_path),
+        }
+
+    return consolidated, files
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -859,6 +985,10 @@ def run_benchmark(
         rows=rows_sorted,
         run_output_dir=run_output_dir,
     )
+    late_stand_audit, late_stand_audit_files = _write_late_stand_audit_artifacts(
+        rows=rows_sorted,
+        run_output_dir=run_output_dir,
+    )
 
     aggregates = _aggregate_rows(rows_sorted)
     discriminative = _discriminative_status(rows_sorted)
@@ -910,11 +1040,13 @@ def run_benchmark(
         "aggregates": aggregates,
         "discriminative": discriminative,
         "reentry_autopsy": reentry_autopsy,
+        "late_stand_audit": late_stand_audit,
         "rows": [asdict(r) for r in rows_sorted],
         "files": {
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
             "reentry_autopsy": reentry_autopsy_files,
+            "late_stand_audit": late_stand_audit_files,
         },
     }
 
