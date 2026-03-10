@@ -664,9 +664,97 @@ def _write_reentry_autopsy_artifacts(
             for item in rows_csv:
                 writer.writerow({key: item.get(key) for key in headers})
 
+        breakdown_csv_path = run_output_dir / f"reentry_rejection_breakdown_{run_label}.csv"
+        breakdown_rows = list(consolidated_payload.get("breakdown_rows", []) or [])
+        breakdown_headers = [
+            "seed",
+            "step",
+            "candidate_origin",
+            "candidate_box_id",
+            "generated",
+            "feasible",
+            "non_reentry_candidate",
+            "rejected_reason_exact",
+            "threshold_name",
+            "threshold_value",
+            "observed_name",
+            "observed_value",
+            "source_reason",
+            "ramp_id",
+            "buffer_index",
+            "z_prev_max_mm",
+            "z_reentry_mm",
+            "drop_mm",
+            "detail",
+            "placement",
+        ]
+        with breakdown_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=breakdown_headers)
+            writer.writeheader()
+            for item in breakdown_rows:
+                row = {key: item.get(key) for key in breakdown_headers}
+                row["placement"] = json.dumps(item.get("placement", {}), ensure_ascii=True)
+                writer.writerow(row)
+
+        pareto_csv_path = run_output_dir / f"reentry_rejection_pareto_{run_label}.csv"
+        pareto_rows = list(consolidated_payload.get("summary", {}).get("group_pareto", []) or [])
+        with pareto_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["group", "count", "pct"])
+            writer.writeheader()
+            for item in pareto_rows:
+                writer.writerow(
+                    {
+                        "group": item.get("group"),
+                        "count": item.get("count"),
+                        "pct": item.get("pct"),
+                    }
+                )
+
+        critical_csv_path = run_output_dir / f"reentry_critical_steps_{run_label}.csv"
+        critical_headers = [
+            "seed",
+            "critical_rank",
+            "step",
+            "drop_mm",
+            "classification",
+            "dominant_cause",
+            "chosen_placement",
+            "alternatives_without_reentry_count",
+            "hidden_box_level_alternatives_count",
+            "top_reasons",
+        ]
+        with critical_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=critical_headers)
+            writer.writeheader()
+            for report in reports_sorted:
+                reentries = [item for item in list(report.get("reentries", []) or []) if isinstance(item, dict)]
+                for idx, entry in enumerate(reentries[:3]):
+                    top_reasons = list(entry.get("reason_pareto", []) or [])[:3]
+                    writer.writerow(
+                        {
+                            "seed": report.get("seed"),
+                            "critical_rank": int(idx + 1),
+                            "step": entry.get("step"),
+                            "drop_mm": entry.get("drop_mm"),
+                            "classification": entry.get("classification"),
+                            "dominant_cause": entry.get("dominant_cause"),
+                            "chosen_placement": json.dumps(entry.get("chosen_placement", {}), ensure_ascii=True),
+                            "alternatives_without_reentry_count": len(
+                                list(entry.get("alternatives_without_reentry", []) or [])
+                            ),
+                            "hidden_box_level_alternatives_count": len(
+                                list(entry.get("hidden_box_level_alternatives", []) or [])
+                            ),
+                            "top_reasons": json.dumps(top_reasons, ensure_ascii=True),
+                        }
+                    )
+
         files[run_label] = {
             "json": str(json_path),
             "csv": str(csv_path),
+            "breakdown_csv": str(breakdown_csv_path),
+            "pareto_csv": str(pareto_csv_path),
+            "critical_steps_csv": str(critical_csv_path),
         }
 
     return consolidated, files

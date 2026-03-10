@@ -206,9 +206,26 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     summary_json = Path(summary["files"]["summary_json"])
     assert summary_csv.exists()
     assert summary_json.exists()
+    reentry_files = summary["files"]["reentry_autopsy"]["baseline"]
+    assert Path(reentry_files["breakdown_csv"]).exists()
+    assert Path(reentry_files["pareto_csv"]).exists()
+    assert Path(reentry_files["critical_steps_csv"]).exists()
 
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+
+    with Path(reentry_files["breakdown_csv"]).open("r", encoding="utf-8") as handle:
+        breakdown_row = next(csv.DictReader(handle), None)
+    # No reentries in fake payload; CSV must still be serializable with headers only.
+    assert breakdown_row is None
+
+    with Path(reentry_files["pareto_csv"]).open("r", encoding="utf-8") as handle:
+        pareto_row = next(csv.DictReader(handle), None)
+    assert pareto_row is None
+
+    with Path(reentry_files["critical_steps_csv"]).open("r", encoding="utf-8") as handle:
+        critical_row = next(csv.DictReader(handle), None)
+    assert critical_row is None
