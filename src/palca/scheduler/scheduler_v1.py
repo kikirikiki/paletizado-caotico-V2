@@ -17,7 +17,7 @@ from ..scoring.height_slack import (
     rank_for_expansion_with_height_slack,
 )
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
-from .hard_floor_planar_density import score_planar_base_density
+from .hard_floor_planar_density import PlanarBaseDensityMetrics, score_planar_base_density
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
@@ -205,6 +205,26 @@ class _HardFloorScoredExpansion:
     expansion: _BeamExpansion
     base_score: float
     stand_mix_bonus_applied: bool = False
+
+
+@dataclass(frozen=True)
+class _HardFloorCandidateEvaluation:
+    scored: _HardFloorScoredCandidate
+    placement: object | None
+    is_floor: bool
+    is_planar_stacking: bool
+    density_metrics: PlanarBaseDensityMetrics | None
+    next_floor_ratio: float | None
+
+
+@dataclass(frozen=True)
+class _HardFloorExpansionEvaluation:
+    scored: _HardFloorScoredExpansion
+    placement: object | None
+    is_floor: bool
+    is_planar_stacking: bool
+    density_metrics: PlanarBaseDensityMetrics | None
+    next_floor_ratio: float | None
 
 
 class SchedulerV1:
@@ -1461,36 +1481,122 @@ class SchedulerV1:
                 self.hard_floor_phase_exit_no_floor_total += 1
                 continue
 
-            for cand in floor_group:
+            future_boxes = [item.box for item in floor_group]
+            evaluated: list[_HardFloorCandidateEvaluation] = []
+            for cand in group:
                 base_score = self._hard_floor_phase_score_preview(
                     pallet=pallet,
                     preview=cand.plan.preview,
-                    future_boxes=[item.box for item in group],
+                    future_boxes=future_boxes,
                     selected_box=cand.box,
                 )
                 placement = getattr(cand.plan.preview, "placement", None)
+                is_floor = self._preview_is_floor(cand.plan.preview)
                 is_stand_hw = self._placement_is_stand_hw(placement)
-                if is_stand_hw:
+                if is_floor and is_stand_hw:
                     self.hard_floor_phase_stand_mix_candidates_total += 1
-                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
-                    base_score=float(base_score),
-                    placement=placement,
-                )
+                scored_value = float(base_score)
+                stand_mix_bonus_applied = False
+                if is_floor:
+                    scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                        base_score=float(base_score),
+                        placement=placement,
+                    )
                 if stand_mix_bonus_applied:
                     self.hard_floor_phase_stand_mix_bonus_applied_total += 1
                 new_terms = replace(cand.terms, scalar_score=float(scored_value))
                 new_plan = replace(cand.plan, score=float(scored_value))
-                scored.append(
-                    _HardFloorScoredCandidate(
-                        candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
-                        base_score=float(scored_value),
-                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                next_floor_ratio = None
+                if is_floor:
+                    next_floor_ratio = self._hard_floor_phase_next_floor_ratio(
+                        pallet=pallet,
+                        selected_box=cand.box,
+                        future_boxes=future_boxes,
+                    )
+                hard_scored = _HardFloorScoredCandidate(
+                    candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
+                    base_score=float(scored_value),
+                    stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                )
+                evaluated.append(
+                    _HardFloorCandidateEvaluation(
+                        scored=hard_scored,
+                        placement=placement,
+                        is_floor=bool(is_floor),
+                        is_planar_stacking=self._placement_is_planar_stacking(placement),
+                        density_metrics=self._hard_floor_phase_density_metrics_for_placement(
+                            pallet=pallet,
+                            placement=placement,
+                        ),
+                        next_floor_ratio=next_floor_ratio,
                     )
                 )
+
+            best_floor_reference = max(
+                (item for item in evaluated if item.is_floor),
+                key=self._hard_floor_candidate_evaluation_key,
+            )
+            best_floor_with_future = max(
+                (
+                    item
+                    for item in evaluated
+                    if item.is_floor and float(item.next_floor_ratio or 0.0) > 0.0
+                ),
+                key=self._hard_floor_candidate_evaluation_key,
+                default=None,
+            )
+
+            for item in evaluated:
+                if item.is_floor:
+                    if (
+                        best_floor_with_future is not None
+                        and self._hard_floor_phase_floor_closure_is_marginal(
+                            candidate_score=float(item.scored.base_score),
+                            candidate_next_floor_ratio=item.next_floor_ratio,
+                            reference_score=float(best_floor_with_future.scored.base_score),
+                            reference_next_floor_ratio=best_floor_with_future.next_floor_ratio,
+                        )
+                    ):
+                        continue
+                    scored.append(item.scored)
+                    continue
+                if (
+                    item.is_planar_stacking
+                    and item.density_metrics is not None
+                    and best_floor_reference.density_metrics is not None
+                    and self._early_planar_stacking_requires_gain(
+                        stack_score=float(item.scored.base_score),
+                        stack_density=item.density_metrics,
+                        floor_score=float(best_floor_reference.scored.base_score),
+                        floor_density=best_floor_reference.density_metrics,
+                        bin_area_mm2=int(getattr(pallet, "bin_area_mm2", 1) or 1),
+                    )
+                ):
+                    scored.append(item.scored)
 
         if active_found:
             self._hard_floor_phase_mark_active_decision()
         return scored
+
+    @staticmethod
+    def _hard_floor_candidate_evaluation_key(item: _HardFloorCandidateEvaluation) -> tuple[float, float, float, float]:
+        terms = item.scored.candidate.terms
+        return (
+            float(item.scored.base_score),
+            float(terms.packing_gain),
+            -float(terms.fragmentation),
+            -float(terms.dt_extra),
+        )
+
+    @staticmethod
+    def _hard_floor_expansion_evaluation_key(item: _HardFloorExpansionEvaluation) -> tuple[float, float, float, float]:
+        terms = item.scored.expansion.terms
+        return (
+            float(item.scored.base_score),
+            float(terms.packing_gain),
+            -float(terms.fragmentation),
+            -float(terms.dt_extra),
+        )
 
     def _hard_floor_phase_filter_beam_expansions(
         self,
@@ -1544,34 +1650,101 @@ class SchedulerV1:
                 self.hard_floor_phase_exit_no_floor_total += 1
                 continue
 
-            for exp in floor_group:
-                assert exp.node.first_plan is not None
+            future_boxes = [item.box for item in floor_group]
+            evaluated: list[_HardFloorExpansionEvaluation] = []
+            for exp in group:
+                if exp.node.first_plan is None:
+                    continue
                 base_score = self._hard_floor_phase_score_preview(
                     pallet=pallet,
                     preview=exp.node.first_plan.preview,
-                    future_boxes=[item.box for item in group],
+                    future_boxes=future_boxes,
                     selected_box=exp.box,
                 )
                 placement = getattr(exp.node.first_plan.preview, "placement", None)
+                is_floor = self._preview_is_floor(exp.node.first_plan.preview)
                 is_stand_hw = self._placement_is_stand_hw(placement)
-                if is_stand_hw:
+                if is_floor and is_stand_hw:
                     self.hard_floor_phase_stand_mix_candidates_total += 1
-                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
-                    base_score=float(base_score),
-                    placement=placement,
-                )
+                scored_value = float(base_score)
+                stand_mix_bonus_applied = False
+                if is_floor:
+                    scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                        base_score=float(base_score),
+                        placement=placement,
+                    )
                 if stand_mix_bonus_applied:
                     self.hard_floor_phase_stand_mix_bonus_applied_total += 1
                 exp.node.score_sum = float(scored_value)
                 exp.node.first_plan = replace(exp.node.first_plan, score=float(scored_value))
                 new_terms = replace(exp.terms, scalar_score=float(scored_value))
-                scored.append(
-                    _HardFloorScoredExpansion(
-                        expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
-                        base_score=float(scored_value),
-                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                next_floor_ratio = None
+                if is_floor:
+                    next_floor_ratio = self._hard_floor_phase_next_floor_ratio(
+                        pallet=pallet,
+                        selected_box=exp.box,
+                        future_boxes=future_boxes,
+                    )
+                hard_scored = _HardFloorScoredExpansion(
+                    expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
+                    base_score=float(scored_value),
+                    stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                )
+                evaluated.append(
+                    _HardFloorExpansionEvaluation(
+                        scored=hard_scored,
+                        placement=placement,
+                        is_floor=bool(is_floor),
+                        is_planar_stacking=self._placement_is_planar_stacking(placement),
+                        density_metrics=self._hard_floor_phase_density_metrics_for_placement(
+                            pallet=pallet,
+                            placement=placement,
+                        ),
+                        next_floor_ratio=next_floor_ratio,
                     )
                 )
+
+            best_floor_reference = max(
+                (item for item in evaluated if item.is_floor),
+                key=self._hard_floor_expansion_evaluation_key,
+            )
+            best_floor_with_future = max(
+                (
+                    item
+                    for item in evaluated
+                    if item.is_floor and float(item.next_floor_ratio or 0.0) > 0.0
+                ),
+                key=self._hard_floor_expansion_evaluation_key,
+                default=None,
+            )
+
+            for item in evaluated:
+                if item.is_floor:
+                    if (
+                        best_floor_with_future is not None
+                        and self._hard_floor_phase_floor_closure_is_marginal(
+                            candidate_score=float(item.scored.base_score),
+                            candidate_next_floor_ratio=item.next_floor_ratio,
+                            reference_score=float(best_floor_with_future.scored.base_score),
+                            reference_next_floor_ratio=best_floor_with_future.next_floor_ratio,
+                        )
+                    ):
+                        continue
+                    scored.append(item.scored)
+                    continue
+                if (
+                    item.is_planar_stacking
+                    and item.density_metrics is not None
+                    and best_floor_reference.density_metrics is not None
+                    and self._early_planar_stacking_requires_gain(
+                        stack_score=float(item.scored.base_score),
+                        stack_density=item.density_metrics,
+                        floor_score=float(best_floor_reference.scored.base_score),
+                        floor_density=best_floor_reference.density_metrics,
+                        bin_area_mm2=int(getattr(pallet, "bin_area_mm2", 1) or 1),
+                    )
+                ):
+                    scored.append(item.scored)
 
         if active_found:
             self._hard_floor_phase_mark_active_decision()
@@ -1596,6 +1769,187 @@ class SchedulerV1:
         family = str(getattr(placement, "orientation_family", "") or "").lower()
         name = str(getattr(placement, "orientation_name", "") or "").lower()
         return family == "stand_hw" or "stand_hw" in name
+
+    @staticmethod
+    def _placement_is_planar(placement: object | None) -> bool:
+        if placement is None:
+            return False
+        family = str(getattr(placement, "orientation_family", "") or "").strip().lower()
+        name = str(getattr(placement, "orientation_name", "") or "").strip().lower()
+        if family:
+            return family == "planar"
+        return "planar" in name and "stand_hw" not in name
+
+    @classmethod
+    def _placement_is_planar_stacking(cls, placement: object | None) -> bool:
+        if placement is None or not cls._placement_is_planar(placement):
+            return False
+        try:
+            return int(getattr(placement, "z_mm", 0) or 0) > 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _placement_rect(placement: object | None) -> tuple[int, int, int, int] | None:
+        if placement is None:
+            return None
+        try:
+            x0 = int(getattr(placement, "x_mm", 0) or 0)
+            y0 = int(getattr(placement, "y_mm", 0) or 0)
+            x1 = x0 + int(getattr(placement, "length_mm", 0) or 0)
+            y1 = y0 + int(getattr(placement, "width_mm", 0) or 0)
+        except Exception:
+            return None
+        return (x0, y0, x1, y1)
+
+    @staticmethod
+    def _hard_floor_collect_floor_rects(pallet: PalletModel) -> list[tuple[int, int, int, int]]:
+        floor_rects: list[tuple[int, int, int, int]] = []
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                if int(getattr(placement, "z_mm", 0) or 0) != 0:
+                    continue
+            except Exception:
+                continue
+            rect = SchedulerV1._placement_rect(placement)
+            if rect is not None:
+                floor_rects.append(rect)
+        return floor_rects
+
+    def _hard_floor_phase_next_floor_ratio(
+        self,
+        *,
+        pallet: PalletModel,
+        selected_box: Box | None,
+        future_boxes: Sequence[Box] | None,
+    ) -> float:
+        if not future_boxes:
+            return 0.0
+        next_floor_options = 0
+        future_total = 0
+        try:
+            pallet_clone = copy.deepcopy(pallet)
+            if selected_box is not None:
+                chosen_preview = self._preview_place(pallet_clone, selected_box)
+                if chosen_preview.feasible:
+                    pallet_clone.commit_place(chosen_preview)
+            selected_consumed = False
+            selected_box_id = getattr(selected_box, "box_id", None) if selected_box is not None else None
+            lookahead_cap = max(1, int(getattr(self.config, "hard_floor_phase_lookahead_items", 8) or 8))
+            for box in list(future_boxes)[:lookahead_cap]:
+                if selected_box is not None and not selected_consumed:
+                    if box is selected_box or getattr(box, "box_id", None) == selected_box_id:
+                        selected_consumed = True
+                        continue
+                future_total += 1
+                future_preview = self._preview_place(pallet_clone, box)
+                if future_preview.feasible and self._preview_is_floor(future_preview):
+                    next_floor_options += 1
+        except Exception:
+            return 0.0
+        return float(next_floor_options) / float(max(1, future_total))
+
+    @staticmethod
+    def _hard_floor_phase_floor_closure_is_marginal(
+        *,
+        candidate_score: float,
+        candidate_next_floor_ratio: float | None,
+        reference_score: float,
+        reference_next_floor_ratio: float | None,
+    ) -> bool:
+        cand_ratio = float(candidate_next_floor_ratio or 0.0)
+        ref_ratio = float(reference_next_floor_ratio or 0.0)
+        if ref_ratio <= 0.0 or cand_ratio > 0.0:
+            return False
+        return bool(float(candidate_score) <= float(reference_score) + 0.55)
+
+    def _hard_floor_phase_density_metrics_for_placement(
+        self,
+        *,
+        pallet: PalletModel,
+        placement: object | None,
+    ) -> PlanarBaseDensityMetrics | None:
+        rect = self._placement_rect(placement)
+        if rect is None:
+            return None
+
+        floor_rects_after = self._hard_floor_collect_floor_rects(pallet)
+        try:
+            z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        except Exception:
+            return None
+        if z_mm == 0:
+            floor_rects_after.append(rect)
+
+        spec = getattr(pallet, "spec", None)
+        bin_mm = max(1, int(getattr(self.config, "spatial_xy_bin_mm", 150) or 150))
+        _, metrics = score_planar_base_density(
+            floor_rects_after=floor_rects_after,
+            bin_area_mm2=int(getattr(pallet, "bin_area_mm2", 1) or 1),
+            floor_count_after=int(len(floor_rects_after)),
+            bin_length_mm=int(getattr(spec, "bin_length_mm", 0) or 0) if spec is not None else None,
+            bin_width_mm=int(getattr(spec, "bin_width_mm", 0) or 0) if spec is not None else None,
+            offset_mm=int(getattr(spec, "offset_mm", 0) or 0) if spec is not None else 0,
+            bin_mm=int(bin_mm),
+        )
+        return metrics
+
+    @staticmethod
+    def _early_planar_stacking_requires_gain(
+        *,
+        stack_score: float,
+        stack_density: PlanarBaseDensityMetrics,
+        floor_score: float,
+        floor_density: PlanarBaseDensityMetrics,
+        bin_area_mm2: int,
+    ) -> bool:
+        score_gain = float(stack_score) - float(floor_score)
+        if score_gain < 0.60:
+            return False
+
+        bin_area = float(max(1, int(bin_area_mm2)))
+        lfr_gain_ratio = (
+            float(stack_density.largest_free_rect_area_mm2) - float(floor_density.largest_free_rect_area_mm2)
+        ) / bin_area
+        boundary_gain_ratio = (
+            float(stack_density.boundary_connected_free_area_mm2)
+            - float(floor_density.boundary_connected_free_area_mm2)
+        ) / bin_area
+        fill_gain = float(stack_density.base_fill_ratio) - float(floor_density.base_fill_ratio)
+        continuity_gain = float(stack_density.floor_continuity_score) - float(floor_density.floor_continuity_score)
+        compactness_gain = float(stack_density.base_compactness) - float(floor_density.base_compactness)
+        zone_gain = int(stack_density.occupied_base_zones) - int(floor_density.occupied_base_zones)
+
+        if fill_gain < -0.12:
+            return False
+        if compactness_gain < -0.08 or continuity_gain < -0.10 or zone_gain < -1:
+            return False
+
+        strong_signals = 0
+        if lfr_gain_ratio >= 0.08:
+            strong_signals += 1
+        if boundary_gain_ratio >= 0.06:
+            strong_signals += 1
+        if continuity_gain >= 0.18:
+            strong_signals += 1
+        if compactness_gain >= 0.16:
+            strong_signals += 1
+        if fill_gain >= 0.05:
+            strong_signals += 1
+
+        combined_structural_gain = (
+            max(0.0, lfr_gain_ratio)
+            + max(0.0, boundary_gain_ratio)
+            + 0.50 * max(0.0, continuity_gain)
+            + 0.40 * max(0.0, compactness_gain)
+            + 0.30 * max(0.0, fill_gain)
+            + 0.05 * max(0, zone_gain)
+        )
+
+        if strong_signals < 2:
+            return False
+
+        return bool(combined_structural_gain >= 0.20 and score_gain >= 0.60)
 
     def _hard_floor_phase_apply_stand_mix_bonus(
         self,
