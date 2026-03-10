@@ -913,11 +913,39 @@ class PalletModel:
                     "y": int(adjusted.y_mm),
                     "w": int(adjusted.length_mm),
                     "h": int(adjusted.width_mm),
+                    "x_mm": int(adjusted.x_mm),
+                    "y_mm": int(adjusted.y_mm),
+                    "z_mm": int(adjusted.z_mm),
+                    "length_mm": int(adjusted.length_mm),
+                    "width_mm": int(adjusted.width_mm),
+                    "height_mm": int(adjusted.height_mm),
+                    "top_z_mm": int(adjusted.z_mm) + int(adjusted.height_mm),
+                    "layer_id": int(getattr(adjusted, "layer_id", 0) or 0),
+                    "orientation_family": getattr(adjusted, "orientation_family", None),
+                    "orientation_name": getattr(adjusted, "orientation_name", None),
                 }
                 if "support_ratio" in debug:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
+                if "required_support_ratio" in debug:
+                    candidate_info["required_support_ratio"] = float(debug["required_support_ratio"])
+                if "support_area_mm2" in debug:
+                    candidate_info["support_area_mm2"] = float(debug["support_area_mm2"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "corners_supported" in debug:
+                    candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "supported_overlaps_count" in debug:
+                    candidate_info["supported_overlaps_count"] = int(debug["supported_overlaps_count"])
+                if "settle_mm" in debug:
+                    candidate_info["settle_mm"] = float(debug["settle_mm"])
+                if "settled_z_before_mm" in debug:
+                    candidate_info["settled_z_before_mm"] = float(debug["settled_z_before_mm"])
+                if "settled_z_after_mm" in debug:
+                    candidate_info["settled_z_after_mm"] = float(debug["settled_z_after_mm"])
+                if "loadbear_ratio" in debug:
+                    candidate_info["loadbear_ratio"] = float(debug["loadbear_ratio"])
+                if "support_capacity" in debug:
+                    candidate_info["support_capacity"] = float(debug["support_capacity"])
                 if "rejection_reason" in debug:
                     candidate_info["rejection_reason"] = str(debug["rejection_reason"])
                 evaluated_candidates.append((float(objective), candidate_info))
@@ -1071,6 +1099,7 @@ class PalletModel:
 
         rejected_by_controls = 0
         rejected_by_height = 0
+        height_limit_candidates: list[dict[str, Any]] = []
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
         candidates: list[_LayerCandidate] = []
         coverage_enabled = (
@@ -1195,6 +1224,22 @@ class PalletModel:
                 top_z = int(z_mm) + int(h_mm)
                 if top_z > max_height:
                     rejected_by_height += 1
+                    height_limit_candidates.append(
+                        {
+                            "x_mm": int(x_mm),
+                            "y_mm": int(y_mm),
+                            "z_mm": int(z_mm),
+                            "length_mm": int(l_mm),
+                            "width_mm": int(w_mm),
+                            "height_mm": int(h_mm),
+                            "layer_id": 0,
+                            "top_z_mm": int(top_z),
+                            "max_height_mm": int(max_height),
+                            "overflow_mm": int(top_z - max_height),
+                            "orientation_family": str(orientation.family),
+                            "orientation_name": str(orientation.name),
+                        }
+                    )
                     continue
 
                 rect_candidate = MaxRectsCandidate(
@@ -1313,11 +1358,39 @@ class PalletModel:
                     "y": int(adjusted.y_mm),
                     "w": int(adjusted.length_mm),
                     "h": int(adjusted.width_mm),
+                    "x_mm": int(adjusted.x_mm),
+                    "y_mm": int(adjusted.y_mm),
+                    "z_mm": int(adjusted.z_mm),
+                    "length_mm": int(adjusted.length_mm),
+                    "width_mm": int(adjusted.width_mm),
+                    "height_mm": int(adjusted.height_mm),
+                    "top_z_mm": int(adjusted.z_mm) + int(adjusted.height_mm),
+                    "layer_id": int(getattr(adjusted, "layer_id", 0) or 0),
+                    "orientation_family": getattr(adjusted, "orientation_family", None),
+                    "orientation_name": getattr(adjusted, "orientation_name", None),
                 }
                 if "support_ratio" in debug:
                     candidate_info["support_ratio"] = float(debug["support_ratio"])
+                if "required_support_ratio" in debug:
+                    candidate_info["required_support_ratio"] = float(debug["required_support_ratio"])
+                if "support_area_mm2" in debug:
+                    candidate_info["support_area_mm2"] = float(debug["support_area_mm2"])
                 if "com_supported" in debug:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
+                if "corners_supported" in debug:
+                    candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "supported_overlaps_count" in debug:
+                    candidate_info["supported_overlaps_count"] = int(debug["supported_overlaps_count"])
+                if "settle_mm" in debug:
+                    candidate_info["settle_mm"] = float(debug["settle_mm"])
+                if "settled_z_before_mm" in debug:
+                    candidate_info["settled_z_before_mm"] = float(debug["settled_z_before_mm"])
+                if "settled_z_after_mm" in debug:
+                    candidate_info["settled_z_after_mm"] = float(debug["settled_z_after_mm"])
+                if "loadbear_ratio" in debug:
+                    candidate_info["loadbear_ratio"] = float(debug["loadbear_ratio"])
+                if "support_capacity" in debug:
+                    candidate_info["support_capacity"] = float(debug["support_capacity"])
                 if "rejection_reason" in debug:
                     candidate_info["rejection_reason"] = str(debug["rejection_reason"])
                 evaluated_candidates.append((float(objective), candidate_info))
@@ -1411,6 +1484,16 @@ class PalletModel:
                 reason = "CANDIDATE_LIMIT"
 
         debug = {"height_used": self.current_height_mm(), "rejected_by_controls": rejected_by_controls}
+        if reason == "HEIGHT_LIMIT" and height_limit_candidates:
+            height_limit_candidates.sort(
+                key=lambda item: (
+                    int(item.get("overflow_mm", 0)),
+                    -int(item.get("z_mm", 0)),
+                    int(item.get("x_mm", 0)),
+                    int(item.get("y_mm", 0)),
+                )
+            )
+            debug["height_limit_candidates"] = [dict(item) for item in height_limit_candidates[:12]]
         if self.z_band_mm is not None:
             debug["z_band_enabled"] = True
             debug["z_band_mm"] = int(self.z_band_mm)

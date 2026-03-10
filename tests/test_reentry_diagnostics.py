@@ -11,7 +11,14 @@ from palca.integration.reentry_diagnostics import (
 
 def _dump_with_single_reentry(*, selection_pool: list[dict], evaluated_items: list[dict]) -> dict:
     return {
-        "params": {"force_destination": 1, "overhang_mm": 20, "heuristic": "bssf"},
+        "params": {
+            "force_destination": 1,
+            "overhang_mm": 20,
+            "heuristic": "bssf",
+            "min_support": 0.85,
+            "max_height_mm": 2600,
+            "max_overweight_ratio": 1.5,
+        },
         "pallets": {
             "1": [
                 {
@@ -64,10 +71,16 @@ def _dump_with_single_reentry(*, selection_pool: list[dict], evaluated_items: li
     }
 
 
-def _candidate(*, box_id: int, z_mm: int, score: float, max_z: int | None = None) -> dict:
+def _candidate(
+    *,
+    box_id: int,
+    z_mm: int,
+    score: float,
+    feasible_candidates_top: list[dict] | None = None,
+) -> dict:
     debug = {}
-    if max_z is not None:
-        debug["feasible_candidates_max_z_mm"] = int(max_z)
+    if feasible_candidates_top is not None:
+        debug["feasible_candidates_top"] = feasible_candidates_top
     return {
         "ramp_id": 1,
         "buffer_index": 0,
@@ -96,7 +109,7 @@ def test_reentry_classified_as_avoidable_by_selection() -> None:
     dump_payload = _dump_with_single_reentry(
         selection_pool=[
             _candidate(box_id=12, z_mm=100, score=12.0),
-            _candidate(box_id=13, z_mm=300, score=10.0),
+            _candidate(box_id=13, z_mm=320, score=10.0),
         ],
         evaluated_items=[],
     )
@@ -108,12 +121,33 @@ def test_reentry_classified_as_avoidable_by_selection() -> None:
     assert int(entry["drop_mm"]) == 200
     assert bool(entry["had_alternative_without_reentry"]) is True
     assert str(entry["classification"]) == EVITABLE_BY_SELECTION
+    assert any(
+        str(row.get("candidate_origin")) == "selection_pool"
+        and bool(row.get("non_reentry_candidate"))
+        for row in entry.get("breakdown_rows", [])
+    )
 
 
 def test_reentry_classified_as_candidate_generation_when_hidden_alt_exists() -> None:
     dump_payload = _dump_with_single_reentry(
         selection_pool=[
-            _candidate(box_id=12, z_mm=100, score=12.0, max_z=320),
+            _candidate(
+                box_id=12,
+                z_mm=100,
+                score=12.0,
+                feasible_candidates_top=[
+                    {
+                        "x_mm": 0,
+                        "y_mm": 0,
+                        "z_mm": 320,
+                        "length_mm": 400,
+                        "width_mm": 300,
+                        "height_mm": 200,
+                        "layer_id": 1,
+                        "objective": 9.5,
+                    }
+                ],
+            ),
         ],
         evaluated_items=[],
     )
@@ -122,10 +156,13 @@ def test_reentry_classified_as_candidate_generation_when_hidden_alt_exists() -> 
     entry = report["reentries"][0]
     assert bool(entry["had_alternative_without_reentry"]) is False
     assert str(entry["classification"]) == EVITABLE_BY_CANDIDATE_GENERATION
-    assert str(entry["dominant_cause"]) == "free-rect / candidate generation"
+    assert any(
+        str(row.get("rejected_reason_exact")) == "candidate_not_generated"
+        for row in entry.get("breakdown_rows", [])
+    )
 
 
-def test_reentry_classified_as_probably_unavoidable_and_consolidated() -> None:
+def test_reentry_classified_as_probably_unavoidable_with_support_threshold() -> None:
     dump_payload = _dump_with_single_reentry(
         selection_pool=[
             _candidate(box_id=12, z_mm=100, score=12.0),
@@ -133,11 +170,27 @@ def test_reentry_classified_as_probably_unavoidable_and_consolidated() -> None:
         evaluated_items=[
             {
                 "box_id": 99,
+                "ramp_id": 2,
+                "buffer_index": 1,
                 "pallet_id": 1,
                 "feasible": False,
                 "preview": {
                     "infeasible_reason": "STABILITY",
-                    "debug": {"rejection_reason": "SUPPORT_RATIO"},
+                    "debug": {
+                        "stability_candidates": [
+                            {
+                                "x_mm": 0,
+                                "y_mm": 0,
+                                "z_mm": 320,
+                                "length_mm": 400,
+                                "width_mm": 300,
+                                "height_mm": 200,
+                                "rejection_reason": "SUPPORT_RATIO",
+                                "support_ratio": 0.81,
+                                "required_support_ratio": 0.85,
+                            }
+                        ]
+                    },
                 },
             }
         ],
@@ -146,10 +199,24 @@ def test_reentry_classified_as_probably_unavoidable_and_consolidated() -> None:
     report = build_seed_reentry_report_from_dump(dump_payload=dump_payload, seed=50023)
     entry = report["reentries"][0]
     assert str(entry["classification"]) == PROBABLY_UNAVOIDABLE
-    assert str(entry["dominant_cause"]) == "soporte"
+    assert str(entry["dominant_cause"]) == "support_surface_ratio_below_threshold"
+
+    support_rows = [
+        row
+        for row in entry.get("breakdown_rows", [])
+        if str(row.get("rejected_reason_exact")) == "support_surface_ratio_below_threshold"
+    ]
+    assert support_rows
+    assert float(support_rows[0].get("threshold_value", 0.0)) == 0.85
+    assert float(support_rows[0].get("observed_value", 1.0)) == 0.81
 
     consolidated = build_consolidated_reentry_report([report])
     assert len(consolidated["rows"]) == 1
+    assert len(consolidated["breakdown_rows"]) >= 1
     summary = consolidated["summary"]
     assert int(summary["total_reentries"]) == 1
     assert int(summary["probably_unavoidable"]) == 1
+    assert any(
+        str(item.get("group")) == "support"
+        for item in summary.get("group_pareto", [])
+    )
