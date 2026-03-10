@@ -253,6 +253,10 @@ class SchedulerV1:
         self.hard_floor_phase_stand_mix_bonus_applied_total = 0
         self.hard_floor_phase_stand_mix_candidates_total = 0
         self.hard_floor_phase_stand_mix_chosen_total = 0
+        self.band_opening_guard_considered_total = 0
+        self.band_opening_guard_delayed_total = 0
+        self.band_opening_guard_structural_override_total = 0
+        self.band_opening_guard_penalty_sum = 0.0
         self._hard_floor_phase_exited_no_floor_pallets: set[int | str] = set()
         self._hard_floor_phase_exit_end_step_recorded_pallets: set[int | str] = set()
         self._hard_floor_phase_active_counted_this_decision = False
@@ -515,6 +519,11 @@ class SchedulerV1:
                 window_boxes_by_pallet_id=window_boxes_by_pallet_id,
                 deadline=deadline,
             )
+        if feasible_candidates:
+            feasible_candidates = self._apply_opening_next_band_guard_scored_candidates(
+                candidates=feasible_candidates,
+                pallets=sim_state.pallets,
+            )
 
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
@@ -686,6 +695,11 @@ class SchedulerV1:
                 if depth == 0 and node.first_plan is None and expansions:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
                         expansions=expansions,
+                        adjust_first_plan=True,
+                    )
+                    expansions = self._apply_opening_next_band_guard_expansions(
+                        expansions=expansions,
+                        pallets=node.pallets,
                         adjust_first_plan=True,
                     )
                     hard_floor_expansions = self._hard_floor_phase_filter_beam_expansions(
@@ -2021,6 +2035,342 @@ class SchedulerV1:
                     tower_z_delta_mm=int(delta),
                     tower_z_penalty=float(penalty),
                 )
+            out.append(_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms))
+        return out
+
+    @staticmethod
+    def _placement_band_id(placement: object | None, *, band_mm: int) -> int | None:
+        if placement is None:
+            return None
+        try:
+            z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        except Exception:
+            return None
+        band = max(1, int(band_mm))
+        return int(z_mm // band)
+
+    def _preview_band_id(self, preview: PlacementPreview | None, *, band_mm: int) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        return self._placement_band_id(placement, band_mm=band_mm)
+
+    def _current_top_band_id(self, pallet: PalletModel, *, band_mm: int) -> int:
+        band = max(1, int(band_mm))
+        max_band = 0
+        for placement in list(getattr(pallet, "placements", []) or []):
+            band_id = self._placement_band_id(placement, band_mm=band)
+            if band_id is None:
+                continue
+            if int(band_id) > int(max_band):
+                max_band = int(band_id)
+        return int(max_band)
+
+    def _current_band_fill_stats(
+        self,
+        pallet: PalletModel,
+        *,
+        band_id: int,
+        band_mm: int,
+    ) -> tuple[float, int]:
+        band = max(1, int(band_mm))
+        used_area = 0
+        placements_count = 0
+        for placement in list(getattr(pallet, "placements", []) or []):
+            p_band = self._placement_band_id(placement, band_mm=band)
+            if p_band is None or int(p_band) != int(band_id):
+                continue
+            try:
+                l_mm = int(getattr(placement, "length_mm", 0) or 0)
+                w_mm = int(getattr(placement, "width_mm", 0) or 0)
+            except Exception:
+                continue
+            used_area += max(0, int(l_mm)) * max(0, int(w_mm))
+            placements_count += 1
+        bin_area = max(1.0, float(getattr(pallet, "bin_area_mm2", 1) or 1))
+        fill_ratio = float(used_area) / float(bin_area)
+        return float(fill_ratio), int(placements_count)
+
+    def _current_band_is_sufficiently_closed(
+        self,
+        *,
+        pallet: PalletModel,
+        current_top_band: int,
+        band_mm: int,
+    ) -> tuple[bool, dict[str, float]]:
+        # Guard starts from mid/upper bands; lower levels are already handled by hard-floor logic.
+        if int(current_top_band) < 8:
+            return True, {"band_fill_ratio": 1.0, "band_placements": 0.0}
+
+        band_fill_ratio, band_placements = self._current_band_fill_stats(
+            pallet,
+            band_id=int(current_top_band),
+            band_mm=int(band_mm),
+        )
+        sufficiently_closed = bool(float(band_fill_ratio) >= 0.34 or int(band_placements) >= 3)
+        return sufficiently_closed, {
+            "band_fill_ratio": float(band_fill_ratio),
+            "band_placements": float(band_placements),
+        }
+
+    def _opening_next_band_requires_closure_or_structural_gain(
+        self,
+        *,
+        opening_score: float,
+        best_non_opening_score: float,
+        band_gap: int,
+        closure_metrics: dict[str, float],
+    ) -> tuple[bool, float]:
+        gain_delta = float(opening_score) - float(best_non_opening_score)
+        band_fill_ratio = float(closure_metrics.get("band_fill_ratio", 0.0) or 0.0)
+        band_placements = int(closure_metrics.get("band_placements", 0.0) or 0)
+
+        required_gain = 0.07 + (0.04 * max(0, int(band_gap) - 1))
+        if float(band_fill_ratio) < 0.34:
+            required_gain += 0.08 * ((0.34 - float(band_fill_ratio)) / 0.34)
+        if int(band_placements) < 3:
+            required_gain += 0.03 * float(3 - int(band_placements))
+
+        has_structural_gain = bool(float(gain_delta) >= float(required_gain))
+        return has_structural_gain, float(required_gain)
+
+    def _should_delay_opening_next_band(
+        self,
+        *,
+        current_band_closed: bool,
+        opening_band: int,
+        current_top_band: int,
+        opening_score: float,
+        best_non_opening_score: float,
+        closure_metrics: dict[str, float],
+    ) -> tuple[bool, float, bool]:
+        if bool(current_band_closed):
+            return False, 0.0, False
+        if int(opening_band) <= int(current_top_band):
+            return False, 0.0, False
+
+        band_gap = max(1, int(opening_band) - int(current_top_band))
+        has_structural_gain, required_gain = self._opening_next_band_requires_closure_or_structural_gain(
+            opening_score=float(opening_score),
+            best_non_opening_score=float(best_non_opening_score),
+            band_gap=int(band_gap),
+            closure_metrics=closure_metrics,
+        )
+        if has_structural_gain:
+            return False, 0.0, True
+
+        gain_delta = float(opening_score) - float(best_non_opening_score)
+        penalty = max(0.04, float(required_gain) - float(gain_delta) + 0.02)
+        if int(band_gap) > 1:
+            penalty += 0.01 * float(int(band_gap) - 1)
+        return True, float(penalty), False
+
+    def _apply_opening_next_band_guard_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> list[_ScoredCandidate]:
+        if not candidates:
+            return candidates
+
+        band_mm = 100
+        by_pallet: dict[int | str, list[_ScoredCandidate]] = {}
+        for cand in candidates:
+            by_pallet.setdefault(cand.plan.pallet_id, []).append(cand)
+
+        contexts: dict[int | str, tuple[int, int, bool, dict[str, float], float]] = {}
+        hard_floor_end = int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0)
+        for pallet_id, group in by_pallet.items():
+            pallet = pallets.get(pallet_id)
+            if pallet is None:
+                continue
+
+            step_idx = len(list(getattr(pallet, "placements", []) or []))
+            if int(hard_floor_end) > 0 and int(step_idx) < int(hard_floor_end):
+                continue
+
+            current_top_band = self._current_top_band_id(pallet, band_mm=band_mm)
+            if int(current_top_band) <= 0:
+                continue
+
+            current_band_closed, closure_metrics = self._current_band_is_sufficiently_closed(
+                pallet=pallet,
+                current_top_band=int(current_top_band),
+                band_mm=band_mm,
+            )
+
+            score_by_band: dict[int, float] = {}
+            for cand in group:
+                band_id = self._preview_band_id(cand.plan.preview, band_mm=band_mm)
+                if band_id is None:
+                    continue
+                prev_best = score_by_band.get(int(band_id))
+                if prev_best is None or float(cand.terms.scalar_score) > float(prev_best):
+                    score_by_band[int(band_id)] = float(cand.terms.scalar_score)
+            if not score_by_band:
+                continue
+            reference_band = int(min(score_by_band))
+            best_reference_score = float(score_by_band[reference_band])
+            contexts[pallet_id] = (
+                int(current_top_band),
+                int(reference_band),
+                bool(current_band_closed),
+                dict(closure_metrics),
+                float(best_reference_score),
+            )
+
+        if not contexts:
+            return candidates
+
+        out: list[_ScoredCandidate] = []
+        for cand in candidates:
+            ctx = contexts.get(cand.plan.pallet_id)
+            if ctx is None:
+                out.append(cand)
+                continue
+
+            current_top_band, reference_band, current_band_closed, closure_metrics, best_reference_score = ctx
+            opening_band = self._preview_band_id(cand.plan.preview, band_mm=band_mm)
+            if opening_band is None or int(opening_band) <= int(reference_band):
+                out.append(cand)
+                continue
+
+            self.band_opening_guard_considered_total += 1
+            should_delay, penalty, structural_override = self._should_delay_opening_next_band(
+                current_band_closed=bool(current_band_closed),
+                opening_band=int(opening_band),
+                current_top_band=int(reference_band),
+                opening_score=float(cand.terms.scalar_score),
+                best_non_opening_score=float(best_reference_score),
+                closure_metrics=closure_metrics,
+            )
+            if structural_override:
+                self.band_opening_guard_structural_override_total += 1
+                out.append(cand)
+                continue
+            if not should_delay or float(penalty) <= 0.0:
+                out.append(cand)
+                continue
+
+            self.band_opening_guard_delayed_total += 1
+            self.band_opening_guard_penalty_sum += float(penalty)
+            new_terms = replace(
+                cand.terms,
+                scalar_score=float(cand.terms.scalar_score) - float(penalty),
+                score_adjustment=float(cand.terms.score_adjustment) - float(penalty),
+            )
+            new_plan = replace(cand.plan, score=float(new_terms.scalar_score))
+            out.append(_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms))
+        return out
+
+    def _apply_opening_next_band_guard_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        pallets: Mapping[int | str, PalletModel],
+        adjust_first_plan: bool,
+    ) -> list[_BeamExpansion]:
+        if not expansions or not bool(adjust_first_plan):
+            return expansions
+
+        band_mm = 100
+        by_pallet: dict[int | str, list[_BeamExpansion]] = {}
+        for exp in expansions:
+            plan = exp.node.first_plan
+            if plan is None:
+                continue
+            by_pallet.setdefault(plan.pallet_id, []).append(exp)
+
+        contexts: dict[int | str, tuple[int, int, bool, dict[str, float], float]] = {}
+        hard_floor_end = int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0)
+        for pallet_id, group in by_pallet.items():
+            pallet = pallets.get(pallet_id)
+            if pallet is None:
+                continue
+            step_idx = len(list(getattr(pallet, "placements", []) or []))
+            if int(hard_floor_end) > 0 and int(step_idx) < int(hard_floor_end):
+                continue
+
+            current_top_band = self._current_top_band_id(pallet, band_mm=band_mm)
+            if int(current_top_band) <= 0:
+                continue
+
+            current_band_closed, closure_metrics = self._current_band_is_sufficiently_closed(
+                pallet=pallet,
+                current_top_band=int(current_top_band),
+                band_mm=band_mm,
+            )
+            score_by_band: dict[int, float] = {}
+            for exp in group:
+                plan = exp.node.first_plan
+                if plan is None:
+                    continue
+                band_id = self._preview_band_id(plan.preview, band_mm=band_mm)
+                if band_id is None:
+                    continue
+                prev_best = score_by_band.get(int(band_id))
+                if prev_best is None or float(exp.terms.scalar_score) > float(prev_best):
+                    score_by_band[int(band_id)] = float(exp.terms.scalar_score)
+            if not score_by_band:
+                continue
+            reference_band = int(min(score_by_band))
+            best_reference_score = float(score_by_band[reference_band])
+            contexts[pallet_id] = (
+                int(current_top_band),
+                int(reference_band),
+                bool(current_band_closed),
+                dict(closure_metrics),
+                float(best_reference_score),
+            )
+
+        if not contexts:
+            return expansions
+
+        out: list[_BeamExpansion] = []
+        for exp in expansions:
+            plan = exp.node.first_plan
+            if plan is None:
+                out.append(exp)
+                continue
+
+            ctx = contexts.get(plan.pallet_id)
+            if ctx is None:
+                out.append(exp)
+                continue
+
+            current_top_band, reference_band, current_band_closed, closure_metrics, best_reference_score = ctx
+            opening_band = self._preview_band_id(plan.preview, band_mm=band_mm)
+            if opening_band is None or int(opening_band) <= int(reference_band):
+                out.append(exp)
+                continue
+
+            self.band_opening_guard_considered_total += 1
+            should_delay, penalty, structural_override = self._should_delay_opening_next_band(
+                current_band_closed=bool(current_band_closed),
+                opening_band=int(opening_band),
+                current_top_band=int(reference_band),
+                opening_score=float(exp.terms.scalar_score),
+                best_non_opening_score=float(best_reference_score),
+                closure_metrics=closure_metrics,
+            )
+            if structural_override:
+                self.band_opening_guard_structural_override_total += 1
+                out.append(exp)
+                continue
+            if not should_delay or float(penalty) <= 0.0:
+                out.append(exp)
+                continue
+
+            self.band_opening_guard_delayed_total += 1
+            self.band_opening_guard_penalty_sum += float(penalty)
+            exp.node.score_sum = float(exp.node.score_sum) - float(penalty)
+            exp.node.first_plan = replace(plan, score=float(plan.score) - float(penalty))
+            new_terms = replace(
+                exp.terms,
+                scalar_score=float(exp.terms.scalar_score) - float(penalty),
+                score_adjustment=float(exp.terms.score_adjustment) - float(penalty),
+            )
             out.append(_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms))
         return out
 

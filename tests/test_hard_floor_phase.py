@@ -366,6 +366,10 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.hard_floor_phase_stand_mix_bonus_applied_total = 4
     policy._scheduler.hard_floor_phase_stand_mix_candidates_total = 6
     policy._scheduler.hard_floor_phase_stand_mix_chosen_total = 1
+    policy._scheduler.band_opening_guard_considered_total = 7
+    policy._scheduler.band_opening_guard_delayed_total = 5
+    policy._scheduler.band_opening_guard_structural_override_total = 2
+    policy._scheduler.band_opening_guard_penalty_sum = 1.25
 
     kpis = policy.collect_kpis()
 
@@ -380,3 +384,8 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
     assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5
+    assert int(kpis["band_opening_guard_considered_total"]) == 7
+    assert int(kpis["band_opening_guard_delayed_total"]) == 5
+    assert int(kpis["band_opening_guard_structural_override_total"]) == 2
+    assert float(kpis["band_opening_guard_penalty_sum"]) == 1.25
+    assert float(kpis["band_opening_guard_penalty_mean"]) == 0.25
