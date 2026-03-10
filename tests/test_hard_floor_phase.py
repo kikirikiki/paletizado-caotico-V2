@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
@@ -23,10 +24,33 @@ class PreviewSpec:
 
 
 class FakePallet:
-    def __init__(self, previews_by_box: dict[int, PreviewSpec], *, bin_area_mm2: int = 12_000) -> None:
+    def __init__(
+        self,
+        previews_by_box: dict[int, PreviewSpec],
+        *,
+        bin_area_mm2: int = 12_000,
+        bin_length_mm: int | None = None,
+        bin_width_mm: int | None = None,
+        offset_mm: int = 0,
+    ) -> None:
         self._previews_by_box = dict(previews_by_box)
         self.placements: list[Placement] = []
         self.bin_area_mm2 = int(bin_area_mm2)
+        l_mm = int(bin_length_mm) if bin_length_mm is not None else 0
+        w_mm = int(bin_width_mm) if bin_width_mm is not None else 0
+        if l_mm <= 0 or w_mm <= 0:
+            if l_mm > 0 and w_mm <= 0:
+                w_mm = max(1, int(self.bin_area_mm2) // max(1, int(l_mm)))
+            elif w_mm > 0 and l_mm <= 0:
+                l_mm = max(1, int(self.bin_area_mm2) // max(1, int(w_mm)))
+            else:
+                l_mm = 120
+                w_mm = max(1, int(self.bin_area_mm2) // 120)
+        self.spec = SimpleNamespace(
+            bin_length_mm=int(l_mm),
+            bin_width_mm=int(w_mm),
+            offset_mm=int(offset_mm),
+        )
 
     def preview_place(self, box: Box) -> PlacementPreview:
         spec = self._previews_by_box.get(int(box.box_id))
@@ -347,6 +371,84 @@ def test_hard_floor_phase_applies_same_root_logic_with_micro_planner_depth0() ->
     assert plan is not None
     assert int(plan.preview.placement.z_mm) == 0
     assert int(scheduler.hard_floor_phase_chosen_total) == 1
+
+
+def test_hard_floor_phase_planar_density_can_override_legacy_local_gain() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=100, y_mm=0, length_mm=20, width_mm=100, height_mm=20, packing_gain=9.0),
+            2: PreviewSpec(z_mm=0, x_mm=40, y_mm=30, length_mm=60, width_mm=40, height_mm=20, packing_gain=1.0),
+        },
+        bin_area_mm2=12_000,
+        bin_length_mm=120,
+        bin_width_mm=100,
+    )
+    # Base en "U": si cerramos borde derecho primero dejamos bolsillo central malo.
+    pallet.placements.extend(
+        [
+            _placement(box_id=101, z_mm=0, x_mm=0, y_mm=0, length_mm=40, width_mm=100, height_mm=20),
+            _placement(box_id=102, z_mm=0, x_mm=40, y_mm=0, length_mm=60, width_mm=30, height_mm=20),
+            _placement(box_id=103, z_mm=0, x_mm=40, y_mm=70, length_mm=60, width_mm=30, height_mm=20),
+        ]
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+    assert int(plan.preview.placement.x_mm) == 40
+    assert int(plan.preview.placement.y_mm) == 30
+
+
+def test_hard_floor_phase_planar_density_penalizes_early_pocket_or_l_shape() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=100, y_mm=0, length_mm=20, width_mm=100, height_mm=20, packing_gain=5.0),
+            2: PreviewSpec(z_mm=0, x_mm=40, y_mm=30, length_mm=60, width_mm=40, height_mm=20, packing_gain=5.0),
+        },
+        bin_area_mm2=12_000,
+        bin_length_mm=120,
+        bin_width_mm=100,
+    )
+    pallet.placements.extend(
+        [
+            _placement(box_id=201, z_mm=0, x_mm=0, y_mm=0, length_mm=40, width_mm=100, height_mm=20),
+            _placement(box_id=202, z_mm=0, x_mm=40, y_mm=0, length_mm=60, width_mm=30, height_mm=20),
+            _placement(box_id=203, z_mm=0, x_mm=40, y_mm=70, length_mm=60, width_mm=30, height_mm=20),
+        ]
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+        )
+    )
+    box_bad = _box(1)
+    box_good = _box(2)
+    bad_preview = pallet.preview_place(box_bad)
+    good_preview = pallet.preview_place(box_good)
+
+    bad_score = scheduler._hard_floor_phase_score_preview(
+        pallet=pallet,
+        preview=bad_preview,
+        future_boxes=[box_bad, box_good],
+        selected_box=box_bad,
+    )
+    good_score = scheduler._hard_floor_phase_score_preview(
+        pallet=pallet,
+        preview=good_preview,
+        future_boxes=[box_bad, box_good],
+        selected_box=box_good,
+    )
+
+    assert float(good_score) > float(bad_score)
 
 
 def test_hard_floor_phase_kpis_are_exposed() -> None:

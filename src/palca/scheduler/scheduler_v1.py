@@ -17,6 +17,7 @@ from ..scoring.height_slack import (
     rank_for_expansion_with_height_slack,
 )
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
+from .hard_floor_planar_density import score_planar_base_density
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
@@ -1630,7 +1631,6 @@ class SchedulerV1:
             return -1e9
 
         floor_rects: list[tuple[int, int, int, int]] = []
-        stand_count = 0
         for p in list(getattr(pallet, "placements", []) or []):
             try:
                 z_mm = int(getattr(p, "z_mm", 0) or 0)
@@ -1646,8 +1646,6 @@ class SchedulerV1:
             except Exception:
                 continue
             floor_rects.append((x0, y0, x1, y1))
-            if self._placement_is_stand_hw(p):
-                stand_count += 1
 
         try:
             px0 = int(getattr(placement, "x_mm", 0) or 0)
@@ -1698,13 +1696,6 @@ class SchedulerV1:
                 touches += 1
         adjacency_ratio = float(touches) / float(max(1, len(floor_rects)))
 
-        stand_after = int(stand_count) + (1 if self._placement_is_stand_hw(placement) else 0)
-        stand_mix_ratio = float(stand_after) / float(total_floor)
-        stand_mix_bonus = 1.0 - abs(stand_mix_ratio - 0.35)
-        stand_early_bonus = 0.0
-        if total_floor <= 4 and self._placement_is_stand_hw(placement):
-            stand_early_bonus = 1.0
-
         next_floor_options = 0
         future_total = 0
         if future_boxes:
@@ -1731,22 +1722,33 @@ class SchedulerV1:
                 future_total = 0
         next_floor_ratio = float(next_floor_options) / float(max(1, future_total))
 
-        early_l_penalty = 0.0
-        if total_floor >= 3 and compactness < 0.72 and elongation_penalty > 0.45:
-            early_l_penalty = 1.0
+        spec = getattr(pallet, "spec", None)
+        density_score, density = score_planar_base_density(
+            floor_rects_after=floor_rects_after,
+            bin_area_mm2=int(getattr(pallet, "bin_area_mm2", 1) or 1),
+            floor_count_after=int(total_floor),
+            bin_length_mm=int(getattr(spec, "bin_length_mm", 0) or 0) if spec is not None else None,
+            bin_width_mm=int(getattr(spec, "bin_width_mm", 0) or 0) if spec is not None else None,
+            offset_mm=int(getattr(spec, "offset_mm", 0) or 0) if spec is not None else 0,
+            bin_mm=int(bin_mm),
+        )
 
-        return (
-            3.2 * float(coverage_ratio)
-            + 1.6 * float(compactness)
+        legacy_score = (
+            2.8 * float(coverage_ratio)
+            + 1.4 * float(compactness)
             + 0.6 * float(adjacency_ratio)
-            + 0.6 * float(continuity_ratio)
+            + 0.7 * float(continuity_ratio)
             + 0.8 * float(next_floor_ratio)
             - 1.8 * float(dominance_penalty)
-            - 1.2 * float(dead_gap_ratio)
-            - 0.7 * float(elongation_penalty)
-            - 0.6 * float(early_l_penalty)
-            + 0.20 * float(stand_mix_bonus)
-            + 0.15 * float(stand_early_bonus)
+            - 1.1 * float(dead_gap_ratio)
+            - 0.6 * float(elongation_penalty)
+        )
+
+        return (
+            0.88 * float(legacy_score)
+            + 0.92 * float(density_score)
+            + 0.45 * float(density.boundary_connected_free_ratio)
+            - 0.55 * float(density.early_l_penalty)
         )
 
     def _record_hard_floor_phase_choice(
