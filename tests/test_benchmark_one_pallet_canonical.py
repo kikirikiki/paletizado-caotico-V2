@@ -210,6 +210,10 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert Path(reentry_files["breakdown_csv"]).exists()
     assert Path(reentry_files["pareto_csv"]).exists()
     assert Path(reentry_files["critical_steps_csv"]).exists()
+    late_stand_files = summary["files"]["late_stand_audit"]["baseline"]
+    assert Path(late_stand_files["breakdown_csv"]).exists()
+    assert Path(late_stand_files["pareto_csv"]).exists()
+    assert Path(late_stand_files["critical_steps_csv"]).exists()
 
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
@@ -229,3 +233,15 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     with Path(reentry_files["critical_steps_csv"]).open("r", encoding="utf-8") as handle:
         critical_row = next(csv.DictReader(handle), None)
     assert critical_row is None
+
+    with Path(late_stand_files["breakdown_csv"]).open("r", encoding="utf-8") as handle:
+        late_breakdown_row = next(csv.DictReader(handle), None)
+    assert late_breakdown_row is None
+
+    with Path(late_stand_files["pareto_csv"]).open("r", encoding="utf-8") as handle:
+        late_pareto_row = next(csv.DictReader(handle), None)
+    assert late_pareto_row is None
+
+    with Path(late_stand_files["critical_steps_csv"]).open("r", encoding="utf-8") as handle:
+        late_critical_row = next(csv.DictReader(handle), None)
+    assert late_critical_row is None
