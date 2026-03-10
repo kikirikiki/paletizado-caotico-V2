@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
 from palca.integration.policy_packer_sched import PolicyPackerScheduler
+from palca.scheduler.hard_floor_morphology import BaseProbeSlot
 from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, SchedulerV1
 
 
@@ -24,10 +25,28 @@ class PreviewSpec:
 
 
 class FakePallet:
-    def __init__(self, previews_by_box: dict[int, PreviewSpec], *, bin_area_mm2: int = 12_000) -> None:
+    def __init__(
+        self,
+        previews_by_box: dict[int, PreviewSpec],
+        *,
+        bin_area_mm2: int = 12_000,
+        bin_length_mm: int = 120,
+        bin_width_mm: int = 100,
+    ) -> None:
         self._previews_by_box = dict(previews_by_box)
         self.placements: list[Placement] = []
         self.bin_area_mm2 = int(bin_area_mm2)
+        self.bin_length_mm = int(bin_length_mm)
+        self.bin_width_mm = int(bin_width_mm)
+        self.stacking_mode = "heightfield"
+        self.stand_hw_height_margin_gate_mm = 200
+        self.spec = SimpleNamespace(
+            bin_length_mm=int(bin_length_mm),
+            bin_width_mm=int(bin_width_mm),
+            offset_mm=0,
+            allow_rotate=True,
+            max_height_mm=2_000,
+        )
 
     def preview_place(self, box: Box) -> PlacementPreview:
         spec = self._previews_by_box.get(int(box.box_id))
@@ -72,12 +91,75 @@ class FakePallet:
         return max(int(p.z_mm) + int(p.height_mm) for p in self.placements)
 
 
+class GateProbePallet(FakePallet):
+    def __init__(self) -> None:
+        super().__init__({}, bin_area_mm2=12_000, bin_length_mm=120, bin_width_mm=100)
+
+    def _orientations(self, length_mm: int, width_mm: int, height_mm: int) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                rot90=False,
+                length_mm=int(height_mm),
+                width_mm=int(width_mm),
+                height_mm=int(length_mm),
+                name="HWL",
+                family="stand_hw",
+            )
+        ]
+
+    def _heightfield_xy_candidates(self, l_mm: int, w_mm: int, *, cap: int = 120) -> list[tuple[int, int]]:
+        _ = (l_mm, w_mm, cap)
+        return [(40, 0)]
+
+    def preview_place(self, box: Box) -> PlacementPreview:
+        if int(self.stand_hw_height_margin_gate_mm) <= 200:
+            return PlacementPreview(
+                feasible=False,
+                placement=None,
+                packing_gain=0.0,
+                fragmentation=0.0,
+                infeasible_reason="NO_SPACE",
+            )
+        placement = Placement(
+            x_mm=40,
+            y_mm=0,
+            z_mm=0,
+            rot90=False,
+            layer_id=0,
+            length_mm=int(box.height_mm),
+            width_mm=int(box.width_mm),
+            height_mm=int(box.length_mm),
+            box_id=int(box.box_id),
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_probe",
+        )
+        return PlacementPreview(
+            feasible=True,
+            placement=placement,
+            packing_gain=2.0,
+            fragmentation=0.1,
+            height_after_mm=int(box.length_mm),
+            infeasible_reason=None,
+        )
+
+
 def _box(box_id: int) -> Box:
     return Box(
         box_id=int(box_id),
         length_mm=1,
         width_mm=1,
         height_mm=1,
+        timestamp=0.0,
+        destination=1,
+    )
+
+
+def _box_dims(*, box_id: int, length_mm: int, width_mm: int, height_mm: int) -> Box:
+    return Box(
+        box_id=int(box_id),
+        length_mm=int(length_mm),
+        width_mm=int(width_mm),
+        height_mm=int(height_mm),
         timestamp=0.0,
         destination=1,
     )
@@ -553,6 +635,305 @@ def test_hard_floor_phase_morphology_mode_off_keeps_legacy_behavior() -> None:
     assert legacy_plan is not None and off_plan is not None
     assert int(legacy_plan.box_id) == int(off_plan.box_id)
     assert str(legacy_plan.preview.placement.orientation_family) == str(off_plan.preview.placement.orientation_family)
+
+
+def test_hard_floor_phase_local_slot_probe_injects_useful_stand_candidate() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=40,
+            length_mm=40,
+            width_mm=40,
+            height_mm=20,
+            packing_gain=1.0,
+            orientation_family="planar",
+            orientation_name="planar_floor",
+        ),
+        2: PreviewSpec(
+            z_mm=120,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=40,
+            packing_gain=0.5,
+            orientation_family="planar",
+            orientation_name="planar_stack",
+        ),
+    }
+    baseline_pallet = FakePallet(previews)
+    probe_pallet = FakePallet(previews)
+    seed_a = _placement(
+        box_id=900,
+        z_mm=0,
+        x_mm=0,
+        y_mm=0,
+        length_mm=40,
+        width_mm=40,
+        height_mm=20,
+        orientation_family="planar",
+        orientation_name="seed_a",
+    )
+    seed_b = _placement(
+        box_id=901,
+        z_mm=0,
+        x_mm=80,
+        y_mm=0,
+        length_mm=40,
+        width_mm=40,
+        height_mm=20,
+        orientation_family="planar",
+        orientation_name="seed_b",
+    )
+    baseline_pallet.placements.extend([seed_a, seed_b])
+    probe_pallet.placements.extend([seed_a, seed_b])
+
+    baseline = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+            hard_floor_phase_local_slot_probe_enabled=False,
+        )
+    )
+    with_probe = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=6,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+            hard_floor_phase_local_slot_probe_enabled=True,
+            hard_floor_phase_local_slot_probe_max_slots=2,
+            hard_floor_phase_local_slot_probe_max_boxes_per_slot=2,
+        )
+    )
+
+    def score_prefers_box_2(self: SchedulerV1, *, preview: PlacementPreview, **_: object) -> float:
+        placement = getattr(preview, "placement", None)
+        box_id = int(getattr(placement, "box_id", 0) or 0)
+        return 50.0 if box_id == 2 else 1.0
+
+    def next_floor_prefers_box_2(
+        self: SchedulerV1,
+        *,
+        selected_box: Box | None = None,
+        **_: object,
+    ) -> float:
+        if selected_box is None:
+            return 0.0
+        return 1.0 if int(getattr(selected_box, "box_id", 0) or 0) == 2 else 0.0
+
+    baseline._hard_floor_phase_score_preview = MethodType(score_prefers_box_2, baseline)  # type: ignore[method-assign]
+    baseline._hard_floor_phase_next_floor_ratio = MethodType(next_floor_prefers_box_2, baseline)  # type: ignore[method-assign]
+    with_probe._hard_floor_phase_score_preview = MethodType(score_prefers_box_2, with_probe)  # type: ignore[method-assign]
+    with_probe._hard_floor_phase_next_floor_ratio = MethodType(next_floor_prefers_box_2, with_probe)  # type: ignore[method-assign]
+
+    def fake_slot_probe(
+        self: SchedulerV1,
+        *,
+        box: Box,
+        **_: object,
+    ) -> PlacementPreview | None:
+        if int(getattr(box, "box_id", 0) or 0) != 2:
+            return None
+        placement = Placement(
+            x_mm=40,
+            y_mm=0,
+            z_mm=0,
+            rot90=False,
+            layer_id=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=50,
+            box_id=2,
+            orientation_family="stand_hw",
+            orientation_name="stand_hw_probe_slot",
+        )
+        return PlacementPreview(
+            feasible=True,
+            placement=placement,
+            packing_gain=3.0,
+            fragmentation=0.1,
+            height_after_mm=50,
+            infeasible_reason=None,
+        )
+
+    with_probe._hard_floor_phase_probe_preview_for_slot = MethodType(fake_slot_probe, with_probe)  # type: ignore[method-assign]
+
+    boxes = [
+        _box_dims(box_id=1, length_mm=40, width_mm=40, height_mm=20),
+        _box_dims(box_id=2, length_mm=50, width_mm=40, height_mm=40),
+    ]
+    baseline_plan = baseline.choose_action(_sim_state(boxes=list(boxes), pallet=baseline_pallet))
+    probe_plan = with_probe.choose_action(_sim_state(boxes=list(boxes), pallet=probe_pallet))
+
+    assert baseline_plan is not None and probe_plan is not None
+    assert int(baseline_plan.box_id) == 1
+    assert int(probe_plan.box_id) == 2
+    assert str(probe_plan.preview.placement.orientation_family) == "stand_hw"
+    assert int(with_probe.hard_floor_local_slot_probe_candidates_total) >= 1
+
+
+def test_hard_floor_phase_local_slot_probe_relaxes_stand_gate_only_inside_probe() -> None:
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=1,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+            hard_floor_phase_local_slot_probe_enabled=True,
+        )
+    )
+    pallet = GateProbePallet()
+    box = _box_dims(box_id=7, length_mm=50, width_mm=40, height_mm=40)
+    slot = BaseProbeSlot(
+        x_mm=40,
+        y_mm=0,
+        length_mm=40,
+        width_mm=40,
+        area_mm2=1600,
+        adjacency_count=2,
+        boundary_contacts=1,
+    )
+
+    preview = scheduler._hard_floor_phase_probe_preview_for_slot(
+        pallet=pallet,
+        box=box,
+        slot=slot,
+    )
+
+    assert preview is not None
+    assert bool(preview.feasible)
+    assert str(preview.placement.orientation_family) == "stand_hw"
+    assert int(pallet.stand_hw_height_margin_gate_mm) == 200
+
+
+def test_hard_floor_phase_local_slot_probe_fallback_matches_baseline_when_no_hit() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=30,
+            packing_gain=4.0,
+            orientation_family="planar",
+            orientation_name="planar_floor",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=40,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=30,
+            packing_gain=2.0,
+            orientation_family="planar",
+            orientation_name="planar_floor_2",
+        ),
+    }
+    baseline_pallet = FakePallet(previews)
+    probe_pallet = FakePallet(previews)
+
+    baseline = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+            hard_floor_phase_local_slot_probe_enabled=False,
+        )
+    )
+    with_probe = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+            hard_floor_phase_local_slot_probe_enabled=True,
+        )
+    )
+
+    def no_probe_hit(self: SchedulerV1, **_: object) -> PlacementPreview | None:
+        return None
+
+    with_probe._hard_floor_phase_probe_preview_for_slot = MethodType(no_probe_hit, with_probe)  # type: ignore[method-assign]
+
+    boxes = [_box_dims(box_id=1, length_mm=40, width_mm=40, height_mm=30), _box_dims(box_id=2, length_mm=40, width_mm=40, height_mm=30)]
+    baseline_plan = baseline.choose_action(_sim_state(boxes=list(boxes), pallet=baseline_pallet))
+    probe_plan = with_probe.choose_action(_sim_state(boxes=list(boxes), pallet=probe_pallet))
+
+    assert baseline_plan is not None and probe_plan is not None
+    assert int(probe_plan.box_id) == int(baseline_plan.box_id)
+    assert str(probe_plan.preview.placement.orientation_family) == str(
+        baseline_plan.preview.placement.orientation_family
+    )
+    assert int(with_probe.hard_floor_local_slot_probe_hits_total) == 0
+
+
+def test_hard_floor_phase_local_slot_probe_does_not_change_behavior_when_morphology_off() -> None:
+    previews = {
+        1: PreviewSpec(
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=30,
+            packing_gain=5.0,
+            orientation_family="planar",
+            orientation_name="planar_a",
+        ),
+        2: PreviewSpec(
+            z_mm=0,
+            x_mm=40,
+            y_mm=0,
+            length_mm=40,
+            width_mm=40,
+            height_mm=30,
+            packing_gain=1.0,
+            orientation_family="planar",
+            orientation_name="planar_b",
+        ),
+    }
+    baseline_pallet = FakePallet(previews)
+    probe_pallet = FakePallet(previews)
+
+    baseline = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="off",
+        )
+    )
+    with_probe = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="off",
+            hard_floor_phase_local_slot_probe_enabled=True,
+        )
+    )
+
+    def fail_if_probe_called(self: SchedulerV1, **_: object) -> PlacementPreview | None:
+        raise AssertionError("local slot probe should not be used when morphology is off")
+
+    with_probe._hard_floor_phase_probe_preview_for_slot = MethodType(fail_if_probe_called, with_probe)  # type: ignore[method-assign]
+
+    boxes = [_box_dims(box_id=1, length_mm=40, width_mm=40, height_mm=30), _box_dims(box_id=2, length_mm=40, width_mm=40, height_mm=30)]
+    baseline_plan = baseline.choose_action(_sim_state(boxes=list(boxes), pallet=baseline_pallet))
+    probe_plan = with_probe.choose_action(_sim_state(boxes=list(boxes), pallet=probe_pallet))
+
+    assert baseline_plan is not None and probe_plan is not None
+    assert int(probe_plan.box_id) == int(baseline_plan.box_id)
+    assert str(probe_plan.preview.placement.orientation_family) == str(
+        baseline_plan.preview.placement.orientation_family
+    )
 
 
 def test_hard_floor_phase_disabled_mode_keeps_existing_behavior() -> None:
