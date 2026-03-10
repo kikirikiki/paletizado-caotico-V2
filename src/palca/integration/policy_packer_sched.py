@@ -61,6 +61,12 @@ class PolicyConfig:
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
     hard_floor_phase_morphology_mode: str = "off"
+    hard_floor_phase_local_slot_probe_enabled: bool = False
+    hard_floor_phase_local_slot_probe_max_slots: int = 2
+    hard_floor_phase_local_slot_probe_max_boxes_per_slot: int = 2
+    hard_floor_phase_local_slot_probe_max_anchors_per_box: int = 6
+    hard_floor_phase_local_slot_probe_anchor_offset_mm: int = 25
+    hard_floor_phase_local_slot_probe_similarity_tolerance_mm: int = 40
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -186,6 +192,12 @@ class PolicyPackerScheduler:
         hard_floor_phase_lookahead_items: int = 8,
         hard_floor_phase_stand_mix_bonus: float = 0.0,
         hard_floor_phase_morphology_mode: str = "off",
+        hard_floor_phase_local_slot_probe_enabled: bool = False,
+        hard_floor_phase_local_slot_probe_max_slots: int = 2,
+        hard_floor_phase_local_slot_probe_max_boxes_per_slot: int = 2,
+        hard_floor_phase_local_slot_probe_max_anchors_per_box: int = 6,
+        hard_floor_phase_local_slot_probe_anchor_offset_mm: int = 25,
+        hard_floor_phase_local_slot_probe_similarity_tolerance_mm: int = 40,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -231,6 +243,24 @@ class PolicyPackerScheduler:
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
             hard_floor_phase_morphology_mode=str(hard_floor_phase_morphology_mode or "off"),
+            hard_floor_phase_local_slot_probe_enabled=bool(hard_floor_phase_local_slot_probe_enabled),
+            hard_floor_phase_local_slot_probe_max_slots=max(0, int(hard_floor_phase_local_slot_probe_max_slots)),
+            hard_floor_phase_local_slot_probe_max_boxes_per_slot=max(
+                0,
+                int(hard_floor_phase_local_slot_probe_max_boxes_per_slot),
+            ),
+            hard_floor_phase_local_slot_probe_max_anchors_per_box=max(
+                1,
+                int(hard_floor_phase_local_slot_probe_max_anchors_per_box),
+            ),
+            hard_floor_phase_local_slot_probe_anchor_offset_mm=max(
+                0,
+                int(hard_floor_phase_local_slot_probe_anchor_offset_mm),
+            ),
+            hard_floor_phase_local_slot_probe_similarity_tolerance_mm=max(
+                0,
+                int(hard_floor_phase_local_slot_probe_similarity_tolerance_mm),
+            ),
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -279,6 +309,24 @@ class PolicyPackerScheduler:
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
             hard_floor_phase_morphology_mode=str(hard_floor_phase_morphology_mode or "off"),
+            hard_floor_phase_local_slot_probe_enabled=bool(hard_floor_phase_local_slot_probe_enabled),
+            hard_floor_phase_local_slot_probe_max_slots=max(0, int(hard_floor_phase_local_slot_probe_max_slots)),
+            hard_floor_phase_local_slot_probe_max_boxes_per_slot=max(
+                0,
+                int(hard_floor_phase_local_slot_probe_max_boxes_per_slot),
+            ),
+            hard_floor_phase_local_slot_probe_max_anchors_per_box=max(
+                1,
+                int(hard_floor_phase_local_slot_probe_max_anchors_per_box),
+            ),
+            hard_floor_phase_local_slot_probe_anchor_offset_mm=max(
+                0,
+                int(hard_floor_phase_local_slot_probe_anchor_offset_mm),
+            ),
+            hard_floor_phase_local_slot_probe_similarity_tolerance_mm=max(
+                0,
+                int(hard_floor_phase_local_slot_probe_similarity_tolerance_mm),
+            ),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -757,6 +805,24 @@ class PolicyPackerScheduler:
         hard_floor_phase_morphology_mode = str(
             getattr(self._scheduler.config, "hard_floor_phase_morphology_mode", "off") or "off"
         )
+        hard_floor_phase_local_slot_probe_enabled = bool(
+            getattr(self._scheduler.config, "hard_floor_phase_local_slot_probe_enabled", False)
+        )
+        hard_floor_phase_local_slot_probe_max_slots = int(
+            getattr(self._scheduler.config, "hard_floor_phase_local_slot_probe_max_slots", 2) or 2
+        )
+        hard_floor_phase_local_slot_probe_max_boxes_per_slot = int(
+            getattr(self._scheduler.config, "hard_floor_phase_local_slot_probe_max_boxes_per_slot", 2) or 2
+        )
+        hard_floor_phase_local_slot_probe_max_anchors_per_box = int(
+            getattr(self._scheduler.config, "hard_floor_phase_local_slot_probe_max_anchors_per_box", 6) or 6
+        )
+        hard_floor_phase_local_slot_probe_anchor_offset_mm = int(
+            getattr(self._scheduler.config, "hard_floor_phase_local_slot_probe_anchor_offset_mm", 25) or 25
+        )
+        hard_floor_phase_local_slot_probe_similarity_tolerance_mm = int(
+            getattr(self._scheduler.config, "hard_floor_phase_local_slot_probe_similarity_tolerance_mm", 40) or 40
+        )
         hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
         hard_floor_phase_floor_candidates_seen_total = int(
             getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
@@ -802,6 +868,18 @@ class PolicyPackerScheduler:
         hard_floor_isolated_high_spots_total = int(
             getattr(self._scheduler, "hard_floor_isolated_high_spots_total", 0) or 0
         )
+        hard_floor_local_slot_probe_attempts_total = int(
+            getattr(self._scheduler, "hard_floor_local_slot_probe_attempts_total", 0) or 0
+        )
+        hard_floor_local_slot_probe_hits_total = int(
+            getattr(self._scheduler, "hard_floor_local_slot_probe_hits_total", 0) or 0
+        )
+        hard_floor_local_slot_probe_candidates_total = int(
+            getattr(self._scheduler, "hard_floor_local_slot_probe_candidates_total", 0) or 0
+        )
+        hard_floor_local_slot_probe_selected_total = int(
+            getattr(self._scheduler, "hard_floor_local_slot_probe_selected_total", 0) or 0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -830,6 +908,20 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_lookahead_items"] = int(hard_floor_phase_lookahead_items)
         kpis["hard_floor_phase_stand_mix_bonus"] = float(hard_floor_phase_stand_mix_bonus)
         kpis["hard_floor_phase_morphology_mode"] = str(hard_floor_phase_morphology_mode)
+        kpis["hard_floor_phase_local_slot_probe_enabled"] = bool(hard_floor_phase_local_slot_probe_enabled)
+        kpis["hard_floor_phase_local_slot_probe_max_slots"] = int(hard_floor_phase_local_slot_probe_max_slots)
+        kpis["hard_floor_phase_local_slot_probe_max_boxes_per_slot"] = int(
+            hard_floor_phase_local_slot_probe_max_boxes_per_slot
+        )
+        kpis["hard_floor_phase_local_slot_probe_max_anchors_per_box"] = int(
+            hard_floor_phase_local_slot_probe_max_anchors_per_box
+        )
+        kpis["hard_floor_phase_local_slot_probe_anchor_offset_mm"] = int(
+            hard_floor_phase_local_slot_probe_anchor_offset_mm
+        )
+        kpis["hard_floor_phase_local_slot_probe_similarity_tolerance_mm"] = int(
+            hard_floor_phase_local_slot_probe_similarity_tolerance_mm
+        )
         kpis["hard_floor_phase_active_total"] = int(hard_floor_phase_active_total)
         kpis["hard_floor_phase_floor_candidates_seen_total"] = int(hard_floor_phase_floor_candidates_seen_total)
         kpis["hard_floor_phase_chosen_total"] = int(hard_floor_phase_chosen_total)
@@ -854,6 +946,10 @@ class PolicyPackerScheduler:
             hard_floor_boundary_connected_free_area_mm2_sum / max(1, hard_floor_base_metrics_samples_total)
         )
         kpis["hard_floor_isolated_high_spots_total"] = int(hard_floor_isolated_high_spots_total)
+        kpis["hard_floor_local_slot_probe_attempts_total"] = int(hard_floor_local_slot_probe_attempts_total)
+        kpis["hard_floor_local_slot_probe_hits_total"] = int(hard_floor_local_slot_probe_hits_total)
+        kpis["hard_floor_local_slot_probe_candidates_total"] = int(hard_floor_local_slot_probe_candidates_total)
+        kpis["hard_floor_local_slot_probe_selected_total"] = int(hard_floor_local_slot_probe_selected_total)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
