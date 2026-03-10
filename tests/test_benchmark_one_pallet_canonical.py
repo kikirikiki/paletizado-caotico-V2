@@ -214,6 +214,11 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert Path(late_stand_files["breakdown_csv"]).exists()
     assert Path(late_stand_files["pareto_csv"]).exists()
     assert Path(late_stand_files["critical_steps_csv"]).exists()
+    support_settle_files = summary["files"]["support_settle_audit"]["baseline"]
+    assert Path(support_settle_files["gaps_csv"]).exists()
+    assert Path(support_settle_files["seed_summary_csv"]).exists()
+    assert Path(support_settle_files["pareto_csv"]).exists()
+    assert Path(support_settle_files["reason_closeness_csv"]).exists()
 
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
@@ -245,3 +250,11 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     with Path(late_stand_files["critical_steps_csv"]).open("r", encoding="utf-8") as handle:
         late_critical_row = next(csv.DictReader(handle), None)
     assert late_critical_row is None
+
+    with Path(support_settle_files["gaps_csv"]).open("r", encoding="utf-8") as handle:
+        support_gap_row = next(csv.DictReader(handle), None)
+    assert support_gap_row is None
+
+    with Path(support_settle_files["reason_closeness_csv"]).open("r", encoding="utf-8") as handle:
+        support_reason_row = next(csv.DictReader(handle), None)
+    assert support_reason_row is None

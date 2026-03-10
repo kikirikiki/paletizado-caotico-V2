@@ -937,8 +937,12 @@ class PalletModel:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
                 if "corners_supported" in debug:
                     candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "corners_supported_count" in debug:
+                    candidate_info["corners_supported_count"] = int(debug["corners_supported_count"])
                 if "supported_overlaps_count" in debug:
                     candidate_info["supported_overlaps_count"] = int(debug["supported_overlaps_count"])
+                if "com_margin_mm" in debug:
+                    candidate_info["com_margin_mm"] = float(debug["com_margin_mm"])
                 if "settle_mm" in debug:
                     candidate_info["settle_mm"] = float(debug["settle_mm"])
                 if "settled_z_before_mm" in debug:
@@ -1385,8 +1389,12 @@ class PalletModel:
                     candidate_info["com_supported"] = bool(debug["com_supported"])
                 if "corners_supported" in debug:
                     candidate_info["corners_supported"] = bool(debug["corners_supported"])
+                if "corners_supported_count" in debug:
+                    candidate_info["corners_supported_count"] = int(debug["corners_supported_count"])
                 if "supported_overlaps_count" in debug:
                     candidate_info["supported_overlaps_count"] = int(debug["supported_overlaps_count"])
+                if "com_margin_mm" in debug:
+                    candidate_info["com_margin_mm"] = float(debug["com_margin_mm"])
                 if "settle_mm" in debug:
                     candidate_info["settle_mm"] = float(debug["settle_mm"])
                 if "settled_z_before_mm" in debug:
@@ -1647,8 +1655,11 @@ class PalletModel:
         return ratio, support_area
 
     def corners_supported(self, placement: Placement, *, eps_mm: float) -> bool:
+        return self.corners_supported_count(placement, eps_mm=eps_mm) >= 4
+
+    def corners_supported_count(self, placement: Placement, *, eps_mm: float) -> int:
         if placement.z_mm <= eps_mm:
-            return True
+            return 4
 
         corners = [
             (placement.x_mm, placement.y_mm),
@@ -1658,10 +1669,54 @@ class PalletModel:
         ]
 
         supports = list(self._supporting_placements(placement, eps_mm=eps_mm))
+        supported_count = 0
         for cx, cy in corners:
-            if not _corner_supported(cx, cy, supports, eps_mm=eps_mm):
-                return False
-        return True
+            if _corner_supported(cx, cy, supports, eps_mm=eps_mm):
+                supported_count += 1
+        return int(supported_count)
+
+    def com_margin_mm(self, placement: Placement, *, eps_mm: float) -> float:
+        if placement.z_mm <= eps_mm:
+            return float(min(placement.length_mm, placement.width_mm) / 2.0)
+
+        cx = float(placement.x_mm) + float(placement.length_mm) / 2.0
+        cy = float(placement.y_mm) + float(placement.width_mm) / 2.0
+        ax0 = float(placement.x_mm)
+        ay0 = float(placement.y_mm)
+        ax1 = float(placement.x_mm + placement.length_mm)
+        ay1 = float(placement.y_mm + placement.width_mm)
+        eps = float(eps_mm)
+
+        overlaps: list[tuple[float, float, float, float]] = []
+        for below in self._supporting_placements(placement, eps_mm=eps_mm):
+            bx0 = float(below.x_mm)
+            by0 = float(below.y_mm)
+            bx1 = float(below.x_mm + below.length_mm)
+            by1 = float(below.y_mm + below.width_mm)
+            x0 = max(ax0, bx0)
+            y0 = max(ay0, by0)
+            x1 = min(ax1, bx1)
+            y1 = min(ay1, by1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            overlaps.append((x0, y0, x1, y1))
+
+        if not overlaps:
+            return -float(max(placement.length_mm, placement.width_mm))
+
+        best_margin = -float("inf")
+        for x0, y0, x1, y1 in overlaps:
+            inside_x = (x0 - eps) <= cx <= (x1 + eps)
+            inside_y = (y0 - eps) <= cy <= (y1 + eps)
+            if inside_x and inside_y:
+                margin = min(cx - x0, x1 - cx, cy - y0, y1 - cy)
+            else:
+                dx = max(x0 - cx, 0.0, cx - x1)
+                dy = max(y0 - cy, 0.0, cy - y1)
+                margin = -((dx * dx + dy * dy) ** 0.5)
+            if margin > best_margin:
+                best_margin = margin
+        return float(best_margin)
 
     def com_support_info(self, placement: Placement, *, eps_mm: float) -> tuple[bool, int]:
         if placement.z_mm <= eps_mm:

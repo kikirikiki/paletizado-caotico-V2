@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from palca.integration.reentry_diagnostics import (
     build_consolidated_reentry_report,
@@ -22,10 +22,16 @@ from palca.integration.late_stand_diagnostics import (
     build_consolidated_late_stand_report,
     build_seed_late_stand_report_from_dump,
 )
+from palca.integration.support_settle_diagnostics import (
+    build_consolidated_support_settle_report,
+    build_seed_support_settle_report_from_dump,
+)
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("configs/benchmarks/one_pallet_canonical.json")
+DEFAULT_SUPPORT_SETTLE_FOCUS_SEEDS = (50021, 50024, 50025)
+DEFAULT_SUPPORT_SETTLE_CONTRAST_SEEDS = (50022, 50023)
 
 RUN_SIM_EXCLUDED_PROFILE_KEYS = {
     "excel_path",
@@ -886,6 +892,186 @@ def _write_late_stand_audit_artifacts(
     return consolidated, files
 
 
+def _write_support_settle_audit_artifacts(
+    *,
+    rows: list[SeedSummary],
+    run_output_dir: Path,
+    focus_seeds: Sequence[int] = DEFAULT_SUPPORT_SETTLE_FOCUS_SEEDS,
+    contrast_seeds: Sequence[int] = DEFAULT_SUPPORT_SETTLE_CONTRAST_SEEDS,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    by_run: dict[str, list[dict[str, Any]]] = {}
+    focus_set = {int(s) for s in focus_seeds}
+    contrast_set = {int(s) for s in contrast_seeds}
+    allowed = focus_set | contrast_set
+
+    for row in rows:
+        seed = int(row.seed)
+        if allowed and seed not in allowed:
+            continue
+        dump_path = Path(str(row.placements_json))
+        if not dump_path.exists():
+            continue
+        try:
+            dump_payload = json.loads(dump_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        seed_report = build_seed_support_settle_report_from_dump(
+            dump_payload=dump_payload,
+            seed=seed,
+            max_critical_steps=3,
+            critical_window_radius=1,
+        )
+        seed_report["seed_role"] = "focus" if seed in focus_set else "contrast"
+        by_run.setdefault(str(row.run_label), []).append(seed_report)
+
+        seed_report_path = dump_path.with_name(f"seed_{seed}_support_settle_audit.json")
+        seed_report_path.write_text(
+            json.dumps(seed_report, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    consolidated: dict[str, Any] = {}
+    files: dict[str, Any] = {}
+    for run_label, reports in by_run.items():
+        reports_sorted = sorted(reports, key=lambda item: int(item.get("seed", 0)))
+        consolidated_payload = build_consolidated_support_settle_report(reports_sorted)
+        consolidated_payload["focus_seeds"] = sorted(focus_set)
+        consolidated_payload["contrast_seeds"] = sorted(contrast_set)
+        consolidated[run_label] = consolidated_payload
+
+        json_path = run_output_dir / f"support_settle_audit_{run_label}.json"
+        json_path.write_text(
+            json.dumps(consolidated_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+        rows_csv = list(consolidated_payload.get("rows", []) or [])
+        gaps_csv_path = run_output_dir / f"support_settle_gaps_{run_label}.csv"
+        gaps_headers = [
+            "seed",
+            "step",
+            "candidate_box_id",
+            "ramp_id",
+            "buffer_index",
+            "candidate_origin",
+            "reason",
+            "observed_name",
+            "observed_value",
+            "threshold_name",
+            "threshold_value",
+            "feasibility_gap",
+            "closeness_class",
+            "feasibility_taxonomy",
+            "secondary_tags",
+            "could_be_rescued_by_support_settle_refinement",
+            "height_overflow_mm",
+            "source_reason",
+            "detail",
+            "chosen_placement",
+            "candidate_placement",
+        ]
+        with gaps_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=gaps_headers)
+            writer.writeheader()
+            for item in rows_csv:
+                out_row = {key: item.get(key) for key in gaps_headers}
+                out_row["secondary_tags"] = json.dumps(item.get("secondary_tags", []), ensure_ascii=True)
+                out_row["chosen_placement"] = json.dumps(item.get("chosen_placement", {}), ensure_ascii=True)
+                out_row["candidate_placement"] = json.dumps(item.get("candidate_placement", {}), ensure_ascii=True)
+                writer.writerow(out_row)
+
+        seed_csv_path = run_output_dir / f"support_settle_seed_summary_{run_label}.csv"
+        seed_headers = [
+            "seed",
+            "seed_role",
+            "rows_total",
+            "rows_close_total",
+            "rows_far_total",
+            "rows_close_pct",
+            "critical_steps",
+        ]
+        seed_rows: list[dict[str, Any]] = []
+        by_seed_report = {int(item.get("seed", 0)): item for item in reports_sorted}
+        for item in list(consolidated_payload.get("seed_summaries", []) or []):
+            seed = int(item.get("seed", 0))
+            seed_report = by_seed_report.get(seed, {})
+            seed_rows.append(
+                {
+                    "seed": seed,
+                    "seed_role": seed_report.get("seed_role"),
+                    "rows_total": item.get("rows_total"),
+                    "rows_close_total": item.get("rows_close_total"),
+                    "rows_far_total": item.get("rows_far_total"),
+                    "rows_close_pct": item.get("rows_close_pct"),
+                    "critical_steps": json.dumps(item.get("critical_steps", []), ensure_ascii=True),
+                }
+            )
+        with seed_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=seed_headers)
+            writer.writeheader()
+            for item in seed_rows:
+                writer.writerow(item)
+
+        pareto_csv_path = run_output_dir / f"support_settle_pareto_{run_label}.csv"
+        pareto_headers = ["bucket", "value", "count", "pct"]
+        summary = consolidated_payload.get("summary", {}) if isinstance(consolidated_payload.get("summary"), dict) else {}
+        with pareto_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=pareto_headers)
+            writer.writeheader()
+            for item in list(summary.get("reason_pareto", []) or []):
+                writer.writerow(
+                    {
+                        "bucket": "reason",
+                        "value": item.get("reason"),
+                        "count": item.get("count"),
+                        "pct": item.get("pct"),
+                    }
+                )
+            for item in list(summary.get("closeness_pareto", []) or []):
+                writer.writerow(
+                    {
+                        "bucket": "closeness_class",
+                        "value": item.get("closeness_class"),
+                        "count": item.get("count"),
+                        "pct": item.get("pct"),
+                    }
+                )
+            for item in list(summary.get("taxonomy_pareto", []) or []):
+                writer.writerow(
+                    {
+                        "bucket": "taxonomy",
+                        "value": item.get("taxonomy"),
+                        "count": item.get("count"),
+                        "pct": item.get("pct"),
+                    }
+                )
+
+        reason_closeness_csv_path = run_output_dir / f"support_settle_reason_closeness_{run_label}.csv"
+        reason_closeness_headers = ["reason", "closeness_class", "count"]
+        with reason_closeness_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=reason_closeness_headers)
+            writer.writeheader()
+            for item in list(summary.get("by_reason_closeness", []) or []):
+                writer.writerow(
+                    {
+                        "reason": item.get("reason"),
+                        "closeness_class": item.get("closeness_class"),
+                        "count": item.get("count"),
+                    }
+                )
+
+        files[run_label] = {
+            "json": str(json_path),
+            "gaps_csv": str(gaps_csv_path),
+            "seed_summary_csv": str(seed_csv_path),
+            "pareto_csv": str(pareto_csv_path),
+            "reason_closeness_csv": str(reason_closeness_csv_path),
+        }
+
+    return consolidated, files
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -989,6 +1175,10 @@ def run_benchmark(
         rows=rows_sorted,
         run_output_dir=run_output_dir,
     )
+    support_settle_audit, support_settle_audit_files = _write_support_settle_audit_artifacts(
+        rows=rows_sorted,
+        run_output_dir=run_output_dir,
+    )
 
     aggregates = _aggregate_rows(rows_sorted)
     discriminative = _discriminative_status(rows_sorted)
@@ -1041,12 +1231,14 @@ def run_benchmark(
         "discriminative": discriminative,
         "reentry_autopsy": reentry_autopsy,
         "late_stand_audit": late_stand_audit,
+        "support_settle_audit": support_settle_audit,
         "rows": [asdict(r) for r in rows_sorted],
         "files": {
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
             "reentry_autopsy": reentry_autopsy_files,
             "late_stand_audit": late_stand_audit_files,
+            "support_settle_audit": support_settle_audit_files,
         },
     }
 
