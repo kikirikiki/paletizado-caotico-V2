@@ -143,30 +143,102 @@ def _sim_state(*, boxes: list[Box], pallet: FakePallet) -> SchedulerSimState:
     )
 
 
-def test_hard_floor_phase_never_chooses_stacking_while_floor_exists() -> None:
+def test_hard_floor_phase_planar_stacking_marginal_gain_prefers_floor() -> None:
     pallet = FakePallet(
         {
-            1: PreviewSpec(z_mm=120, x_mm=0, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=9.0),
-            2: PreviewSpec(z_mm=0, x_mm=0, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=0.1),
-            3: PreviewSpec(z_mm=0, x_mm=40, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=0.1),
+            1: PreviewSpec(
+                z_mm=120,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=40,
+                packing_gain=9.0,
+                orientation_family="planar",
+                orientation_name="planar_lw",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=40,
+                packing_gain=0.1,
+                orientation_family="planar",
+                orientation_name="planar_lw",
+            ),
         }
     )
     scheduler = SchedulerV1(
         SchedulerConfig(
-            lookahead_k=3,
+            lookahead_k=2,
             hard_floor_phase_end_step=4,
             hard_floor_phase_min_base_candidates=1,
         )
     )
 
-    plan1 = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
-    assert plan1 is not None
-    assert int(plan1.preview.placement.z_mm) == 0
-    pallet.commit_place(plan1.preview)
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+    assert int(plan.preview.placement.z_mm) == 0
 
-    plan2 = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(3)], pallet=pallet))
-    assert plan2 is not None
-    assert int(plan2.preview.placement.z_mm) == 0
+
+def test_hard_floor_phase_planar_stacking_strong_gain_can_win() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=120,
+                x_mm=80,
+                y_mm=0,
+                length_mm=80,
+                width_mm=80,
+                height_mm=40,
+                packing_gain=8.0,
+                orientation_family="planar",
+                orientation_name="planar_lw",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=220,
+                y_mm=220,
+                length_mm=80,
+                width_mm=80,
+                height_mm=40,
+                packing_gain=0.1,
+                orientation_family="planar",
+                orientation_name="planar_lw",
+            ),
+        },
+        bin_area_mm2=160_000,
+        bin_length_mm=400,
+        bin_width_mm=400,
+    )
+    pallet.placements.append(
+        _placement(
+            box_id=100,
+            z_mm=0,
+            x_mm=0,
+            y_mm=0,
+            length_mm=80,
+            width_mm=80,
+            height_mm=40,
+            orientation_family="planar",
+            orientation_name="planar_seed",
+        )
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+        )
+    )
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 1
+    assert int(plan.preview.placement.z_mm) > 0
 
 
 def test_hard_floor_phase_exits_when_no_floor_candidates_and_falls_back_to_normal() -> None:
