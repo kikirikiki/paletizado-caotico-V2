@@ -17,6 +17,7 @@ from .hard_floor_morphology import (
     HardFloorMorphologyMetrics,
     compute_hard_floor_morphology_metrics,
     evaluate_hard_floor_candidate,
+    stacking_is_justified,
 )
 from ..scoring.height_slack import (
     ScoreMode,
@@ -1626,6 +1627,7 @@ class SchedulerV1:
                 self.hard_floor_phase_exit_no_floor_total += 1
                 continue
 
+            future_boxes = [item.box for item in group]
             baseline_metrics = (
                 self._hard_floor_phase_compute_morphology_metrics(
                     pallet=pallet,
@@ -1635,11 +1637,13 @@ class SchedulerV1:
                 if morphology_enabled
                 else None
             )
+
+            floor_scored_local: list[_HardFloorScoredCandidate] = []
             for cand in floor_group:
                 legacy_score = self._hard_floor_phase_score_preview(
                     pallet=pallet,
                     preview=cand.plan.preview,
-                    future_boxes=[item.box for item in group],
+                    future_boxes=future_boxes,
                     selected_box=cand.box,
                     allow_stand_bonus=(not morphology_enabled),
                 )
@@ -1657,7 +1661,7 @@ class SchedulerV1:
                         * float(
                             self._hard_floor_phase_next_floor_ratio(
                                 pallet=pallet,
-                                future_boxes=[item.box for item in group],
+                                future_boxes=future_boxes,
                                 selected_box=cand.box,
                             )
                         )
@@ -1671,6 +1675,118 @@ class SchedulerV1:
                     )
                     if not morphology_decision.accepted:
                         continue
+
+                is_stand_hw = self._placement_is_stand_hw(placement)
+                if is_stand_hw:
+                    self.hard_floor_phase_stand_mix_candidates_total += 1
+                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                    base_score=float(legacy_score),
+                    placement=placement,
+                )
+                if stand_mix_bonus_applied:
+                    self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+                new_terms = replace(cand.terms, scalar_score=float(scored_value))
+                new_plan = replace(cand.plan, score=float(scored_value))
+                floor_scored_local.append(
+                    _HardFloorScoredCandidate(
+                        candidate=_ScoredCandidate(plan=new_plan, box=cand.box, terms=new_terms),
+                        base_score=float(scored_value),
+                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                        morphology_decision=morphology_decision,
+                    )
+                )
+            scored.extend(floor_scored_local)
+            if not morphology_enabled:
+                continue
+
+            best_floor_choice = (
+                max(
+                    floor_scored_local,
+                    key=lambda item: (
+                        float(item.base_score),
+                        float(item.candidate.terms.packing_gain),
+                        -float(item.candidate.terms.fragmentation),
+                        -float(item.candidate.terms.dt_extra),
+                    ),
+                )
+                if floor_scored_local
+                else None
+            )
+            best_floor_metrics = (
+                best_floor_choice.morphology_decision.metrics
+                if best_floor_choice is not None and best_floor_choice.morphology_decision is not None
+                else None
+            )
+            stack_group = [cand for cand in group if not self._preview_is_floor(cand.plan.preview)]
+            for cand in stack_group:
+                if int(step_idx) < int(morphology_cfg.early_stack_min_step_index):
+                    continue
+                if baseline_metrics is not None and float(baseline_metrics.base_fill_ratio) < float(
+                    morphology_cfg.early_stack_min_base_fill_ratio
+                ):
+                    continue
+                same_box_floor = [
+                    item
+                    for item in floor_scored_local
+                    if item.morphology_decision is not None and item.candidate.box.box_id == cand.box.box_id
+                ]
+                reference_floor_metrics = best_floor_metrics
+                if same_box_floor:
+                    same_box_choice = max(
+                        same_box_floor,
+                        key=lambda item: (
+                            float(item.base_score),
+                            float(item.candidate.terms.packing_gain),
+                            -float(item.candidate.terms.fragmentation),
+                            -float(item.candidate.terms.dt_extra),
+                        ),
+                    )
+                    reference_floor_metrics = (
+                        same_box_choice.morphology_decision.metrics
+                        if same_box_choice.morphology_decision is not None
+                        else reference_floor_metrics
+                    )
+                legacy_score = self._hard_floor_phase_score_preview(
+                    pallet=pallet,
+                    preview=cand.plan.preview,
+                    future_boxes=future_boxes,
+                    selected_box=cand.box,
+                    allow_stand_bonus=False,
+                )
+                placement = getattr(cand.plan.preview, "placement", None)
+                if baseline_metrics is None:
+                    continue
+                candidate_metrics = self._hard_floor_phase_compute_morphology_metrics(
+                    pallet=pallet,
+                    candidate_preview=cand.plan.preview,
+                    morphology_cfg=morphology_cfg,
+                )
+                projected_density_proxy = (
+                    float(candidate_metrics.base_fill_ratio)
+                    + 5.00
+                    * float(
+                        self._hard_floor_phase_next_floor_ratio(
+                            pallet=pallet,
+                            future_boxes=future_boxes,
+                            selected_box=cand.box,
+                        )
+                    )
+                )
+                morphology_decision = evaluate_hard_floor_candidate(
+                    baseline=baseline_metrics,
+                    candidate=candidate_metrics,
+                    projected_density_proxy=float(projected_density_proxy),
+                    legacy_score=float(legacy_score),
+                    config=morphology_cfg,
+                )
+                if not morphology_decision.accepted:
+                    continue
+                if reference_floor_metrics is not None and not stacking_is_justified(
+                    stacking=morphology_decision.metrics,
+                    best_floor=reference_floor_metrics,
+                    config=morphology_cfg,
+                ):
+                    continue
 
                 is_stand_hw = self._placement_is_stand_hw(placement)
                 if is_stand_hw:
@@ -1750,6 +1866,7 @@ class SchedulerV1:
                 self.hard_floor_phase_exit_no_floor_total += 1
                 continue
 
+            future_boxes = [item.box for item in group]
             baseline_metrics = (
                 self._hard_floor_phase_compute_morphology_metrics(
                     pallet=pallet,
@@ -1759,12 +1876,14 @@ class SchedulerV1:
                 if morphology_enabled
                 else None
             )
+
+            floor_scored_local: list[_HardFloorScoredExpansion] = []
             for exp in floor_group:
                 assert exp.node.first_plan is not None
                 legacy_score = self._hard_floor_phase_score_preview(
                     pallet=pallet,
                     preview=exp.node.first_plan.preview,
-                    future_boxes=[item.box for item in group],
+                    future_boxes=future_boxes,
                     selected_box=exp.box,
                     allow_stand_bonus=(not morphology_enabled),
                 )
@@ -1782,7 +1901,7 @@ class SchedulerV1:
                         * float(
                             self._hard_floor_phase_next_floor_ratio(
                                 pallet=pallet,
-                                future_boxes=[item.box for item in group],
+                                future_boxes=future_boxes,
                                 selected_box=exp.box,
                             )
                         )
@@ -1796,6 +1915,124 @@ class SchedulerV1:
                     )
                     if not morphology_decision.accepted:
                         continue
+
+                is_stand_hw = self._placement_is_stand_hw(placement)
+                if is_stand_hw:
+                    self.hard_floor_phase_stand_mix_candidates_total += 1
+                scored_value, stand_mix_bonus_applied = self._hard_floor_phase_apply_stand_mix_bonus(
+                    base_score=float(legacy_score),
+                    placement=placement,
+                )
+                if stand_mix_bonus_applied:
+                    self.hard_floor_phase_stand_mix_bonus_applied_total += 1
+                exp.node.score_sum = float(scored_value)
+                exp.node.first_plan = replace(exp.node.first_plan, score=float(scored_value))
+                new_terms = replace(exp.terms, scalar_score=float(scored_value))
+                floor_scored_local.append(
+                    _HardFloorScoredExpansion(
+                        expansion=_BeamExpansion(node=exp.node, box=exp.box, terms=new_terms),
+                        base_score=float(scored_value),
+                        stand_mix_bonus_applied=bool(stand_mix_bonus_applied),
+                        morphology_decision=morphology_decision,
+                    )
+                )
+            scored.extend(floor_scored_local)
+            if not morphology_enabled:
+                continue
+
+            best_floor_choice = (
+                max(
+                    floor_scored_local,
+                    key=lambda item: (
+                        float(item.base_score),
+                        float(item.expansion.terms.packing_gain),
+                        -float(item.expansion.terms.fragmentation),
+                        -float(item.expansion.terms.dt_extra),
+                    ),
+                )
+                if floor_scored_local
+                else None
+            )
+            best_floor_metrics = (
+                best_floor_choice.morphology_decision.metrics
+                if best_floor_choice is not None and best_floor_choice.morphology_decision is not None
+                else None
+            )
+            stack_group = [
+                exp
+                for exp in group
+                if exp.node.first_plan is not None and not self._preview_is_floor(exp.node.first_plan.preview)
+            ]
+            for exp in stack_group:
+                if int(step_idx) < int(morphology_cfg.early_stack_min_step_index):
+                    continue
+                if baseline_metrics is not None and float(baseline_metrics.base_fill_ratio) < float(
+                    morphology_cfg.early_stack_min_base_fill_ratio
+                ):
+                    continue
+                same_box_floor = [
+                    item
+                    for item in floor_scored_local
+                    if item.morphology_decision is not None and item.expansion.box.box_id == exp.box.box_id
+                ]
+                reference_floor_metrics = best_floor_metrics
+                if same_box_floor:
+                    same_box_choice = max(
+                        same_box_floor,
+                        key=lambda item: (
+                            float(item.base_score),
+                            float(item.expansion.terms.packing_gain),
+                            -float(item.expansion.terms.fragmentation),
+                            -float(item.expansion.terms.dt_extra),
+                        ),
+                    )
+                    reference_floor_metrics = (
+                        same_box_choice.morphology_decision.metrics
+                        if same_box_choice.morphology_decision is not None
+                        else reference_floor_metrics
+                    )
+                assert exp.node.first_plan is not None
+                legacy_score = self._hard_floor_phase_score_preview(
+                    pallet=pallet,
+                    preview=exp.node.first_plan.preview,
+                    future_boxes=future_boxes,
+                    selected_box=exp.box,
+                    allow_stand_bonus=False,
+                )
+                placement = getattr(exp.node.first_plan.preview, "placement", None)
+                if baseline_metrics is None:
+                    continue
+                candidate_metrics = self._hard_floor_phase_compute_morphology_metrics(
+                    pallet=pallet,
+                    candidate_preview=exp.node.first_plan.preview,
+                    morphology_cfg=morphology_cfg,
+                )
+                projected_density_proxy = (
+                    float(candidate_metrics.base_fill_ratio)
+                    + 5.00
+                    * float(
+                        self._hard_floor_phase_next_floor_ratio(
+                            pallet=pallet,
+                            future_boxes=future_boxes,
+                            selected_box=exp.box,
+                        )
+                    )
+                )
+                morphology_decision = evaluate_hard_floor_candidate(
+                    baseline=baseline_metrics,
+                    candidate=candidate_metrics,
+                    projected_density_proxy=float(projected_density_proxy),
+                    legacy_score=float(legacy_score),
+                    config=morphology_cfg,
+                )
+                if not morphology_decision.accepted:
+                    continue
+                if reference_floor_metrics is not None and not stacking_is_justified(
+                    stacking=morphology_decision.metrics,
+                    best_floor=reference_floor_metrics,
+                    config=morphology_cfg,
+                ):
+                    continue
 
                 is_stand_hw = self._placement_is_stand_hw(placement)
                 if is_stand_hw:

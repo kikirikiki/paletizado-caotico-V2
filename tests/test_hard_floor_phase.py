@@ -6,6 +6,7 @@ from types import MethodType
 from palca.domain.box import Box
 from palca.domain.placement import Placement, PlacementPreview
 from palca.integration.policy_packer_sched import PolicyPackerScheduler
+from palca.scheduler.hard_floor_morphology import HardFloorMorphologyConfig, HardFloorMorphologyMetrics
 from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, SchedulerV1
 
 
@@ -120,7 +121,30 @@ def _sim_state(*, boxes: list[Box], pallet: FakePallet) -> SchedulerSimState:
     )
 
 
-def test_hard_floor_phase_never_chooses_stacking_while_floor_exists() -> None:
+def _morph_metrics(
+    *,
+    base_fill_ratio: float,
+    largest_free_rect_area_mm2: int,
+    boundary_connected_free_area_mm2: int,
+    inaccessible_pocket_area_mm2: int,
+    height_std_mm: float = 20.0,
+    max_height_gap_mm: int = 120,
+    isolated_high_spots_count: int = 0,
+    stand_count_on_base: int = 0,
+) -> HardFloorMorphologyMetrics:
+    return HardFloorMorphologyMetrics(
+        base_fill_ratio=float(base_fill_ratio),
+        largest_free_rect_area_mm2=int(largest_free_rect_area_mm2),
+        boundary_connected_free_area_mm2=int(boundary_connected_free_area_mm2),
+        inaccessible_pocket_area_mm2=int(inaccessible_pocket_area_mm2),
+        height_std_mm=float(height_std_mm),
+        max_height_gap_mm=int(max_height_gap_mm),
+        isolated_high_spots_count=int(isolated_high_spots_count),
+        stand_count_on_base=int(stand_count_on_base),
+    )
+
+
+def test_hard_floor_phase_prefers_floor_while_morphology_is_off() -> None:
     pallet = FakePallet(
         {
             1: PreviewSpec(z_mm=120, x_mm=0, y_mm=0, length_mm=40, width_mm=40, height_mm=40, packing_gain=9.0),
@@ -291,6 +315,180 @@ def test_hard_floor_phase_stand_mix_bonus_zero_keeps_current_behavior() -> None:
     )
     assert int(with_zero_bonus.hard_floor_phase_stand_mix_bonus_applied_total) == 0
     assert int(with_zero_bonus.hard_floor_phase_stand_mix_chosen_total) == 0
+
+
+def test_hard_floor_phase_morphology_rejects_unjustified_early_stack_against_floor() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=120,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=40,
+                packing_gain=8.0,
+                orientation_family="stand_hw",
+                orientation_name="stack_candidate",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=40,
+                packing_gain=1.0,
+                orientation_family="planar",
+                orientation_name="floor_candidate",
+            ),
+        }
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    def fake_cfg(self: SchedulerV1) -> HardFloorMorphologyConfig:
+        return HardFloorMorphologyConfig(
+            mode="on",
+            early_stack_min_step_index=0,
+            early_stack_min_base_fill_ratio=0.0,
+        )
+
+    scheduler._hard_floor_phase_morphology_config = MethodType(fake_cfg, scheduler)  # type: ignore[method-assign]
+    baseline_metrics = _morph_metrics(
+        base_fill_ratio=0.40,
+        largest_free_rect_area_mm2=3000,
+        boundary_connected_free_area_mm2=7000,
+        inaccessible_pocket_area_mm2=800,
+    )
+    floor_metrics = _morph_metrics(
+        base_fill_ratio=0.43,
+        largest_free_rect_area_mm2=3400,
+        boundary_connected_free_area_mm2=7600,
+        inaccessible_pocket_area_mm2=500,
+    )
+    stack_metrics = _morph_metrics(
+        base_fill_ratio=0.40,
+        largest_free_rect_area_mm2=3000,
+        boundary_connected_free_area_mm2=7000,
+        inaccessible_pocket_area_mm2=800,
+    )
+
+    def fake_morph(
+        self: SchedulerV1, *, candidate_preview: PlacementPreview | None = None, **_: object
+    ) -> HardFloorMorphologyMetrics:
+        if candidate_preview is None:
+            return baseline_metrics
+        placement = getattr(candidate_preview, "placement", None)
+        if placement is None:
+            return baseline_metrics
+        return stack_metrics if int(getattr(placement, "z_mm", 0) or 0) > 0 else floor_metrics
+
+    def prefer_stack(self: SchedulerV1, *, preview: PlacementPreview, **_: object) -> float:
+        placement = getattr(preview, "placement", None)
+        z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        return 10.0 if z_mm > 0 else 1.0
+
+    scheduler._hard_floor_phase_compute_morphology_metrics = MethodType(fake_morph, scheduler)  # type: ignore[method-assign]
+    scheduler._hard_floor_phase_score_preview = MethodType(prefer_stack, scheduler)  # type: ignore[method-assign]
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 2
+    assert int(plan.preview.placement.z_mm) == 0
+
+
+def test_hard_floor_phase_morphology_allows_structurally_justified_early_stack() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(
+                z_mm=120,
+                x_mm=0,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=40,
+                packing_gain=8.0,
+                orientation_family="stand_hw",
+                orientation_name="stack_candidate",
+            ),
+            2: PreviewSpec(
+                z_mm=0,
+                x_mm=40,
+                y_mm=0,
+                length_mm=40,
+                width_mm=40,
+                height_mm=40,
+                packing_gain=1.0,
+                orientation_family="planar",
+                orientation_name="floor_candidate",
+            ),
+        }
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            hard_floor_phase_end_step=4,
+            hard_floor_phase_min_base_candidates=1,
+            hard_floor_phase_morphology_mode="on",
+        )
+    )
+
+    def fake_cfg(self: SchedulerV1) -> HardFloorMorphologyConfig:
+        return HardFloorMorphologyConfig(
+            mode="on",
+            early_stack_min_step_index=0,
+            early_stack_min_base_fill_ratio=0.0,
+        )
+
+    scheduler._hard_floor_phase_morphology_config = MethodType(fake_cfg, scheduler)  # type: ignore[method-assign]
+    baseline_metrics = _morph_metrics(
+        base_fill_ratio=0.40,
+        largest_free_rect_area_mm2=2500,
+        boundary_connected_free_area_mm2=7000,
+        inaccessible_pocket_area_mm2=1200,
+    )
+    floor_metrics = _morph_metrics(
+        base_fill_ratio=0.43,
+        largest_free_rect_area_mm2=2200,
+        boundary_connected_free_area_mm2=6600,
+        inaccessible_pocket_area_mm2=1200,
+    )
+    stack_metrics = _morph_metrics(
+        base_fill_ratio=0.40,
+        largest_free_rect_area_mm2=3400,
+        boundary_connected_free_area_mm2=7600,
+        inaccessible_pocket_area_mm2=500,
+    )
+
+    def fake_morph(
+        self: SchedulerV1, *, candidate_preview: PlacementPreview | None = None, **_: object
+    ) -> HardFloorMorphologyMetrics:
+        if candidate_preview is None:
+            return baseline_metrics
+        placement = getattr(candidate_preview, "placement", None)
+        if placement is None:
+            return baseline_metrics
+        return stack_metrics if int(getattr(placement, "z_mm", 0) or 0) > 0 else floor_metrics
+
+    def prefer_stack(self: SchedulerV1, *, preview: PlacementPreview, **_: object) -> float:
+        placement = getattr(preview, "placement", None)
+        z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        return 10.0 if z_mm > 0 else 1.0
+
+    scheduler._hard_floor_phase_compute_morphology_metrics = MethodType(fake_morph, scheduler)  # type: ignore[method-assign]
+    scheduler._hard_floor_phase_score_preview = MethodType(prefer_stack, scheduler)  # type: ignore[method-assign]
+
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1), _box(2)], pallet=pallet))
+    assert plan is not None
+    assert int(plan.box_id) == 1
+    assert int(plan.preview.placement.z_mm) > 0
 
 
 def test_hard_floor_phase_morphology_can_win_with_worse_legacy_local_score() -> None:

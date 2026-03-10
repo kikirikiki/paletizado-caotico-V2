@@ -37,6 +37,13 @@ class HardFloorMorphologyConfig:
     max_boundary_connected_loss_ratio: float = 0.25
     max_isolated_high_spots_increase: int = 0
     isolated_high_spot_delta_mm: float = 50.0
+    early_stack_min_boundary_connected_gain_mm2: int = 0
+    early_stack_min_pocket_reduction_mm2: int = 0
+    early_stack_min_largest_free_rect_gain_mm2: int = 0
+    early_stack_min_base_fill_ratio_gain: float = 0.0
+    early_stack_max_base_fill_ratio_loss: float = 0.03
+    early_stack_min_base_fill_ratio: float = 0.15
+    early_stack_min_step_index: int = 3
 
     def normalized_mode(self) -> str:
         mode = str(self.mode or "off").strip().lower()
@@ -180,6 +187,29 @@ def evaluate_hard_floor_candidate(
         legacy_score=float(legacy_score),
         reject_reason=reject_reason,
         rank_key=rank_key,
+    )
+
+
+def stacking_is_justified(
+    *,
+    stacking: HardFloorMorphologyMetrics,
+    best_floor: HardFloorMorphologyMetrics,
+    config: HardFloorMorphologyConfig,
+) -> bool:
+    boundary_gain = int(stacking.boundary_connected_free_area_mm2) - int(best_floor.boundary_connected_free_area_mm2)
+    pocket_reduction = int(best_floor.inaccessible_pocket_area_mm2) - int(stacking.inaccessible_pocket_area_mm2)
+    largest_rect_gain = int(stacking.largest_free_rect_area_mm2) - int(best_floor.largest_free_rect_area_mm2)
+    base_fill_gain = float(stacking.base_fill_ratio) - float(best_floor.base_fill_ratio)
+    base_fill_loss = float(best_floor.base_fill_ratio) - float(stacking.base_fill_ratio)
+
+    if base_fill_loss > max(0.0, float(config.early_stack_max_base_fill_ratio_loss)):
+        return False
+
+    return bool(
+        boundary_gain > max(0, int(config.early_stack_min_boundary_connected_gain_mm2))
+        or pocket_reduction > max(0, int(config.early_stack_min_pocket_reduction_mm2))
+        or largest_rect_gain > max(0, int(config.early_stack_min_largest_free_rect_gain_mm2))
+        or base_fill_gain > max(0.0, float(config.early_stack_min_base_fill_ratio_gain))
     )
 
 
