@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import inspect
 import json
 import subprocess
 import sys
@@ -18,83 +19,19 @@ from sim.run import run_simulation
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("configs/benchmarks/one_pallet_canonical.json")
 
-REQUIRED_PARAM_KEYS = {
-    "arrival_mode",
-    "balance_weight",
-    "batchfill_budget_ms",
-    "batchfill_greedy_topk",
-    "batchfill_layer_starter",
-    "batchfill_starters_max",
-    "continuous_pallets",
-    "controller_debug",
-    "coverage_grid_x",
-    "coverage_grid_y",
-    "coverage_weight",
-    "dominant_free_rect_ratio_gate",
-    "dominant_free_rect_weight",
-    "episode_id",
-    "force_destination",
-    "grid_mm",
-    "hard_floor_phase_end_step",
-    "hard_floor_phase_lookahead_items",
-    "hard_floor_phase_min_base_candidates",
-    "hard_floor_phase_stand_mix_bonus",
-    "height_slack_mm",
-    "heavy_bottom",
-    "heuristic",
-    "loadbear_factor",
-    "loadbear_penalty_weight",
-    "lookahead_k",
-    "max_candidates",
-    "max_overweight_ratio",
-    "max_pallets",
-    "max_seconds_per_item",
-    "max_tries_per_item",
-    "micro_depth",
-    "micro_plan",
-    "micro_topk",
-    "micro_width",
-    "min_support",
-    "model",
-    "n_per_pallet",
-    "online_controller",
-    "orientation_mode",
-    "overhang_mm",
-    "policy",
-    "priority_mode",
-    "priority_weight",
-    "ramp_cap",
-    "score_mode",
-    "settle_max_iter",
-    "settle_snap_grid",
-    "settle_timeout_ms",
-    "shuffle_strength",
-    "shuffle_window",
-    "spatial_tower_penalty_end_step",
-    "spatial_tower_penalty_weight",
-    "spatial_tower_target_base",
-    "spatial_tower_target_step_div",
-    "spatial_xy_bin_mm",
-    "stability_eps_mm",
-    "stability_mode",
-    "stacking_mode",
-    "staging_cap",
-    "stand_hw_height_margin_gate_mm",
-    "starvation_weight",
-    "t_changeover",
-    "t_pick_place",
-    "t_select_base",
-    "t_select_step",
-    "t_stage",
-    "t_unstage",
-    "time_budget_ms",
-    "time_penalty_weight",
-    "time_scale",
-    "tower_z_band_mm",
-    "tower_z_penalty_weight",
-    "watchdog_heartbeat_sec",
-    "weight_col",
-    "z_band_mm",
+RUN_SIM_EXCLUDED_PROFILE_KEYS = {
+    "excel_path",
+    "out_path",
+    "out_json",
+    "episode_seed",
+    "dump_placements_path",
+    "viz",
+    "viz_mode",
+    "viz_every",
+    "viz_labels",
+    "viz_block",
+    "viz_debug",
+    "viz_dest",
 }
 
 PARAM_ALIASES = {
@@ -104,6 +41,29 @@ PARAM_ALIASES = {
     "time_budget": "time_budget_ms",
     "height_slack": "height_slack_mm",
 }
+
+RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
+RUN_SIMULATION_PARAM_KEYS = set(RUN_SIMULATION_SIGNATURE.parameters.keys())
+REQUIRED_PARAM_KEYS = set(RUN_SIMULATION_PARAM_KEYS - RUN_SIM_EXCLUDED_PROFILE_KEYS)
+
+
+def _validate_harness_contract() -> None:
+    missing_excluded = sorted(RUN_SIM_EXCLUDED_PROFILE_KEYS - RUN_SIMULATION_PARAM_KEYS)
+    if missing_excluded:
+        raise RuntimeError(
+            "Harness desalineado con run_simulation: claves runtime no encontradas: "
+            f"{missing_excluded}"
+        )
+
+    invalid_alias_targets = sorted({dst for dst in PARAM_ALIASES.values() if dst not in REQUIRED_PARAM_KEYS})
+    if invalid_alias_targets:
+        raise RuntimeError(
+            "PARAM_ALIASES desalineado con run_simulation; destino(s) inexistente(s): "
+            f"{invalid_alias_targets}"
+        )
+
+
+_validate_harness_contract()
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,11 +170,17 @@ def load_profile(path: str | Path) -> dict[str, Any]:
 
     missing_params = sorted(REQUIRED_PARAM_KEYS - set(params.keys()))
     if missing_params:
-        raise ValueError(f"Perfil incompleto: faltan parametros requeridos: {missing_params}")
+        raise ValueError(
+            "Perfil incompleto: faltan parametros requeridos para run_simulation: "
+            f"{missing_params}"
+        )
 
     unknown_params = sorted(set(params.keys()) - REQUIRED_PARAM_KEYS)
     if unknown_params:
-        raise ValueError(f"Perfil invalido: parametros desconocidos: {unknown_params}")
+        raise ValueError(
+            "Perfil invalido: parametros desconocidos/no usados por run_simulation: "
+            f"{unknown_params}"
+        )
 
     return {
         "schema_version": schema_version,
@@ -263,9 +229,51 @@ def apply_param_overrides(base_params: dict[str, Any], overrides: dict[str, Any]
     out = deepcopy(base_params)
     for key, value in overrides.items():
         if key not in REQUIRED_PARAM_KEYS:
-            raise ValueError(f"Override invalido: parametro desconocido '{key}'")
+            raise ValueError(
+                "Override invalido: parametro desconocido/no usado por run_simulation "
+                f"'{key}'"
+            )
         out[key] = value
     return out
+
+
+def build_run_simulation_kwargs(
+    *,
+    params: dict[str, Any],
+    excel_path: str,
+    out_path: Path,
+    seed: int,
+    dump_placements_path: Path,
+) -> dict[str, Any]:
+    kwargs = dict(params)
+    kwargs.update(
+        {
+            "excel_path": str(excel_path),
+            "out_path": str(out_path),
+            "episode_seed": int(seed),
+            "dump_placements_path": str(dump_placements_path),
+        }
+    )
+
+    unknown_kwargs = sorted(set(kwargs.keys()) - RUN_SIMULATION_PARAM_KEYS)
+    if unknown_kwargs:
+        raise ValueError(
+            "Harness invalido: se intentaron pasar parametros que run_simulation no acepta: "
+            f"{unknown_kwargs}"
+        )
+
+    missing_required_args = sorted(
+        name
+        for name, param in RUN_SIMULATION_SIGNATURE.parameters.items()
+        if param.default is inspect._empty and name not in kwargs
+    )
+    if missing_required_args:
+        raise ValueError(
+            "Harness invalido: faltan argumentos requeridos por run_simulation: "
+            f"{missing_required_args}"
+        )
+
+    return kwargs
 
 
 def _extract_placement_sequence(dump_path: Path, *, forced_destination: int | None) -> list[dict[str, Any]]:
@@ -340,14 +348,12 @@ def run_seed(
     out_json_path = run_dir / f"seed_{int(seed)}.json"
     placements_path = run_dir / f"seed_{int(seed)}_placements.json"
 
-    kwargs = dict(params)
-    kwargs.update(
-        {
-            "excel_path": excel_path,
-            "out_path": str(out_json_path),
-            "episode_seed": int(seed),
-            "dump_placements_path": str(placements_path),
-        }
+    kwargs = build_run_simulation_kwargs(
+        params=params,
+        excel_path=excel_path,
+        out_path=out_json_path,
+        seed=int(seed),
+        dump_placements_path=placements_path,
     )
 
     payload = run_simulation(**kwargs)
@@ -419,6 +425,28 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _discriminative_status(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
+    by_label: dict[str, list[SeedSummary]] = {}
+    for row in rows:
+        by_label.setdefault(row.run_label, []).append(row)
+
+    out: dict[str, dict[str, Any]] = {}
+    for label, values in by_label.items():
+        values_sorted = sorted(values, key=lambda r: r.seed)
+        processed = [int(v.processed_boxes) for v in values_sorted if v.processed_boxes is not None]
+        unique_processed = sorted(set(processed))
+        is_flat = len(processed) >= 2 and len(unique_processed) <= 1
+        out[label] = {
+            "seed_count": len(values_sorted),
+            "processed_boxes_observed": processed,
+            "processed_boxes_unique": unique_processed,
+            "processed_boxes_unique_count": len(unique_processed),
+            "is_flat_processed_boxes": bool(is_flat),
+            "is_discriminative_processed_boxes": bool(not is_flat and len(unique_processed) >= 2),
+        }
+    return out
+
+
 def _default_outdir(
     *,
     profile_name: str,
@@ -487,6 +515,19 @@ def run_benchmark(
     variant_excel = str(variant_excel_override) if variant_excel_override else baseline_excel
     variant_params = apply_param_overrides(baseline_params, merged_variant_overrides)
 
+    baseline_missing_params = sorted(REQUIRED_PARAM_KEYS - set(baseline_params.keys()))
+    baseline_unknown_params = sorted(set(baseline_params.keys()) - REQUIRED_PARAM_KEYS)
+    if baseline_missing_params:
+        raise ValueError(
+            "Perfil baseline invalido: faltan parametros requeridos para run_simulation: "
+            f"{baseline_missing_params}"
+        )
+    if baseline_unknown_params:
+        raise ValueError(
+            "Perfil baseline invalido: contiene parametros no usados por run_simulation: "
+            f"{baseline_unknown_params}"
+        )
+
     baseline_hash = _stable_hash(
         {
             "excel": baseline_excel,
@@ -544,6 +585,8 @@ def run_benchmark(
             writer.writerow(asdict(row))
 
     aggregates = _aggregate_rows(rows_sorted)
+    discriminative = _discriminative_status(rows_sorted)
+    baseline_flat = bool(discriminative.get("baseline", {}).get("is_flat_processed_boxes"))
 
     timestamp_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     fingerprint = {
@@ -569,16 +612,27 @@ def run_benchmark(
                 "excel": baseline_excel,
                 "effective_config_hash": baseline_hash,
                 "overrides": {},
+                "effective_params": baseline_params,
             },
             str(variant_name): {
                 "excel": variant_excel,
                 "effective_config_hash": variant_hash,
                 "overrides": merged_variant_overrides,
+                "effective_params": variant_params,
             }
             if variant_requested
             else None,
         },
+        "param_contract": {
+            "run_simulation_param_keys": sorted(RUN_SIMULATION_PARAM_KEYS),
+            "profile_required_param_keys": sorted(REQUIRED_PARAM_KEYS),
+            "profile_param_keys": sorted(profile["params"].keys()),
+            "missing_required_in_profile": baseline_missing_params,
+            "unknown_in_profile": baseline_unknown_params,
+            "variant_override_keys": sorted(merged_variant_overrides.keys()),
+        },
         "aggregates": aggregates,
+        "discriminative": discriminative,
         "rows": [asdict(r) for r in rows_sorted],
         "files": {
             "summary_csv": str(csv_path),
@@ -597,6 +651,11 @@ def run_benchmark(
     print(f"[benchmark] outdir={run_output_dir}")
     print(f"[benchmark] summary_csv={csv_path}")
     print(f"[benchmark] summary_json={summary_json_path}")
+    if baseline_flat:
+        print(
+            "[benchmark][warning] baseline flat across seeds in processed_boxes; "
+            "benchmark can be non-discriminative."
+        )
 
     return summary_payload
 
