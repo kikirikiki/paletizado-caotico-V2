@@ -355,6 +355,7 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
         hard_floor_phase_min_base_candidates=1,
         hard_floor_phase_lookahead_items=9,
         hard_floor_phase_stand_mix_bonus=0.5,
+        enforce_active_layer_first=True,
     )
     policy._scheduler.hard_floor_phase_active_total = 3
     policy._scheduler.hard_floor_phase_floor_candidates_seen_total = 12
@@ -366,6 +367,9 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     policy._scheduler.hard_floor_phase_stand_mix_bonus_applied_total = 4
     policy._scheduler.hard_floor_phase_stand_mix_candidates_total = 6
     policy._scheduler.hard_floor_phase_stand_mix_chosen_total = 1
+    policy._scheduler.blocked_upper_layer_open_attempts = 7
+    policy._scheduler.active_layer_exhaustion_events = 2
+    policy._scheduler.active_layer_first_trace = [{"phase": "greedy", "allowed_upper_opening": False}]
 
     kpis = policy.collect_kpis()
 
@@ -380,3 +384,7 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
     assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5
+    assert bool(kpis["enforce_active_layer_first"]) is True
+    assert int(kpis["blocked_upper_layer_open_attempts"]) == 7
+    assert int(kpis["active_layer_exhaustion_events"]) == 2
+    assert isinstance(kpis["active_layer_first_trace"], list)

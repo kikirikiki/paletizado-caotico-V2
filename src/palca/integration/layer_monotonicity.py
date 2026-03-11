@@ -53,8 +53,11 @@ def compute_layer_monotonicity_metrics(
             "layer_band_mm": int(band_mm),
             "placements_count": 0,
             "first_stack_step": -1,
+            "first_reentry_step": -1,
+            "first_upper_layer_open_step": -1,
             "max_z_seen_so_far_by_step": [],
             "max_top_z_seen_so_far_by_step": [],
+            "reentries_total": 0,
             "lower_layer_reentry_count": 0,
             "lower_layer_reentry_total_drop_mm": 0,
             "lower_layer_reentry_max_drop_mm": 0,
@@ -82,6 +85,8 @@ def compute_layer_monotonicity_metrics(
         }
 
     first_stack_step = -1
+    first_reentry_step = -1
+    first_upper_layer_open_step = -1
     max_z_seen = 0
     max_top_seen = 0
     max_band_seen = 0
@@ -128,8 +133,12 @@ def compute_layer_monotonicity_metrics(
             monotonic_count += 1
         if is_reentry:
             reentry_drops.append(int(reentry_drop_mm))
+            if first_reentry_step < 0:
+                first_reentry_step = int(step)
 
         opened_new_band = int(band_id) > int(prev_max_band)
+        if opened_new_band and int(band_id) > 0 and first_upper_layer_open_step < 0:
+            first_upper_layer_open_step = int(step)
         below_current_top_after_opening = int(prev_max_band) >= 1 and int(band_id) < int(prev_max_band)
         if below_current_top_after_opening:
             below_top_after_opening_count += 1
@@ -249,8 +258,11 @@ def compute_layer_monotonicity_metrics(
         "layer_band_mm": int(band_mm),
         "placements_count": int(n),
         "first_stack_step": int(first_stack_step),
+        "first_reentry_step": int(first_reentry_step),
+        "first_upper_layer_open_step": int(first_upper_layer_open_step),
         "max_z_seen_so_far_by_step": [int(v) for v in max_z_seen_so_far_by_step],
         "max_top_z_seen_so_far_by_step": [int(v) for v in max_top_z_seen_so_far_by_step],
+        "reentries_total": int(len(reentry_drops)),
         "lower_layer_reentry_count": int(len(reentry_drops)),
         "lower_layer_reentry_total_drop_mm": int(sum(reentry_drops)),
         "lower_layer_reentry_max_drop_mm": int(max(reentry_drops)) if reentry_drops else 0,

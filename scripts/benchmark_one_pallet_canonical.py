@@ -71,15 +71,21 @@ class SeedSummary:
     run_label: str
     seed: int
     processed_boxes: int | None
+    throughput_final: int | None
     first_stack_step: int | None
+    first_upper_layer_open_step: int | None
     first_stand_hw_step: int | None
+    first_reentry_step: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
     max_z_seen_last_mm: int | None
+    reentries_total: int | None
     lower_layer_reentry_count: int | None
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
     lower_layer_reentry_mean_drop_mm: float | None
+    blocked_upper_layer_open_attempts: int | None
+    active_layer_exhaustion_events: int | None
     monotonic_stack_rate: float | None
     placements_below_current_top_band_after_opening_next_band: int | None
     layer_closure_score: float | None
@@ -420,7 +426,18 @@ def run_seed(
     pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
 
     processed_boxes = _safe_int(metrics.get("processed_boxes")) if isinstance(metrics, dict) else None
+    throughput_final = processed_boxes
     stand_hw_used_total = _safe_int(pallet_kpis.get("stand_hw_used_total")) if isinstance(pallet_kpis, dict) else None
+    blocked_upper_layer_open_attempts = (
+        _safe_int(pallet_kpis.get("blocked_upper_layer_open_attempts"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    active_layer_exhaustion_events = (
+        _safe_int(pallet_kpis.get("active_layer_exhaustion_events"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
     hard_floor_stand_total = (
         _safe_int(pallet_kpis.get("hard_floor_phase_stand_hw_chosen_total"))
         if isinstance(pallet_kpis, dict)
@@ -459,15 +476,21 @@ def run_seed(
         run_label=run_label,
         seed=int(seed),
         processed_boxes=processed_boxes,
+        throughput_final=throughput_final,
         first_stack_step=first_stack_step,
+        first_upper_layer_open_step=_safe_int(mono.get("first_upper_layer_open_step")),
         first_stand_hw_step=first_stand_hw_step,
+        first_reentry_step=_safe_int(mono.get("first_reentry_step")),
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
         max_z_seen_last_mm=max_z_seen_last_mm,
+        reentries_total=_safe_int(mono.get("reentries_total")),
         lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
         lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
         lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
         lower_layer_reentry_mean_drop_mm=_safe_float(mono.get("lower_layer_reentry_mean_drop_mm")),
+        blocked_upper_layer_open_attempts=blocked_upper_layer_open_attempts,
+        active_layer_exhaustion_events=active_layer_exhaustion_events,
         monotonic_stack_rate=_safe_float(mono.get("monotonic_stack_rate")),
         placements_below_current_top_band_after_opening_next_band=_safe_int(
             mono.get("placements_below_current_top_band_after_opening_next_band")
@@ -510,15 +533,25 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "seed_count": len(values_sorted),
             "seeds": [int(v.seed) for v in values_sorted],
             "processed_boxes_mean": _mean([v.processed_boxes for v in values_sorted]),
+            "throughput_final_mean": _mean([v.throughput_final for v in values_sorted]),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
+            "first_upper_layer_open_step_mean": _mean([v.first_upper_layer_open_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),
+            "first_reentry_step_mean": _mean([v.first_reentry_step for v in values_sorted]),
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),
             "hard_floor_phase_stand_hw_chosen_total_mean": _mean(
                 [v.hard_floor_phase_stand_hw_chosen_total for v in values_sorted]
             ),
+            "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
+            "blocked_upper_layer_open_attempts_mean": _mean(
+                [v.blocked_upper_layer_open_attempts for v in values_sorted]
+            ),
+            "active_layer_exhaustion_events_mean": _mean(
+                [v.active_layer_exhaustion_events for v in values_sorted]
+            ),
             "monotonic_stack_rate_mean": _mean([v.monotonic_stack_rate for v in values_sorted]),
             "placements_below_current_top_band_after_opening_next_band_mean": _mean(
                 [v.placements_below_current_top_band_after_opening_next_band for v in values_sorted]
