@@ -88,9 +88,12 @@ class SeedSummary:
     active_layers_peak: int | None
     blocked_count: int | None
     marginal_count: int | None
+    severe_marginal_count: int | None
     blocked_stand_hw: int | None
     marginal_stand_hw: int | None
+    severe_marginal_stand_hw: int | None
     first_blocked_step: int | None
+    first_severe_marginal_step: int | None
     issues_concentrated_at_end: bool | None
     critical_placements_json: str
     layer_band_mm: int | None
@@ -527,9 +530,12 @@ def run_seed(
         active_layers_peak=active_layers_peak,
         blocked_count=_safe_int(top_access.get("blocked_count")),
         marginal_count=_safe_int(top_access.get("marginal_count")),
+        severe_marginal_count=_safe_int(top_access.get("severe_marginal_count")),
         blocked_stand_hw=_safe_int(top_access.get("blocked_stand_hw")),
         marginal_stand_hw=_safe_int(top_access.get("marginal_stand_hw")),
+        severe_marginal_stand_hw=_safe_int(top_access.get("severe_marginal_stand_hw")),
         first_blocked_step=_safe_int(top_access.get("first_blocked_step")),
+        first_severe_marginal_step=_safe_int(top_access.get("first_severe_marginal_step")),
         issues_concentrated_at_end=(
             bool(top_access.get("issues_concentrated_at_end"))
             if top_access.get("issues_concentrated_at_end") is not None
@@ -589,9 +595,12 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "active_layers_peak_mean": _mean([v.active_layers_peak for v in values_sorted]),
             "blocked_count_mean": _mean([v.blocked_count for v in values_sorted]),
             "marginal_count_mean": _mean([v.marginal_count for v in values_sorted]),
+            "severe_marginal_count_mean": _mean([v.severe_marginal_count for v in values_sorted]),
             "blocked_stand_hw_mean": _mean([v.blocked_stand_hw for v in values_sorted]),
             "marginal_stand_hw_mean": _mean([v.marginal_stand_hw for v in values_sorted]),
+            "severe_marginal_stand_hw_mean": _mean([v.severe_marginal_stand_hw for v in values_sorted]),
             "first_blocked_step_mean": _mean([v.first_blocked_step for v in values_sorted]),
+            "first_severe_marginal_step_mean": _mean([v.first_severe_marginal_step for v in values_sorted]),
             "issues_concentrated_at_end_share": _mean(
                 [
                     (
@@ -660,9 +669,12 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         "hard_floor_phase_stand_hw_chosen_total",
         "blocked_count",
         "marginal_count",
+        "severe_marginal_count",
         "blocked_stand_hw",
         "marginal_stand_hw",
+        "severe_marginal_stand_hw",
         "first_blocked_step",
+        "first_severe_marginal_step",
         "issues_concentrated_at_end",
     ]
     print(" | ".join(headers))
@@ -680,13 +692,40 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
                     str(row.hard_floor_phase_stand_hw_chosen_total),
                     str(row.blocked_count),
                     str(row.marginal_count),
+                    str(row.severe_marginal_count),
                     str(row.blocked_stand_hw),
                     str(row.marginal_stand_hw),
+                    str(row.severe_marginal_stand_hw),
                     str(row.first_blocked_step),
+                    str(row.first_severe_marginal_step),
                     str(row.issues_concentrated_at_end),
                 ]
             )
         )
+
+    print("\nTop critical placements by marginal_severity_score")
+    for row in sorted(rows, key=lambda r: (r.run_label, r.seed)):
+        try:
+            critical = json.loads(row.critical_placements_json)
+        except Exception:
+            critical = []
+        if not isinstance(critical, list):
+            critical = []
+        ranked = sorted(
+            [item for item in critical if isinstance(item, dict)],
+            key=lambda item: float(item.get("marginal_severity_score", 0.0) or 0.0),
+            reverse=True,
+        )[:3]
+        summary = [
+            {
+                "step_index": _safe_int(item.get("step_index")),
+                "orientation_family": str(item.get("orientation_family", "planar")),
+                "accessibility_class": str(item.get("accessibility_class", "accessible")),
+                "marginal_severity_score": round(float(item.get("marginal_severity_score", 0.0) or 0.0), 3),
+            }
+            for item in ranked
+        ]
+        print(f"{row.run_label} seed={row.seed}: {json.dumps(summary, ensure_ascii=True)}")
 
 
 def run_benchmark(

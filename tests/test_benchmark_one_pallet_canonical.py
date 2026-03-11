@@ -147,12 +147,20 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                         "1": {
                             "blocked_count": 2,
                             "marginal_count": 1,
+                            "severe_marginal_count": 1,
                             "blocked_stand_hw": 1,
                             "marginal_stand_hw": 0,
+                            "severe_marginal_stand_hw": 1,
                             "first_blocked_step": 7,
+                            "first_severe_marginal_step": 8,
                             "issues_concentrated_at_end": True,
                             "critical_placements": [
-                                {"step_index": 7, "accessibility_class": "blocked", "blocked_reason_exact": "mixed"}
+                                {
+                                    "step_index": 7,
+                                    "accessibility_class": "blocked",
+                                    "blocked_reason_exact": "mixed",
+                                    "marginal_severity_score": 12.5,
+                                }
                             ],
                         }
                     },
@@ -204,10 +212,14 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["blocked_count"] == 2 for r in rows)
     assert all(r["marginal_count"] == 1 for r in rows)
+    assert all(r["severe_marginal_count"] == 1 for r in rows)
     assert all(r["blocked_stand_hw"] == 1 for r in rows)
+    assert all(r["severe_marginal_stand_hw"] == 1 for r in rows)
     assert all(r["first_blocked_step"] == 7 for r in rows)
+    assert all(r["first_severe_marginal_step"] == 8 for r in rows)
     assert all(r["issues_concentrated_at_end"] is True for r in rows)
     assert all("blocked_reason_exact" in r["critical_placements_json"] for r in rows)
+    assert all("marginal_severity_score" in r["critical_placements_json"] for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
 
@@ -250,4 +262,12 @@ def test_canonical_baseline_processed_boxes_are_stable(tmp_path: Path) -> None:
         50023: 22,
         50024: 21,
         50025: 21,
+    }
+    blocked = {int(r["seed"]): int(r["blocked_count"] or 0) for r in rows}
+    assert blocked == {
+        50021: 0,
+        50022: 0,
+        50023: 0,
+        50024: 0,
+        50025: 0,
     }

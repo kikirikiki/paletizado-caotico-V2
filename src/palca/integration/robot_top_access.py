@@ -7,6 +7,7 @@ BLOCKED_REASONS = {
     "overhead_blocked",
     "mixed",
 }
+SEVERE_MARGINAL_SCORE_THRESHOLD = 1.75
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -43,6 +44,12 @@ def _rect_intersection(
     if x1 <= x0 or y1 <= y0:
         return None
     return (int(x0), int(y0), int(x1), int(y1))
+
+
+def _segment_overlap_len(a0: int, a1: int, b0: int, b1: int) -> int:
+    lo = max(int(a0), int(b0))
+    hi = min(int(a1), int(b1))
+    return int(max(0, hi - lo))
 
 
 def _prefix_sum_2d(blocked: list[list[int]]) -> list[list[int]]:
@@ -157,6 +164,61 @@ def _largest_clear_rect_containing_target(
     return int(best_l), int(best_w), int(best_area)
 
 
+def _entry_throat_metrics(
+    *,
+    target: tuple[int, int, int, int],
+    overhead_neighbors: list[tuple[int, int, int, int]],
+    insertion_margin_mm: int,
+    tool_margin_mm: int,
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = target
+    l_mm = max(0, int(x1 - x0))
+    w_mm = max(0, int(y1 - y0))
+    probe_mm = max(10, int(insertion_margin_mm))
+    axis_expansion_mm = max(0, int(tool_margin_mm), int(math.ceil(insertion_margin_mm * 0.25)))
+
+    left_clearance_mm = int(probe_mm)
+    right_clearance_mm = int(probe_mm)
+    bottom_clearance_mm = int(probe_mm)
+    top_clearance_mm = int(probe_mm)
+
+    y_axis_min = int(y0 - axis_expansion_mm)
+    y_axis_max = int(y1 + axis_expansion_mm)
+    x_axis_min = int(x0 - axis_expansion_mm)
+    x_axis_max = int(x1 + axis_expansion_mm)
+
+    for nx0, ny0, nx1, ny1 in overhead_neighbors:
+        y_overlap = _segment_overlap_len(ny0, ny1, y_axis_min, y_axis_max)
+        x_overlap = _segment_overlap_len(nx0, nx1, x_axis_min, x_axis_max)
+
+        if y_overlap > 0:
+            if nx1 <= x0:
+                left_clearance_mm = min(int(left_clearance_mm), int(max(0, x0 - nx1)))
+            if nx0 >= x1:
+                right_clearance_mm = min(int(right_clearance_mm), int(max(0, nx0 - x1)))
+
+        if x_overlap > 0:
+            if ny1 <= y0:
+                bottom_clearance_mm = min(int(bottom_clearance_mm), int(max(0, y0 - ny1)))
+            if ny0 >= y1:
+                top_clearance_mm = min(int(top_clearance_mm), int(max(0, ny0 - y1)))
+
+    entry_throat_bbox_l_mm = int(l_mm + left_clearance_mm + right_clearance_mm)
+    entry_throat_bbox_w_mm = int(w_mm + bottom_clearance_mm + top_clearance_mm)
+    entry_throat_min_clearance_mm = int(
+        min(left_clearance_mm, right_clearance_mm, bottom_clearance_mm, top_clearance_mm)
+    )
+
+    required_clearance_mm = int(max(tool_margin_mm, math.ceil(insertion_margin_mm * 0.5)))
+    entry_clearance_margin_mm = int(entry_throat_min_clearance_mm - required_clearance_mm)
+    return (
+        int(entry_throat_bbox_l_mm),
+        int(entry_throat_bbox_w_mm),
+        int(entry_throat_min_clearance_mm),
+        int(entry_clearance_margin_mm),
+    )
+
+
 def compute_top_access_diagnostics(
     placements: Iterable[Any],
     *,
@@ -181,9 +243,13 @@ def compute_top_access_diagnostics(
             "marginal_ratio": float(ratio),
             "blocked_count": 0,
             "marginal_count": 0,
+            "severe_marginal_threshold": float(SEVERE_MARGINAL_SCORE_THRESHOLD),
+            "severe_marginal_count": 0,
             "blocked_stand_hw": 0,
             "marginal_stand_hw": 0,
+            "severe_marginal_stand_hw": 0,
             "first_blocked_step": None,
+            "first_severe_marginal_step": None,
             "issues_concentrated_at_end": False,
             "blocked_reason_counts": {},
             "per_placement": [],
@@ -248,6 +314,7 @@ def compute_top_access_diagnostics(
 
         overhead_top_z_max: int | None = None
         blockers: list[tuple[int, int, int, int]] = []
+        overhead_neighbors: list[tuple[int, int, int, int]] = []
         for prev in seq[:step]:
             px0 = _as_int(_placement_value(prev, "x_mm", 0))
             py0 = _as_int(_placement_value(prev, "y_mm", 0))
@@ -262,6 +329,7 @@ def compute_top_access_diagnostics(
                 overhead_top_z_max = int(ptop if overhead_top_z_max is None else max(overhead_top_z_max, ptop))
 
             if ptop > z_mm:
+                overhead_neighbors.append(prev_rect)
                 inter = _rect_intersection(prev_rect, zone_rect)
                 if inter is not None:
                     blockers.append(inter)
@@ -285,6 +353,17 @@ def compute_top_access_diagnostics(
         required_l_marginal_mm = int(math.ceil(required_l_mm * ratio))
         required_w_marginal_mm = int(math.ceil(required_w_mm * ratio))
         required_area_marginal_mm2 = int(math.ceil(required_area_mm2 * ratio))
+        (
+            entry_throat_bbox_l_mm,
+            entry_throat_bbox_w_mm,
+            entry_throat_min_clearance_mm,
+            entry_clearance_margin_mm,
+        ) = _entry_throat_metrics(
+            target=target_rect,
+            overhead_neighbors=overhead_neighbors,
+            insertion_margin_mm=margin_mm,
+            tool_margin_mm=tool_margin,
+        )
 
         has_hard_overhead = overhead_blocked_height_mm > 0
         meets_access_aux = (
@@ -297,12 +376,16 @@ def compute_top_access_diagnostics(
             and top_open_bbox_w_mm >= required_w_marginal_mm
             and top_open_area_mm2 >= required_area_marginal_mm2
         )
+        min_access_clearance_mm = int(max(1, tool_margin))
+        throat_tight_for_access = (
+            orientation_family == "stand_hw" and entry_throat_min_clearance_mm < min_access_clearance_mm
+        )
 
         if has_hard_overhead:
             accessibility_class = "blocked"
-        elif meets_access_aux:
+        elif meets_access_aux and (not throat_tight_for_access):
             accessibility_class = "accessible"
-        elif meets_marginal_aux:
+        elif meets_marginal_aux or throat_tight_for_access:
             accessibility_class = "marginal"
         else:
             accessibility_class = "marginal"
@@ -319,6 +402,39 @@ def compute_top_access_diagnostics(
             blocked_reason_exact = "overhead_blocked"
         else:
             blocked_reason_exact = None
+
+        late_ratio = float(step) / float(max(1, n - 1))
+        stand_hw_bonus = 0.40 if orientation_family == "stand_hw" else 0.0
+        clearance_deficit_ratio = float(max(0, -entry_clearance_margin_mm)) / float(max(1, margin_mm))
+        l_deficit_ratio = float(max(0, required_l_marginal_mm - top_open_bbox_l_mm)) / float(max(1, required_l_marginal_mm))
+        w_deficit_ratio = float(max(0, required_w_marginal_mm - top_open_bbox_w_mm)) / float(max(1, required_w_marginal_mm))
+        area_deficit_ratio = (
+            float(max(0, required_area_marginal_mm2 - top_open_area_mm2)) / float(max(1, required_area_marginal_mm2))
+        )
+        if accessibility_class == "blocked":
+            marginal_severity_score = (
+                10.0
+                + float(overhead_blocked_height_mm) / 100.0
+                + 3.0 * clearance_deficit_ratio
+                + 1.0 * l_deficit_ratio
+                + 1.0 * w_deficit_ratio
+            )
+        else:
+            marginal_severity_score = (
+                2.3 * clearance_deficit_ratio
+                + 1.0 * l_deficit_ratio
+                + 1.0 * w_deficit_ratio
+                + 0.8 * area_deficit_ratio
+                + stand_hw_bonus
+                + 0.35 * late_ratio
+            )
+            if accessibility_class == "accessible":
+                marginal_severity_score *= 0.35
+
+        is_severe_marginal = (
+            accessibility_class == "marginal"
+            and float(marginal_severity_score) >= float(SEVERE_MARGINAL_SCORE_THRESHOLD)
+        )
 
         per_placement.append(
             {
@@ -349,6 +465,12 @@ def compute_top_access_diagnostics(
                 "aux_opening_fail_narrow": bool(narrow_fail),
                 "aux_opening_fail_short": bool(short_fail),
                 "aux_opening_fail_area": bool(area_fail),
+                "entry_throat_bbox_l_mm": int(entry_throat_bbox_l_mm),
+                "entry_throat_bbox_w_mm": int(entry_throat_bbox_w_mm),
+                "entry_throat_min_clearance_mm": int(entry_throat_min_clearance_mm),
+                "entry_clearance_margin_mm": int(entry_clearance_margin_mm),
+                "marginal_severity_score": float(round(float(marginal_severity_score), 6)),
+                "is_severe_marginal": bool(is_severe_marginal),
                 "overhead_blocked_height_mm": int(overhead_blocked_height_mm),
                 "vertical_access_margin_mm": int(vertical_margin_mm),
                 "accessibility_class": str(accessibility_class),
@@ -362,9 +484,13 @@ def compute_top_access_diagnostics(
 
     blocked_count = int(len(blocked))
     marginal_count = int(len(marginal))
+    severe_marginal = [row for row in marginal if bool(row.get("is_severe_marginal"))]
+    severe_marginal_count = int(len(severe_marginal))
     blocked_stand_hw = int(sum(1 for row in blocked if str(row.get("orientation_family")) == "stand_hw"))
     marginal_stand_hw = int(sum(1 for row in marginal if str(row.get("orientation_family")) == "stand_hw"))
+    severe_marginal_stand_hw = int(sum(1 for row in severe_marginal if str(row.get("orientation_family")) == "stand_hw"))
     first_blocked_step = min((int(row["step_index"]) for row in blocked), default=None)
+    first_severe_marginal_step = min((int(row["step_index"]) for row in severe_marginal), default=None)
 
     reason_counts: dict[str, int] = {}
     for row in blocked:
@@ -378,17 +504,12 @@ def compute_top_access_diagnostics(
     issues_tail = int(sum(1 for row in issue_rows if int(row.get("step_index", -1)) >= tail_start))
     issues_concentrated_at_end = bool(issue_rows and (issues_tail / float(len(issue_rows)) >= 0.60))
 
-    def _criticality(row: dict[str, Any]) -> tuple[int, int, int, int]:
+    def _criticality(row: dict[str, Any]) -> tuple[float, int, int]:
         cls = str(row.get("accessibility_class", "accessible"))
-        cls_weight = 2 if cls == "blocked" else (1 if cls == "marginal" else 0)
-        overhead = int(row.get("overhead_blocked_height_mm", 0) or 0)
-        req_l = int(row.get("required_bbox_l_mm", 0) or 0)
-        req_w = int(row.get("required_bbox_w_mm", 0) or 0)
-        got_l = int(row.get("top_open_bbox_l_mm", 0) or 0)
-        got_w = int(row.get("top_open_bbox_w_mm", 0) or 0)
-        deficit = max(0, req_l - got_l) + max(0, req_w - got_w)
+        cls_weight = 1 if cls == "blocked" else 0
+        severity = float(row.get("marginal_severity_score", 0.0) or 0.0)
         step_idx = int(row.get("step_index", 0) or 0)
-        return (cls_weight, overhead, deficit, step_idx)
+        return (severity, cls_weight, step_idx)
 
     critical = sorted(issue_rows, key=_criticality, reverse=True)[: max(1, int(critical_limit))]
     critical_placements = [
@@ -398,9 +519,15 @@ def compute_top_access_diagnostics(
             "orientation_family": str(row.get("orientation_family", "planar")),
             "accessibility_class": str(row.get("accessibility_class", "accessible")),
             "blocked_reason_exact": row.get("blocked_reason_exact"),
+            "marginal_severity_score": float(round(float(row.get("marginal_severity_score", 0.0) or 0.0), 6)),
+            "is_severe_marginal": bool(row.get("is_severe_marginal", False)),
             "top_open_bbox_l_mm": int(row.get("top_open_bbox_l_mm", 0)),
             "top_open_bbox_w_mm": int(row.get("top_open_bbox_w_mm", 0)),
             "top_open_area_mm2": int(row.get("top_open_area_mm2", 0)),
+            "entry_throat_bbox_l_mm": int(row.get("entry_throat_bbox_l_mm", 0)),
+            "entry_throat_bbox_w_mm": int(row.get("entry_throat_bbox_w_mm", 0)),
+            "entry_throat_min_clearance_mm": int(row.get("entry_throat_min_clearance_mm", 0)),
+            "entry_clearance_margin_mm": int(row.get("entry_clearance_margin_mm", 0)),
             "overhead_blocked_height_mm": int(row.get("overhead_blocked_height_mm", 0)),
             "vertical_access_margin_mm": int(row.get("vertical_access_margin_mm", 0)),
         }
@@ -412,11 +539,17 @@ def compute_top_access_diagnostics(
         "insertion_margin_mm": int(margin_mm),
         "tool_margin_mm": int(tool_margin),
         "marginal_ratio": float(ratio),
+        "severe_marginal_threshold": float(SEVERE_MARGINAL_SCORE_THRESHOLD),
         "blocked_count": int(blocked_count),
         "marginal_count": int(marginal_count),
+        "severe_marginal_count": int(severe_marginal_count),
         "blocked_stand_hw": int(blocked_stand_hw),
         "marginal_stand_hw": int(marginal_stand_hw),
+        "severe_marginal_stand_hw": int(severe_marginal_stand_hw),
         "first_blocked_step": (None if first_blocked_step is None else int(first_blocked_step)),
+        "first_severe_marginal_step": (
+            None if first_severe_marginal_step is None else int(first_severe_marginal_step)
+        ),
         "issues_concentrated_at_end": bool(issues_concentrated_at_end),
         "blocked_reason_counts": dict(reason_counts),
         "per_placement": per_placement,
