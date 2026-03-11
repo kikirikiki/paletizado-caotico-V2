@@ -59,6 +59,9 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    enforce_active_layer_continuation_search: bool = False
+    active_layer_search_depth: int = 2
+    active_layer_search_width: int = 4
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -80,6 +83,8 @@ class SchedulerConfig:
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
+        object.__setattr__(self, "active_layer_search_depth", max(1, int(self.active_layer_search_depth)))
+        object.__setattr__(self, "active_layer_search_width", max(1, int(self.active_layer_search_width)))
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -262,6 +267,11 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.active_layer_search_invocations = 0
+        self.active_layer_search_successes = 0
+        self.active_layer_search_failures = 0
+        self.upper_layer_open_deferred_by_search = 0
+        self.active_layer_search_events: list[dict[str, Any]] = []
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -557,20 +567,16 @@ class SchedulerV1:
                     candidates=feasible_candidates,
                     min_feasible_height_after_mm=int(min_feasible_height_after_mm),
                 )
-                best_by_slack, slack_stats = choose_with_height_slack(
-                    candidates=feasible_candidates,
-                    score_mode=self.config.score_mode,
-                    height_slack_mm=int(self.config.height_slack_mm),
-                    height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
-                    gain_frag_key_fn=self._gain_frag_candidate_key,
-                )
-                if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
-                    selected = min(
-                        feasible_candidates,
-                        key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+                selected, slack_stats = self._select_scored_candidate(feasible_candidates)
+                if selected is not None:
+                    selected, slack_stats = self._apply_active_layer_continuation_search_on_scored_candidates(
+                        selected=selected,
+                        slack_stats=slack_stats,
+                        feasible_candidates=feasible_candidates,
+                        pallets=sim_state.pallets,
+                        window_boxes_by_pallet_id=window_boxes_by_pallet_id,
+                        deadline=deadline,
                     )
-                else:
-                    selected = best_by_slack
 
             if selected is not None:
                 best_plan = selected.plan
@@ -734,6 +740,12 @@ class SchedulerV1:
                                 ),
                             }
                             return chosen_plan, stats, None
+
+                    expansions = self._apply_active_layer_continuation_search_on_expansions(
+                        node=node,
+                        expansions=expansions,
+                        deadline=deadline,
+                    )
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -1025,6 +1037,368 @@ class SchedulerV1:
             return int(getattr(placement, "layer_id"))
         except (TypeError, ValueError):
             return None
+
+    def _active_layer_continuation_search_enabled(self) -> bool:
+        return bool(getattr(self.config, "enforce_active_layer_continuation_search", False))
+
+    @staticmethod
+    def _preview_base_z(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm"))
+        except Exception:
+            return None
+
+    def _active_layer_base_z(self, pallet: PalletModel) -> int | None:
+        placements = list(getattr(pallet, "placements", []) or [])
+        if not placements:
+            return None
+        base_levels: list[int] = []
+        for placement in placements:
+            try:
+                base_levels.append(int(getattr(placement, "z_mm", 0)))
+            except Exception:
+                continue
+        if not base_levels:
+            return None
+        return int(max(base_levels))
+
+    @staticmethod
+    def _candidate_objective(preview: PlacementPreview) -> float:
+        return (
+            float(preview.packing_gain)
+            - float(preview.fragmentation)
+            + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
+        )
+
+    def _select_scored_candidate(
+        self,
+        candidates: list[_ScoredCandidate],
+    ) -> tuple[_ScoredCandidate | None, SlackDecisionStats | None]:
+        if not candidates:
+            return None, None
+        best_by_slack, slack_stats = choose_with_height_slack(
+            candidates=candidates,
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+            gain_frag_key_fn=self._gain_frag_candidate_key,
+        )
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            selected = min(
+                candidates,
+                key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+            )
+            return selected, slack_stats
+        return best_by_slack, slack_stats
+
+    def _select_root_expansion(
+        self,
+        expansions: list[_BeamExpansion],
+    ) -> tuple[_BeamExpansion | None, SlackDecisionStats | None]:
+        if not expansions:
+            return None, None
+        best_by_slack, slack_stats = choose_with_height_slack(
+            candidates=expansions,
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+            gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+        )
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            selected = min(
+                expansions,
+                key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+            )
+            return selected, slack_stats
+        return best_by_slack, slack_stats
+
+    def _collect_visible_boxes_by_pallet_from_beam_ramps(
+        self,
+        ramps: Mapping[int, _BeamRampState],
+    ) -> dict[int | str, list[Box]]:
+        if not ramps:
+            return {}
+        queue_lens = {int(rid): len(state.queue) for rid, state in ramps.items()}
+        allocation = self._allocate_micro_window(queue_lens)
+        out: dict[int | str, list[Box]] = {}
+        for rid in sorted(allocation):
+            limit = int(allocation[rid])
+            if limit <= 0:
+                continue
+            for box in list(ramps[rid].queue)[:limit]:
+                pallet_id = getattr(box, "destination", None)
+                if pallet_id is None:
+                    continue
+                out.setdefault(pallet_id, []).append(box)
+        return out
+
+    def _record_active_layer_search_event(self, payload: Mapping[str, Any]) -> None:
+        if len(self.active_layer_search_events) >= 200:
+            return
+        self.active_layer_search_events.append(dict(payload))
+
+    def _search_active_layer_continuation(
+        self,
+        *,
+        pallet: PalletModel,
+        pool_boxes: Sequence[Box],
+        active_layer_base_z: int,
+        deadline: float | None,
+    ) -> tuple[bool, int, str]:
+        self.active_layer_search_invocations += 1
+        target_len = max(1, int(getattr(self.config, "active_layer_search_depth", 2) or 2))
+        beam_width = max(1, int(getattr(self.config, "active_layer_search_width", 4) or 4))
+
+        visible_boxes = list(pool_boxes)
+        if not visible_boxes:
+            self.active_layer_search_failures += 1
+            return False, 0, "no_visible_boxes"
+
+        try:
+            root_pallet = copy.deepcopy(pallet)
+        except Exception:
+            self.active_layer_search_failures += 1
+            return False, 0, "clone_failed"
+
+        beam: list[tuple[PalletModel, tuple[Box, ...], int, float]] = [
+            (root_pallet, tuple(visible_boxes), 0, 0.0),
+        ]
+        best_len = 0
+        timed_out = False
+        for _depth in range(target_len):
+            next_beam: list[tuple[PalletModel, tuple[Box, ...], int, float]] = []
+            for state_pallet, remaining_boxes, seq_len, score_sum in beam:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    timed_out = True
+                    break
+                ranked: list[tuple[float, int, Box]] = []
+                for idx, box in enumerate(remaining_boxes):
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        timed_out = True
+                        break
+                    preview = self._preview_place(state_pallet, box)
+                    if not preview.feasible:
+                        continue
+                    base_z = self._preview_base_z(preview)
+                    if base_z is None or int(base_z) != int(active_layer_base_z):
+                        continue
+                    ranked.append((self._candidate_objective(preview), int(idx), box))
+                if timed_out:
+                    break
+                if not ranked:
+                    continue
+                ranked.sort(key=lambda item: (float(item[0]), -int(item[1])), reverse=True)
+                for objective, idx, box in ranked[:beam_width]:
+                    if deadline is not None and time.perf_counter() >= deadline:
+                        timed_out = True
+                        break
+                    try:
+                        pallet_next = copy.deepcopy(state_pallet)
+                    except Exception:
+                        continue
+                    preview_next = self._preview_place(pallet_next, box)
+                    if not preview_next.feasible:
+                        continue
+                    base_z_next = self._preview_base_z(preview_next)
+                    if base_z_next is None or int(base_z_next) != int(active_layer_base_z):
+                        continue
+                    try:
+                        pallet_next.commit_place(preview_next)
+                    except Exception:
+                        continue
+
+                    remaining_next = list(remaining_boxes)
+                    if 0 <= int(idx) < len(remaining_next):
+                        remaining_next.pop(int(idx))
+                    next_len = int(seq_len) + 1
+                    next_score = float(score_sum) + float(objective)
+                    best_len = max(int(best_len), int(next_len))
+                    next_beam.append((pallet_next, tuple(remaining_next), int(next_len), float(next_score)))
+                if timed_out:
+                    break
+            if best_len >= target_len:
+                self.active_layer_search_successes += 1
+                return True, int(best_len), "target_depth_reached"
+            if timed_out:
+                break
+            if not next_beam:
+                break
+            next_beam.sort(key=lambda item: (int(item[2]), float(item[3])), reverse=True)
+            beam = next_beam[:beam_width]
+
+        if best_len >= target_len:
+            self.active_layer_search_successes += 1
+            return True, int(best_len), "target_depth_reached"
+        self.active_layer_search_failures += 1
+        if timed_out:
+            return False, int(best_len), "time_budget"
+        if best_len <= 0:
+            return False, int(best_len), "no_active_layer_candidate"
+        return False, int(best_len), "continuation_too_short"
+
+    def _apply_active_layer_continuation_search_on_scored_candidates(
+        self,
+        *,
+        selected: _ScoredCandidate,
+        slack_stats: SlackDecisionStats | None,
+        feasible_candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+        window_boxes_by_pallet_id: Mapping[int | str, Sequence[Box]],
+        deadline: float | None,
+    ) -> tuple[_ScoredCandidate, SlackDecisionStats | None]:
+        if not self._active_layer_continuation_search_enabled():
+            return selected, slack_stats
+
+        pallet_id = selected.plan.pallet_id
+        pallet = pallets.get(pallet_id)
+        if pallet is None:
+            return selected, slack_stats
+
+        active_base_z = self._active_layer_base_z(pallet)
+        selected_base_z = self._preview_base_z(selected.plan.preview)
+        if active_base_z is None or selected_base_z is None:
+            return selected, slack_stats
+        if int(selected_base_z) <= int(active_base_z):
+            return selected, slack_stats
+
+        pallet_candidates = [c for c in feasible_candidates if c.plan.pallet_id == pallet_id]
+        active_candidates = [
+            c for c in pallet_candidates if self._preview_base_z(c.plan.preview) == int(active_base_z)
+        ]
+        upper_candidates_count = sum(
+            1
+            for c in pallet_candidates
+            if (self._preview_base_z(c.plan.preview) or -1_000_000_000) > int(active_base_z)
+        )
+
+        visible_boxes = list(window_boxes_by_pallet_id.get(pallet_id, []) or [])
+        if not visible_boxes:
+            visible_boxes = [candidate.box for candidate in pallet_candidates]
+
+        found, best_len, search_reason = self._search_active_layer_continuation(
+            pallet=pallet,
+            pool_boxes=visible_boxes,
+            active_layer_base_z=int(active_base_z),
+            deadline=deadline,
+        )
+
+        deferred = False
+        selected_after = selected
+        slack_after = slack_stats
+        if found and active_candidates:
+            forced_selected, forced_slack = self._select_scored_candidate(active_candidates)
+            if forced_selected is not None:
+                selected_after = forced_selected
+                slack_after = forced_slack
+                deferred = True
+                self.upper_layer_open_deferred_by_search += 1
+
+        self._record_active_layer_search_event(
+            {
+                "mode": "greedy",
+                "pallet_id": pallet_id,
+                "attempted_upper_open": True,
+                "active_layer_base_z": int(active_base_z),
+                "selected_candidate_base_z": int(selected_base_z),
+                "active_candidates_count": int(len(active_candidates)),
+                "upper_candidates_count": int(upper_candidates_count),
+                "search_depth": int(getattr(self.config, "active_layer_search_depth", 2) or 2),
+                "search_width": int(getattr(self.config, "active_layer_search_width", 4) or 4),
+                "search_found": bool(found),
+                "continuation_len_found": int(best_len),
+                "deferred_upper_open": bool(deferred),
+                "allow_upper_reason": (None if deferred else str(search_reason)),
+            }
+        )
+        return selected_after, slack_after
+
+    def _apply_active_layer_continuation_search_on_expansions(
+        self,
+        *,
+        node: _BeamNode,
+        expansions: list[_BeamExpansion],
+        deadline: float | None,
+    ) -> list[_BeamExpansion]:
+        if not self._active_layer_continuation_search_enabled() or not expansions:
+            return expansions
+
+        selected_root, _slack_stats = self._select_root_expansion(expansions)
+        if selected_root is None:
+            return expansions
+
+        pallet_id = selected_root.box.destination
+        if pallet_id is None:
+            return expansions
+        pallet = node.pallets.get(pallet_id)
+        if pallet is None:
+            return expansions
+        selected_plan = selected_root.node.first_plan
+        if selected_plan is None:
+            return expansions
+
+        active_base_z = self._active_layer_base_z(pallet)
+        selected_base_z = self._preview_base_z(selected_plan.preview)
+        if active_base_z is None or selected_base_z is None:
+            return expansions
+        if int(selected_base_z) <= int(active_base_z):
+            return expansions
+
+        same_pallet = [exp for exp in expansions if exp.box.destination == pallet_id]
+        active_same_pallet = [
+            exp
+            for exp in same_pallet
+            if exp.node.first_plan is not None
+            and self._preview_base_z(exp.node.first_plan.preview) == int(active_base_z)
+        ]
+        upper_candidates_count = sum(
+            1
+            for exp in same_pallet
+            if exp.node.first_plan is not None
+            and (self._preview_base_z(exp.node.first_plan.preview) or -1_000_000_000) > int(active_base_z)
+        )
+
+        visible_by_pallet = self._collect_visible_boxes_by_pallet_from_beam_ramps(node.ramps)
+        visible_boxes = list(visible_by_pallet.get(pallet_id, []) or [])
+        if not visible_boxes:
+            visible_boxes = [exp.box for exp in same_pallet]
+
+        found, best_len, search_reason = self._search_active_layer_continuation(
+            pallet=pallet,
+            pool_boxes=visible_boxes,
+            active_layer_base_z=int(active_base_z),
+            deadline=deadline,
+        )
+
+        deferred = False
+        filtered = list(expansions)
+        if found and active_same_pallet:
+            filtered = list(active_same_pallet)
+            deferred = True
+            self.upper_layer_open_deferred_by_search += 1
+
+        self._record_active_layer_search_event(
+            {
+                "mode": "micro",
+                "pallet_id": pallet_id,
+                "attempted_upper_open": True,
+                "active_layer_base_z": int(active_base_z),
+                "selected_candidate_base_z": int(selected_base_z),
+                "active_candidates_count": int(len(active_same_pallet)),
+                "upper_candidates_count": int(upper_candidates_count),
+                "search_depth": int(getattr(self.config, "active_layer_search_depth", 2) or 2),
+                "search_width": int(getattr(self.config, "active_layer_search_width", 4) or 4),
+                "search_found": bool(found),
+                "continuation_len_found": int(best_len),
+                "deferred_upper_open": bool(deferred),
+                "allow_upper_reason": (None if deferred else str(search_reason)),
+            }
+        )
+        return filtered
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))

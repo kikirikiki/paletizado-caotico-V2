@@ -60,6 +60,9 @@ class PolicyConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    enforce_active_layer_continuation_search: bool = False
+    active_layer_search_depth: int = 2
+    active_layer_search_width: int = 4
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -184,6 +187,9 @@ class PolicyPackerScheduler:
         hard_floor_phase_min_base_candidates: int = 1,
         hard_floor_phase_lookahead_items: int = 8,
         hard_floor_phase_stand_mix_bonus: float = 0.0,
+        enforce_active_layer_continuation_search: bool = False,
+        active_layer_search_depth: int = 2,
+        active_layer_search_width: int = 4,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -228,6 +234,9 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
+            enforce_active_layer_continuation_search=bool(enforce_active_layer_continuation_search),
+            active_layer_search_depth=max(1, int(active_layer_search_depth)),
+            active_layer_search_width=max(1, int(active_layer_search_width)),
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -275,6 +284,9 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            enforce_active_layer_continuation_search=bool(enforce_active_layer_continuation_search),
+            active_layer_search_depth=max(1, int(active_layer_search_depth)),
+            active_layer_search_width=max(1, int(active_layer_search_width)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -750,6 +762,15 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_bonus = float(
             getattr(self._scheduler.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0
         )
+        enforce_active_layer_continuation_search = bool(
+            getattr(self._scheduler.config, "enforce_active_layer_continuation_search", False)
+        )
+        active_layer_search_depth = int(
+            getattr(self._scheduler.config, "active_layer_search_depth", 2) or 2
+        )
+        active_layer_search_width = int(
+            getattr(self._scheduler.config, "active_layer_search_width", 4) or 4
+        )
         hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
         hard_floor_phase_floor_candidates_seen_total = int(
             getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
@@ -774,6 +795,19 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+        active_layer_search_invocations = int(
+            getattr(self._scheduler, "active_layer_search_invocations", 0) or 0
+        )
+        active_layer_search_successes = int(
+            getattr(self._scheduler, "active_layer_search_successes", 0) or 0
+        )
+        active_layer_search_failures = int(
+            getattr(self._scheduler, "active_layer_search_failures", 0) or 0
+        )
+        upper_layer_open_deferred_by_search = int(
+            getattr(self._scheduler, "upper_layer_open_deferred_by_search", 0) or 0
+        )
+        active_layer_search_events = list(getattr(self._scheduler, "active_layer_search_events", []) or [])
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -801,6 +835,9 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_min_base_candidates"] = int(hard_floor_phase_min_base_candidates)
         kpis["hard_floor_phase_lookahead_items"] = int(hard_floor_phase_lookahead_items)
         kpis["hard_floor_phase_stand_mix_bonus"] = float(hard_floor_phase_stand_mix_bonus)
+        kpis["enforce_active_layer_continuation_search"] = bool(enforce_active_layer_continuation_search)
+        kpis["active_layer_search_depth"] = int(active_layer_search_depth)
+        kpis["active_layer_search_width"] = int(active_layer_search_width)
         kpis["hard_floor_phase_active_total"] = int(hard_floor_phase_active_total)
         kpis["hard_floor_phase_floor_candidates_seen_total"] = int(hard_floor_phase_floor_candidates_seen_total)
         kpis["hard_floor_phase_chosen_total"] = int(hard_floor_phase_chosen_total)
@@ -813,6 +850,13 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )
+        kpis["active_layer_search_invocations"] = int(active_layer_search_invocations)
+        kpis["active_layer_search_successes"] = int(active_layer_search_successes)
+        kpis["active_layer_search_failures"] = int(active_layer_search_failures)
+        kpis["upper_layer_open_deferred_by_search"] = int(upper_layer_open_deferred_by_search)
+        kpis["active_layer_search_events"] = [
+            dict(item) for item in active_layer_search_events if isinstance(item, dict)
+        ]
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min

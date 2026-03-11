@@ -186,6 +186,11 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert len(variant_rows) == 2
 
     assert all(r["first_stack_step"] == 2 for r in rows)
+    assert all(r["first_upper_layer_open_step"] == 2 for r in rows)
+    assert all(r["first_reentry_step"] == 3 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
+    assert all(r["throughput_final"] == r["processed_boxes"] for r in rows)
+    assert all(r["deadlock_count"] == 0 for r in rows)
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
@@ -211,4 +216,9 @@ def test_run_benchmark_generates_summary_with_expected_structure(
         csv_row = next(csv.DictReader(handle))
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
+    assert "reentries_total" in csv_row
+    assert "first_reentry_step" in csv_row
+    assert "first_upper_layer_open_step" in csv_row
+    assert "active_layer_search_invocations" in csv_row
+    assert "upper_layer_open_deferred_by_search" in csv_row
     assert "step_trace_relevant_json" in csv_row

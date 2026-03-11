@@ -221,6 +221,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bonus extra para candidatos stand_hw en suelo durante hard floor phase.",
     )
     parser.add_argument(
+        "--enforce-active-layer-continuation-search",
+        action="store_true",
+        help="Activa busqueda corta forward-only para continuar capa activa antes de abrir capa superior.",
+    )
+    parser.add_argument(
+        "--active-layer-search-depth",
+        type=int,
+        default=2,
+        help="Profundidad objetivo de la busqueda de continuacion de capa activa.",
+    )
+    parser.add_argument(
+        "--active-layer-search-width",
+        type=int,
+        default=4,
+        help="Ancho del beam local para busqueda de continuacion de capa activa.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -459,6 +476,9 @@ def run_simulation(
     hard_floor_phase_min_base_candidates: int = 1,
     hard_floor_phase_lookahead_items: int = 8,
     hard_floor_phase_stand_mix_bonus: float = 0.0,
+    enforce_active_layer_continuation_search: bool = False,
+    active_layer_search_depth: int = 2,
+    active_layer_search_width: int = 4,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -658,6 +678,9 @@ def run_simulation(
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            enforce_active_layer_continuation_search=bool(enforce_active_layer_continuation_search),
+            active_layer_search_depth=max(1, int(active_layer_search_depth)),
+            active_layer_search_width=max(1, int(active_layer_search_width)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -771,6 +794,9 @@ def run_simulation(
             "hard_floor_phase_min_base_candidates": int(max(1, int(hard_floor_phase_min_base_candidates))),
             "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
             "hard_floor_phase_stand_mix_bonus": float(max(0.0, float(hard_floor_phase_stand_mix_bonus))),
+            "enforce_active_layer_continuation_search": bool(enforce_active_layer_continuation_search),
+            "active_layer_search_depth": int(max(1, int(active_layer_search_depth))),
+            "active_layer_search_width": int(max(1, int(active_layer_search_width))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -875,6 +901,9 @@ def main() -> None:
         hard_floor_phase_min_base_candidates=int(args.hard_floor_phase_min_base_candidates),
         hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
         hard_floor_phase_stand_mix_bonus=float(args.hard_floor_phase_stand_mix_bonus),
+        enforce_active_layer_continuation_search=bool(args.enforce_active_layer_continuation_search),
+        active_layer_search_depth=int(args.active_layer_search_depth),
+        active_layer_search_width=int(args.active_layer_search_width),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
