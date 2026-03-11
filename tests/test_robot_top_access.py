@@ -39,6 +39,10 @@ def test_top_access_clean_case_accessible() -> None:
     assert per[0]["accessibility_class"] == "accessible"
     assert per[0]["top_access_clear"] is True
     assert per[0]["blocked_reason_exact"] is None
+    assert int(per[0]["entry_throat_bbox_l_mm"]) >= int(per[0]["length_mm"])
+    assert int(per[0]["entry_throat_bbox_w_mm"]) >= int(per[0]["width_mm"])
+    assert int(per[0]["entry_clearance_margin_mm"]) >= 0
+    assert float(per[0]["marginal_severity_score"]) >= 0.0
 
 
 def test_top_access_overhead_blocked_case() -> None:
@@ -91,6 +95,20 @@ def test_top_access_lateral_neighbors_without_vertical_invasion_not_blocked() ->
     assert int(row["overhead_blocked_height_mm"]) == 0
 
 
+def test_top_access_prism_free_but_throat_narrow_is_marginal() -> None:
+    seq = [
+        _placement(x_mm=100, y_mm=180, z_mm=260, length_mm=100, width_mm=160, height_mm=90),
+        _placement(x_mm=300, y_mm=180, z_mm=260, length_mm=100, width_mm=160, height_mm=90),
+        _placement(x_mm=200, y_mm=200, z_mm=200, length_mm=100, width_mm=100, height_mm=80),
+    ]
+    metrics = compute_top_access_diagnostics(seq, bin_length_mm=700, bin_width_mm=700, insertion_margin_mm=40)
+    row = metrics["per_placement"][2]
+    assert row["blocked_reason_exact"] is None
+    assert row["accessibility_class"] == "marginal"
+    assert int(row["entry_throat_min_clearance_mm"]) == 0
+    assert int(row["entry_clearance_margin_mm"]) < 0
+
+
 def test_top_access_near_pallet_edge_not_blocked_by_aux_area() -> None:
     seq = [
         _placement(x_mm=0, y_mm=0, z_mm=120, length_mm=200, width_mm=200, height_mm=100),
@@ -100,6 +118,7 @@ def test_top_access_near_pallet_edge_not_blocked_by_aux_area() -> None:
     assert row["accessibility_class"] in ("marginal", "accessible")
     assert row["blocked_reason_exact"] is None
     assert int(row["overhead_blocked_height_mm"]) == 0
+    assert int(row["entry_throat_min_clearance_mm"]) >= 0
 
 
 def test_top_access_real_vertical_prism_invasion_is_blocked() -> None:
@@ -138,6 +157,33 @@ def test_top_access_late_stand_hw_case() -> None:
     late = metrics["per_placement"][3]
     assert late["accessibility_class"] == "blocked"
     assert late["blocked_reason_exact"] == "overhead_blocked"
+
+
+def test_top_access_late_stand_hw_tight_throat_is_severe_marginal() -> None:
+    seq = [
+        _placement(x_mm=200, y_mm=100, z_mm=480, length_mm=75, width_mm=260, height_mm=120),
+        _placement(x_mm=325, y_mm=100, z_mm=480, length_mm=75, width_mm=260, height_mm=120),
+        _placement(x_mm=100, y_mm=100, z_mm=120, length_mm=180, width_mm=180, height_mm=120),
+        _placement(
+            x_mm=275,
+            y_mm=140,
+            z_mm=420,
+            length_mm=50,
+            width_mm=180,
+            height_mm=140,
+            orientation_family="stand_hw",
+        ),
+    ]
+    metrics = compute_top_access_diagnostics(seq, bin_length_mm=700, bin_width_mm=700, insertion_margin_mm=40)
+    row = metrics["per_placement"][3]
+    assert row["blocked_reason_exact"] is None
+    assert row["accessibility_class"] == "marginal"
+    assert row["orientation_family"] == "stand_hw"
+    assert bool(row["is_severe_marginal"]) is True
+    assert float(row["marginal_severity_score"]) >= float(metrics["severe_marginal_threshold"])
+    assert int(metrics["severe_marginal_count"]) >= 1
+    assert int(metrics["severe_marginal_stand_hw"]) >= 1
+    assert int(metrics["first_severe_marginal_step"]) == 3
 
 
 def test_top_access_helper_does_not_mutate_input() -> None:
