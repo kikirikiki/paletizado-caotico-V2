@@ -18,6 +18,9 @@ from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("configs/benchmarks/one_pallet_canonical.json")
+DEFAULT_EXPLAINABILITY_TOP_K = 5
+DEFAULT_EXPLAINABILITY_CANVAS_COLS = 64
+DEFAULT_EXPLAINABILITY_CANVAS_ROWS = 24
 
 RUN_SIM_EXCLUDED_PROFILE_KEYS = {
     "excel_path",
@@ -96,6 +99,11 @@ class SeedSummary:
     first_severe_marginal_step: int | None
     issues_concentrated_at_end: bool | None
     critical_placements_json: str
+    top_critical_steps_json: str
+    top_critical_orientations_json: str
+    top_critical_reasons_json: str
+    recurrent_blockers_json: str
+    explainability_exports_json: str
     layer_band_mm: int | None
     layer_band_fill_progress_json: str
     active_layers_over_time_json: str
@@ -435,6 +443,312 @@ def _select_first_pallet_top_access(
     return {}
 
 
+def _coerce_bbox(value: Any) -> tuple[int, int, int, int] | None:
+    if isinstance(value, dict):
+        keys = ("x0_mm", "y0_mm", "x1_mm", "y1_mm")
+        if all(k in value for k in keys):
+            vals = [_safe_int(value.get(k)) for k in keys]
+            if all(v is not None for v in vals):
+                x0, y0, x1, y1 = (int(vals[0]), int(vals[1]), int(vals[2]), int(vals[3]))
+                if x1 > x0 and y1 > y0:
+                    return (x0, y0, x1, y1)
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        vals = [_safe_int(v) for v in value]
+        if all(v is not None for v in vals):
+            x0, y0, x1, y1 = (int(vals[0]), int(vals[1]), int(vals[2]), int(vals[3]))
+            if x1 > x0 and y1 > y0:
+                return (x0, y0, x1, y1)
+    return None
+
+
+def _bbox_union(a: tuple[int, int, int, int] | None, b: tuple[int, int, int, int] | None) -> tuple[int, int, int, int] | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return (
+        int(min(a[0], b[0])),
+        int(min(a[1], b[1])),
+        int(max(a[2], b[2])),
+        int(max(a[3], b[3])),
+    )
+
+
+def _criticality_key(item: dict[str, Any]) -> tuple[float, int, int]:
+    severity = float(item.get("marginal_severity_score", 0.0) or 0.0)
+    cls = str(item.get("accessibility_class", "accessible"))
+    cls_weight = 1 if cls == "blocked" else 0
+    step_idx = _safe_int(item.get("step_index")) or 0
+    return (severity, cls_weight, step_idx)
+
+
+def _select_top_critical_placements(top_access: dict[str, Any], *, top_k: int) -> list[dict[str, Any]]:
+    limit = max(1, int(top_k))
+    per_placement = top_access.get("per_placement")
+    if isinstance(per_placement, list):
+        issue_rows = [
+            item
+            for item in per_placement
+            if isinstance(item, dict)
+            and str(item.get("accessibility_class", "accessible")) in ("blocked", "marginal")
+        ]
+        ranked = sorted(issue_rows, key=_criticality_key, reverse=True)
+        return ranked[:limit]
+
+    critical = top_access.get("critical_placements")
+    if isinstance(critical, list):
+        ranked = sorted([item for item in critical if isinstance(item, dict)], key=_criticality_key, reverse=True)
+        return ranked[:limit]
+    return []
+
+
+def _summarize_top_critical_placements(top_critical: list[dict[str, Any]]) -> dict[str, Any]:
+    steps = [_safe_int(item.get("step_index")) for item in top_critical]
+    top_critical_steps = [int(v) for v in steps if v is not None]
+    top_critical_orientations = [
+        str(item.get("orientation_family", "planar"))
+        for item in top_critical
+    ]
+    top_critical_reasons = []
+    for item in top_critical:
+        reason = item.get("throat_source_reason")
+        if reason in (None, ""):
+            reason = item.get("blocked_reason_exact")
+        if reason in (None, ""):
+            reason = "unspecified"
+        top_critical_reasons.append(str(reason))
+
+    blocker_counts: dict[tuple[int | None, str], int] = {}
+    for item in top_critical:
+        local_blockers = item.get("local_blockers", [])
+        if not isinstance(local_blockers, list):
+            continue
+        for blocker in local_blockers:
+            if not isinstance(blocker, dict):
+                continue
+            blocker_step = _safe_int(blocker.get("step_index"))
+            blocker_orientation = str(blocker.get("orientation_family", "planar"))
+            key = (blocker_step, blocker_orientation)
+            blocker_counts[key] = int(blocker_counts.get(key, 0) + 1)
+
+    recurrent_blockers = [
+        {
+            "blocker_step": (None if step is None else int(step)),
+            "blocker_orientation": str(orientation),
+            "hits": int(hits),
+        }
+        for (step, orientation), hits in sorted(
+            blocker_counts.items(),
+            key=lambda item: (
+                -int(item[1]),
+                -(int(item[0][0]) if item[0][0] is not None else -1),
+                str(item[0][1]),
+            ),
+        )
+    ]
+
+    return {
+        "top_critical_steps": top_critical_steps,
+        "top_critical_orientations": top_critical_orientations,
+        "top_critical_reasons": top_critical_reasons,
+        "recurrent_blockers": recurrent_blockers,
+    }
+
+
+def _sanitize_name_token(value: Any) -> str:
+    raw = str(value if value is not None else "na").strip().lower()
+    out = []
+    for ch in raw:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            out.append(ch)
+        else:
+            out.append("_")
+    clean = "".join(out).strip("_")
+    return clean or "na"
+
+
+def _draw_rect_ascii(
+    canvas: list[list[str]],
+    *,
+    rect: tuple[int, int, int, int] | None,
+    view: tuple[int, int, int, int],
+    char: str,
+    fill: bool,
+) -> None:
+    if rect is None:
+        return
+    vx0, vy0, vx1, vy1 = view
+    width = len(canvas[0]) if canvas else 0
+    height = len(canvas)
+    if width <= 0 or height <= 0 or vx1 <= vx0 or vy1 <= vy0:
+        return
+
+    def _x_to_col(x_mm: int) -> int:
+        ratio = (float(x_mm) - float(vx0)) / float(max(1, vx1 - vx0))
+        ratio = max(0.0, min(1.0, ratio))
+        return int(round(ratio * float(width - 1)))
+
+    def _y_to_row(y_mm: int) -> int:
+        ratio = (float(y_mm) - float(vy0)) / float(max(1, vy1 - vy0))
+        ratio = max(0.0, min(1.0, ratio))
+        return int(round(ratio * float(height - 1)))
+
+    x0, y0, x1, y1 = rect
+    c0 = _x_to_col(int(x0))
+    c1 = _x_to_col(int(x1))
+    r0 = _y_to_row(int(y0))
+    r1 = _y_to_row(int(y1))
+    lo_c, hi_c = sorted((c0, c1))
+    lo_r, hi_r = sorted((r0, r1))
+
+    if fill:
+        for row in range(lo_r, hi_r + 1):
+            for col in range(lo_c, hi_c + 1):
+                canvas[row][col] = char
+        return
+
+    for col in range(lo_c, hi_c + 1):
+        canvas[lo_r][col] = char
+        canvas[hi_r][col] = char
+    for row in range(lo_r, hi_r + 1):
+        canvas[row][lo_c] = char
+        canvas[row][hi_c] = char
+
+
+def _render_local_top_view_ascii(placement: dict[str, Any]) -> str:
+    target = _coerce_bbox(placement.get("target_footprint_mm"))
+    hard = _coerce_bbox(placement.get("target_hard_prism_mm"))
+    throat = _coerce_bbox(placement.get("entry_throat_bbox_mm"))
+    zone = _coerce_bbox(placement.get("analysis_zone_mm"))
+    pallet = _coerce_bbox(placement.get("pallet_bounds_mm"))
+
+    blockers_raw = placement.get("local_blockers", [])
+    blockers: list[tuple[int, int, int, int]] = []
+    if isinstance(blockers_raw, list):
+        for item in blockers_raw:
+            if not isinstance(item, dict):
+                continue
+            bbox = _coerce_bbox(item.get("blocker_local_footprint_mm")) or _coerce_bbox(item.get("blocker_bbox_mm"))
+            if bbox is not None:
+                blockers.append(bbox)
+
+    view = zone
+    if view is None:
+        for bbox in [pallet, throat, hard, target, *blockers]:
+            view = _bbox_union(view, bbox)
+    if view is None:
+        return "No local geometry available"
+
+    pad_mm = 10
+    view = (
+        int(view[0] - pad_mm),
+        int(view[1] - pad_mm),
+        int(view[2] + pad_mm),
+        int(view[3] + pad_mm),
+    )
+
+    canvas = [
+        [" " for _ in range(DEFAULT_EXPLAINABILITY_CANVAS_COLS)]
+        for _ in range(DEFAULT_EXPLAINABILITY_CANVAS_ROWS)
+    ]
+    _draw_rect_ascii(canvas, rect=pallet, view=view, char="P", fill=False)
+    _draw_rect_ascii(canvas, rect=zone, view=view, char=".", fill=False)
+    _draw_rect_ascii(canvas, rect=hard, view=view, char="H", fill=False)
+    _draw_rect_ascii(canvas, rect=throat, view=view, char="G", fill=False)
+    _draw_rect_ascii(canvas, rect=target, view=view, char="T", fill=True)
+
+    blocker_chars = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for idx, blocker in enumerate(blockers):
+        marker = blocker_chars[idx % len(blocker_chars)]
+        _draw_rect_ascii(canvas, rect=blocker, view=view, char=marker, fill=True)
+
+    lines = ["".join(row) for row in canvas]
+    legend = [
+        "",
+        f"view_bbox_mm={view}",
+        f"pallet_bounds_mm={pallet}",
+        f"analysis_zone_mm={zone}",
+        f"target_footprint_mm={target}",
+        f"hard_prism_mm={hard}",
+        f"entry_throat_bbox_mm={throat}",
+        "legend: P=pallet border, .=analysis zone, H=hard prism, G=throat bbox, T=target, 1..=blockers",
+    ]
+    return "\n".join(lines + legend)
+
+
+def _export_top_access_explainability(
+    *,
+    run_label: str,
+    seed: int,
+    run_dir: Path,
+    top_access: dict[str, Any],
+    top_k: int,
+) -> dict[str, Any]:
+    top_critical = _select_top_critical_placements(top_access, top_k=top_k)
+    export_dir = run_dir / f"seed_{int(seed)}_top_access_explainability"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    exports: list[dict[str, Any]] = []
+    for rank, item in enumerate(top_critical, start=1):
+        step_idx = _safe_int(item.get("step_index"))
+        orientation = str(item.get("orientation_family", "planar"))
+        step_token = "na" if step_idx is None else str(int(step_idx))
+        orientation_token = _sanitize_name_token(orientation)
+        stem = f"critical_{rank:02d}_step_{step_token}_{orientation_token}"
+
+        export_payload = {
+            "run_label": str(run_label),
+            "seed": int(seed),
+            "rank": int(rank),
+            "step_index": (None if step_idx is None else int(step_idx)),
+            "orientation_family": str(orientation),
+            "accessibility_class": str(item.get("accessibility_class", "accessible")),
+            "marginal_severity_score": float(item.get("marginal_severity_score", 0.0) or 0.0),
+            "blocked_reason_exact": item.get("blocked_reason_exact"),
+            "throat_source_reason": item.get("throat_source_reason"),
+            "limiting_axis": item.get("limiting_axis"),
+            "limiting_clearance_mm": _safe_int(item.get("limiting_clearance_mm")),
+            "nearest_blocker_step": _safe_int(item.get("nearest_blocker_step")),
+            "nearest_blocker_orientation": item.get("nearest_blocker_orientation"),
+            "pallet_bounds_mm": item.get("pallet_bounds_mm"),
+            "analysis_zone_mm": item.get("analysis_zone_mm"),
+            "target_footprint_mm": item.get("target_footprint_mm"),
+            "target_hard_prism_mm": item.get("target_hard_prism_mm"),
+            "entry_throat_bbox_mm": item.get("entry_throat_bbox_mm"),
+            "entry_throat_clearances_mm": item.get("entry_throat_clearances_mm"),
+            "local_blockers": [
+                blocker
+                for blocker in item.get("local_blockers", [])
+                if isinstance(blocker, dict)
+            ]
+            if isinstance(item.get("local_blockers", []), list)
+            else [],
+        }
+
+        json_path = export_dir / f"{stem}.json"
+        json_path.write_text(json.dumps(export_payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+        ascii_path = export_dir / f"{stem}.txt"
+        ascii_path.write_text(_render_local_top_view_ascii(item), encoding="utf-8")
+
+        exports.append(
+            {
+                "rank": int(rank),
+                "step_index": (None if step_idx is None else int(step_idx)),
+                "orientation_family": str(orientation),
+                "json": str(json_path),
+                "ascii": str(ascii_path),
+            }
+        )
+
+    return {
+        "enabled": True,
+        "top_k": int(max(1, int(top_k))),
+        "export_dir": str(export_dir),
+        "exports_count": int(len(exports)),
+        "exports": exports,
+    }
+
+
 def run_seed(
     *,
     run_label: str,
@@ -443,6 +757,8 @@ def run_seed(
     params: dict[str, Any],
     effective_config_hash: str,
     run_dir: Path,
+    export_top_access_explainability: bool = False,
+    explainability_top_k: int = DEFAULT_EXPLAINABILITY_TOP_K,
 ) -> SeedSummary:
     run_dir.mkdir(parents=True, exist_ok=True)
     out_json_path = run_dir / f"seed_{int(seed)}.json"
@@ -483,6 +799,7 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    top_access = top_access if isinstance(top_access, dict) else {}
 
     max_z_series = mono.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -506,6 +823,26 @@ def run_seed(
         if isinstance(critical_placements, list)
         else []
     )
+    top_critical = _select_top_critical_placements(
+        top_access,
+        top_k=max(1, int(explainability_top_k)),
+    )
+    top_critical_summary = _summarize_top_critical_placements(top_critical)
+    explainability_exports = {
+        "enabled": False,
+        "top_k": int(max(1, int(explainability_top_k))),
+        "export_dir": None,
+        "exports_count": 0,
+        "exports": [],
+    }
+    if export_top_access_explainability:
+        explainability_exports = _export_top_access_explainability(
+            run_label=run_label,
+            seed=int(seed),
+            run_dir=run_dir,
+            top_access=top_access,
+            top_k=max(1, int(explainability_top_k)),
+        )
 
     return SeedSummary(
         run_label=run_label,
@@ -542,6 +879,14 @@ def run_seed(
             else None
         ),
         critical_placements_json=json.dumps(clean_critical_placements, ensure_ascii=True),
+        top_critical_steps_json=json.dumps(top_critical_summary.get("top_critical_steps", []), ensure_ascii=True),
+        top_critical_orientations_json=json.dumps(
+            top_critical_summary.get("top_critical_orientations", []),
+            ensure_ascii=True,
+        ),
+        top_critical_reasons_json=json.dumps(top_critical_summary.get("top_critical_reasons", []), ensure_ascii=True),
+        recurrent_blockers_json=json.dumps(top_critical_summary.get("recurrent_blockers", []), ensure_ascii=True),
+        explainability_exports_json=json.dumps(explainability_exports, ensure_ascii=True),
         layer_band_mm=_safe_int(mono.get("layer_band_mm")),
         layer_band_fill_progress_json=json.dumps(mono.get("layer_band_fill_progress", []), ensure_ascii=True),
         active_layers_over_time_json=json.dumps(
@@ -726,6 +1071,29 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
             for item in ranked
         ]
         print(f"{row.run_label} seed={row.seed}: {json.dumps(summary, ensure_ascii=True)}")
+        try:
+            top_steps = json.loads(row.top_critical_steps_json)
+        except Exception:
+            top_steps = []
+        try:
+            top_orientations = json.loads(row.top_critical_orientations_json)
+        except Exception:
+            top_orientations = []
+        try:
+            top_reasons = json.loads(row.top_critical_reasons_json)
+        except Exception:
+            top_reasons = []
+        try:
+            recurrent_blockers = json.loads(row.recurrent_blockers_json)
+        except Exception:
+            recurrent_blockers = []
+        print(
+            f"{row.run_label} seed={row.seed} explainability: "
+            f"top_critical_steps={json.dumps(top_steps, ensure_ascii=True)} "
+            f"top_critical_orientations={json.dumps(top_orientations, ensure_ascii=True)} "
+            f"top_critical_reasons={json.dumps(top_reasons, ensure_ascii=True)} "
+            f"recurrent_blockers={json.dumps(recurrent_blockers[:5], ensure_ascii=True)}"
+        )
 
 
 def run_benchmark(
@@ -736,6 +1104,8 @@ def run_benchmark(
     set_overrides: list[str] | None = None,
     seeds_override: list[int] | None = None,
     variant_name: str = "variant",
+    export_top_access_explainability: bool = False,
+    explainability_top_k: int = DEFAULT_EXPLAINABILITY_TOP_K,
 ) -> dict[str, Any]:
     profile = load_profile(profile_path)
 
@@ -811,6 +1181,8 @@ def run_benchmark(
                 params=params,
                 effective_config_hash=str(effective_hash),
                 run_dir=run_output_dir / run_label,
+                export_top_access_explainability=bool(export_top_access_explainability),
+                explainability_top_k=max(1, int(explainability_top_k)),
             )
             rows.append(row)
 
@@ -869,6 +1241,10 @@ def run_benchmark(
             "missing_required_in_profile": baseline_missing_params,
             "unknown_in_profile": baseline_unknown_params,
             "variant_override_keys": sorted(merged_variant_overrides.keys()),
+        },
+        "top_access_explainability": {
+            "enabled": bool(export_top_access_explainability),
+            "top_k": int(max(1, int(explainability_top_k))),
         },
         "aggregates": aggregates,
         "discriminative": discriminative,
@@ -934,6 +1310,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional seed override list. Defaults to profile seeds.",
     )
+    parser.add_argument(
+        "--export-top-access-explainability",
+        action="store_true",
+        help="Export JSON+ASCII local explainability for top critical placements per seed.",
+    )
+    parser.add_argument(
+        "--explainability-top-k",
+        type=int,
+        default=DEFAULT_EXPLAINABILITY_TOP_K,
+        help=f"Top-K critical placements exported per seed (default: {DEFAULT_EXPLAINABILITY_TOP_K}).",
+    )
     return parser
 
 
@@ -946,6 +1333,8 @@ def main(argv: list[str] | None = None) -> int:
         set_overrides=list(args.set or []),
         seeds_override=(list(args.seeds) if args.seeds else None),
         variant_name=str(args.variant_name),
+        export_top_access_explainability=bool(args.export_top_access_explainability),
+        explainability_top_k=max(1, int(args.explainability_top_k)),
     )
     return 0
 
