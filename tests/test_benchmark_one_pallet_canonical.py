@@ -232,6 +232,8 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert summary["discriminative"]["variant"]["is_flat_processed_boxes"] is False
     assert summary["runs"]["baseline"]["effective_params"]["lookahead_k"] == 15
     assert summary["runs"]["variant"]["effective_params"]["lookahead_k"] == 10
+    assert summary["top_access_explainability"]["enabled"] is False
+    assert int(summary["top_access_explainability"]["top_k"]) == bench.DEFAULT_EXPLAINABILITY_TOP_K
 
     summary_csv = Path(summary["files"]["summary_csv"])
     summary_json = Path(summary["files"]["summary_json"])
@@ -243,6 +245,156 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+    assert "top_critical_steps_json" in csv_row
+    assert "top_critical_orientations_json" in csv_row
+    assert "top_critical_reasons_json" in csv_row
+    assert "recurrent_blockers_json" in csv_row
+    assert "explainability_exports_json" in csv_row
+    parsed_steps = json.loads(csv_row["top_critical_steps_json"])
+    assert parsed_steps == [7]
+
+
+def test_run_benchmark_exports_top_access_explainability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_simulation(**kwargs):
+        out_path = Path(str(kwargs["out_path"]))
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+        payload = {
+            "metrics": {
+                "processed_boxes": 21,
+                "pallet_kpis": {
+                    "layer_monotonicity_first_pallet_by_dest": {"1": {"active_layers_over_time": [1, 1, 2]}},
+                    "top_access_first_pallet_by_dest": {
+                        "1": {
+                            "blocked_count": 1,
+                            "marginal_count": 1,
+                            "severe_marginal_count": 1,
+                            "blocked_stand_hw": 1,
+                            "marginal_stand_hw": 0,
+                            "severe_marginal_stand_hw": 1,
+                            "first_blocked_step": 7,
+                            "first_severe_marginal_step": 8,
+                            "issues_concentrated_at_end": True,
+                            "per_placement": [
+                                {
+                                    "step_index": 7,
+                                    "orientation_family": "stand_hw",
+                                    "accessibility_class": "blocked",
+                                    "blocked_reason_exact": "overhead_blocked",
+                                    "marginal_severity_score": 12.5,
+                                    "throat_source_reason": "overhead_prism_overlap",
+                                    "limiting_axis": "z_overhead",
+                                    "limiting_clearance_mm": -50,
+                                    "nearest_blocker_step": 4,
+                                    "nearest_blocker_orientation": "stand_hw",
+                                    "pallet_bounds_mm": {"x0_mm": 0, "y0_mm": 0, "x1_mm": 700, "y1_mm": 700},
+                                    "analysis_zone_mm": {"x0_mm": 120, "y0_mm": 120, "x1_mm": 380, "y1_mm": 380},
+                                    "target_footprint_mm": {"x0_mm": 200, "y0_mm": 200, "x1_mm": 300, "y1_mm": 300},
+                                    "target_hard_prism_mm": {"x0_mm": 195, "y0_mm": 195, "x1_mm": 305, "y1_mm": 305},
+                                    "entry_throat_bbox_mm": {"x0_mm": 180, "y0_mm": 180, "x1_mm": 320, "y1_mm": 320},
+                                    "entry_throat_clearances_mm": {
+                                        "left_mm": 20,
+                                        "right_mm": 20,
+                                        "bottom_mm": 20,
+                                        "top_mm": 20,
+                                    },
+                                    "local_blockers": [
+                                        {
+                                            "step_index": 4,
+                                            "orientation_family": "stand_hw",
+                                            "blocker_bbox_mm": {"x0_mm": 240, "y0_mm": 180, "x1_mm": 330, "y1_mm": 330},
+                                            "blocker_local_footprint_mm": {
+                                                "x0_mm": 240,
+                                                "y0_mm": 180,
+                                                "x1_mm": 330,
+                                                "y1_mm": 330,
+                                            },
+                                        }
+                                    ],
+                                },
+                                {
+                                    "step_index": 8,
+                                    "orientation_family": "planar",
+                                    "accessibility_class": "marginal",
+                                    "blocked_reason_exact": None,
+                                    "marginal_severity_score": 2.8,
+                                    "throat_source_reason": "entry_throat_left_limited",
+                                    "limiting_axis": "left",
+                                    "limiting_clearance_mm": 5,
+                                    "nearest_blocker_step": 6,
+                                    "nearest_blocker_orientation": "planar",
+                                    "pallet_bounds_mm": {"x0_mm": 0, "y0_mm": 0, "x1_mm": 700, "y1_mm": 700},
+                                    "analysis_zone_mm": {"x0_mm": 100, "y0_mm": 100, "x1_mm": 360, "y1_mm": 360},
+                                    "target_footprint_mm": {"x0_mm": 180, "y0_mm": 180, "x1_mm": 280, "y1_mm": 280},
+                                    "target_hard_prism_mm": {"x0_mm": 175, "y0_mm": 175, "x1_mm": 285, "y1_mm": 285},
+                                    "entry_throat_bbox_mm": {"x0_mm": 160, "y0_mm": 170, "x1_mm": 295, "y1_mm": 295},
+                                    "entry_throat_clearances_mm": {
+                                        "left_mm": 20,
+                                        "right_mm": 15,
+                                        "bottom_mm": 10,
+                                        "top_mm": 15,
+                                    },
+                                    "local_blockers": [
+                                        {
+                                            "step_index": 6,
+                                            "orientation_family": "planar",
+                                            "blocker_bbox_mm": {"x0_mm": 130, "y0_mm": 170, "x1_mm": 175, "y1_mm": 285},
+                                            "blocker_local_footprint_mm": {
+                                                "x0_mm": 130,
+                                                "y0_mm": 170,
+                                                "x1_mm": 175,
+                                                "y1_mm": 285,
+                                            },
+                                        }
+                                    ],
+                                },
+                            ],
+                            "critical_placements": [
+                                {
+                                    "step_index": 7,
+                                    "orientation_family": "stand_hw",
+                                    "accessibility_class": "blocked",
+                                    "blocked_reason_exact": "overhead_blocked",
+                                    "marginal_severity_score": 12.5,
+                                }
+                            ],
+                        }
+                    },
+                },
+            }
+        }
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps({"pallets": {"1": [{"step_index": 0, "z_mm": 0, "layer_id": 0}]}}), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+
+    summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_export",
+        seeds_override=[50021],
+        export_top_access_explainability=True,
+        explainability_top_k=2,
+    )
+
+    assert summary["top_access_explainability"]["enabled"] is True
+    assert int(summary["top_access_explainability"]["top_k"]) == 2
+    rows = summary["rows"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert json.loads(row["top_critical_steps_json"]) == [7, 8]
+    blockers = json.loads(row["recurrent_blockers_json"])
+    assert blockers
+    assert int(blockers[0]["hits"]) >= 1
+    exports = json.loads(row["explainability_exports_json"])
+    assert exports["enabled"] is True
+    assert int(exports["exports_count"]) == 2
+    export_dir = Path(str(exports["export_dir"]))
+    assert export_dir.exists()
+    for item in exports["exports"]:
+        assert Path(item["json"]).exists()
+        assert Path(item["ascii"]).exists()
 
 
 @pytest.mark.slow
@@ -252,6 +404,8 @@ def test_canonical_baseline_processed_boxes_are_stable(tmp_path: Path) -> None:
         outdir=tmp_path / "canonical_stability",
         seeds_override=[50021, 50022, 50023, 50024, 50025],
         variant_name="variant",
+        export_top_access_explainability=True,
+        explainability_top_k=3,
     )
 
     rows = [r for r in summary["rows"] if r["run_label"] == "baseline"]
@@ -271,3 +425,6 @@ def test_canonical_baseline_processed_boxes_are_stable(tmp_path: Path) -> None:
         50024: 0,
         50025: 0,
     }
+    for row in rows:
+        exports = json.loads(row["explainability_exports_json"])
+        assert exports["enabled"] is True
