@@ -212,3 +212,87 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+    assert summary["future_window_audit"]["enabled"] is False
+
+
+def test_run_benchmark_future_window_audit_exports_and_keeps_processed_boxes_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_simulation(**kwargs):
+        seed = int(kwargs["episode_seed"])
+        out_path = Path(str(kwargs["out_path"]))
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+
+        payload = {
+            "metrics": {
+                "processed_boxes": seed,
+                "pallet_kpis": {
+                    "layer_monotonicity_first_pallet_by_dest": {"1": {}},
+                },
+            }
+        }
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        dump_payload = {
+            "pallets": {
+                "1": [
+                    {"step_index": 0, "layer_id": 0, "z_mm": 0, "length_mm": 600, "width_mm": 400, "height_mm": 300},
+                    {"step_index": 1, "layer_id": 1, "z_mm": 300, "length_mm": 500, "width_mm": 300, "height_mm": 200},
+                    {"step_index": 2, "layer_id": 1, "z_mm": 300, "length_mm": 500, "width_mm": 300, "height_mm": 200},
+                    {"step_index": 3, "layer_id": 0, "z_mm": 0, "length_mm": 600, "width_mm": 400, "height_mm": 300},
+                    {"step_index": 4, "layer_id": 1, "z_mm": 300, "length_mm": 500, "width_mm": 300, "height_mm": 200},
+                ]
+            }
+        }
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps(dump_payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+
+    baseline = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "no_audit",
+        seeds_override=[50021, 50022],
+    )
+    with_audit = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "with_audit",
+        seeds_override=[50021, 50022],
+        future_window_audit=True,
+        future_horizons=[5, 10, 15],
+    )
+
+    baseline_rows = sorted(
+        [(int(r["seed"]), int(r["processed_boxes"])) for r in baseline["rows"] if r["run_label"] == "baseline"]
+    )
+    audit_rows = sorted(
+        [(int(r["seed"]), int(r["processed_boxes"])) for r in with_audit["rows"] if r["run_label"] == "baseline"]
+    )
+    assert baseline_rows == [(50021, 50021), (50022, 50022)]
+    assert audit_rows == baseline_rows
+
+    audit_files = with_audit["future_window_audit"]["files"]
+    summary_csv = Path(audit_files["future_window_audit_summary_csv"])
+    events_csv = Path(audit_files["future_window_audit_events_csv"])
+    summary_json = Path(audit_files["future_window_audit_summary_json"])
+    assert summary_csv.exists()
+    assert events_csv.exists()
+    assert summary_json.exists()
+
+    with events_csv.open("r", encoding="utf-8") as handle:
+        event_row = next(csv.DictReader(handle))
+    assert "future_same_layer_candidate_exists_at_h5" in event_row
+    assert "future_same_layer_candidate_exists_at_h10" in event_row
+    assert "future_same_layer_candidate_exists_at_h15" in event_row
+    assert "min_future_offset_to_same_layer_candidate" in event_row
+
+    with summary_csv.open("r", encoding="utf-8") as handle:
+        seed_row = next(csv.DictReader(handle))
+    assert "upper_open_events_total" in seed_row
+    assert "reentry_events_total" in seed_row
+    assert "explainable_reentries_h5" in seed_row
+    assert "explainable_reentries_h10" in seed_row
+    assert "explainable_reentries_h15" in seed_row
