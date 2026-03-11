@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from palca.integration.future_window_audit import (
+    DEFAULT_FUTURE_HORIZONS,
+    audit_future_window_continuation,
+    normalize_horizons,
+)
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -602,6 +607,73 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         )
 
 
+def _csv_fieldnames(
+    rows: list[dict[str, Any]],
+    *,
+    preferred_prefix: list[str] | None = None,
+) -> list[str]:
+    keys: set[str] = set()
+    for row in rows:
+        keys.update(str(k) for k in row.keys())
+    ordered: list[str] = []
+    for key in preferred_prefix or []:
+        if key in keys and key not in ordered:
+            ordered.append(key)
+    for key in sorted(keys):
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def _to_csv_scalar(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=True)
+    return value
+
+
+def _write_dict_rows_csv(
+    path: Path,
+    rows: list[dict[str, Any]],
+    *,
+    preferred_prefix: list[str] | None = None,
+) -> None:
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fieldnames = _csv_fieldnames(rows, preferred_prefix=preferred_prefix)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: _to_csv_scalar(row.get(k)) for k in fieldnames})
+
+
+def _print_future_window_audit_table(
+    rows: list[dict[str, Any]],
+    *,
+    horizons: list[int],
+) -> None:
+    if not rows:
+        return
+    headers = ["run", "seed", "upper_open_events_total", "reentry_events_total"]
+    for h in horizons:
+        headers.append(f"explainable_reentries_h{int(h)}")
+    headers.append("mean_min_future_offset")
+    print(" | ".join(headers))
+    print("-" * 120)
+    for row in sorted(rows, key=lambda r: (str(r.get("run_label", "")), int(r.get("seed", 0)))):
+        values: list[str] = [
+            str(row.get("run_label")),
+            str(row.get("seed")),
+            str(row.get("upper_open_events_total")),
+            str(row.get("reentry_events_total")),
+        ]
+        for h in horizons:
+            values.append(str(row.get(f"explainable_reentries_h{int(h)}")))
+        values.append(str(row.get("mean_min_future_offset")))
+        print(" | ".join(values))
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -610,6 +682,8 @@ def run_benchmark(
     set_overrides: list[str] | None = None,
     seeds_override: list[int] | None = None,
     variant_name: str = "variant",
+    future_window_audit: bool = False,
+    future_horizons: list[int] | None = None,
 ) -> dict[str, Any]:
     profile = load_profile(profile_path)
 
@@ -670,6 +744,9 @@ def run_benchmark(
     run_output_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[SeedSummary] = []
+    audit_event_rows: list[dict[str, Any]] = []
+    audit_seed_rows: list[dict[str, Any]] = []
+    audit_horizons = normalize_horizons(future_horizons) if future_window_audit else []
     runs: list[tuple[str, str, dict[str, Any], str]] = [
         ("baseline", baseline_excel, baseline_params, baseline_hash),
     ]
@@ -687,6 +764,31 @@ def run_benchmark(
                 run_dir=run_output_dir / run_label,
             )
             rows.append(row)
+            if future_window_audit:
+                forced_destination = _safe_int(params.get("force_destination"))
+                placements = _extract_placement_sequence(
+                    Path(row.placements_json),
+                    forced_destination=forced_destination,
+                )
+                audit_payload = audit_future_window_continuation(
+                    placements,
+                    horizons=audit_horizons,
+                    layer_band_mm=(int(row.layer_band_mm) if row.layer_band_mm is not None else 100),
+                )
+                seed_row = dict(audit_payload.get("summary", {}))
+                seed_row["run_label"] = str(run_label)
+                seed_row["seed"] = int(seed)
+                audit_seed_rows.append(seed_row)
+
+                for event in audit_payload.get("events", []):
+                    if not isinstance(event, dict):
+                        continue
+                    event_row = {
+                        "run_label": str(run_label),
+                        "seed": int(seed),
+                    }
+                    event_row.update(dict(event))
+                    audit_event_rows.append(event_row)
 
     rows_sorted = sorted(rows, key=lambda r: (r.run_label, r.seed))
 
@@ -751,7 +853,64 @@ def run_benchmark(
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
         },
+        "future_window_audit": {
+            "enabled": bool(future_window_audit),
+            "horizons": [int(v) for v in audit_horizons] if future_window_audit else [],
+        },
     }
+
+    if future_window_audit:
+        audit_summary_json_path = run_output_dir / "future_window_audit_summary.json"
+        audit_summary_csv_path = run_output_dir / "future_window_audit_summary.csv"
+        audit_events_csv_path = run_output_dir / "future_window_audit_events.csv"
+
+        _write_dict_rows_csv(
+            audit_summary_csv_path,
+            audit_seed_rows,
+            preferred_prefix=["run_label", "seed"],
+        )
+        _write_dict_rows_csv(
+            audit_events_csv_path,
+            audit_event_rows,
+            preferred_prefix=[
+                "run_label",
+                "seed",
+                "event_idx",
+                "event_type",
+                "event_step",
+                "active_layer_idx",
+            ],
+        )
+
+        audit_summary_payload = {
+            "schema_version": 1,
+            "horizons": [int(v) for v in audit_horizons],
+            "seed_rows": audit_seed_rows,
+            "event_rows_count": int(len(audit_event_rows)),
+            "files": {
+                "future_window_audit_summary_csv": str(audit_summary_csv_path),
+                "future_window_audit_events_csv": str(audit_events_csv_path),
+            },
+        }
+        audit_summary_json_path.write_text(
+            json.dumps(audit_summary_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+        summary_payload["future_window_audit"] = {
+            "enabled": True,
+            "horizons": [int(v) for v in audit_horizons],
+            "seed_rows": audit_seed_rows,
+            "event_rows_count": int(len(audit_event_rows)),
+            "files": {
+                "future_window_audit_summary_json": str(audit_summary_json_path),
+                "future_window_audit_summary_csv": str(audit_summary_csv_path),
+                "future_window_audit_events_csv": str(audit_events_csv_path),
+            },
+        }
+        summary_payload["files"]["future_window_audit_summary_json"] = str(audit_summary_json_path)
+        summary_payload["files"]["future_window_audit_summary_csv"] = str(audit_summary_csv_path)
+        summary_payload["files"]["future_window_audit_events_csv"] = str(audit_events_csv_path)
 
     summary_json_path = run_output_dir / "summary.json"
     summary_json_path.write_text(
@@ -764,6 +923,11 @@ def run_benchmark(
     print(f"[benchmark] outdir={run_output_dir}")
     print(f"[benchmark] summary_csv={csv_path}")
     print(f"[benchmark] summary_json={summary_json_path}")
+    if future_window_audit:
+        _print_future_window_audit_table(audit_seed_rows, horizons=audit_horizons)
+        print(f"[benchmark] future_window_audit_events_csv={run_output_dir / 'future_window_audit_events.csv'}")
+        print(f"[benchmark] future_window_audit_summary_csv={run_output_dir / 'future_window_audit_summary.csv'}")
+        print(f"[benchmark] future_window_audit_summary_json={run_output_dir / 'future_window_audit_summary.json'}")
     if baseline_flat:
         print(
             "[benchmark][warning] baseline flat across seeds in processed_boxes; "
@@ -808,6 +972,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional seed override list. Defaults to profile seeds.",
     )
+    parser.add_argument(
+        "--future-window-audit",
+        action="store_true",
+        help="Activa diagnostico offline de continuation usando cajas futuras reales del episodio.",
+    )
+    parser.add_argument(
+        "--future-horizons",
+        nargs="*",
+        type=int,
+        default=list(DEFAULT_FUTURE_HORIZONS),
+        help="Horizontes H en numero de cajas futuras para el audit (default: 5 10 15).",
+    )
     return parser
 
 
@@ -820,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
         set_overrides=list(args.set or []),
         seeds_override=(list(args.seeds) if args.seeds else None),
         variant_name=str(args.variant_name),
+        future_window_audit=bool(args.future_window_audit),
+        future_horizons=list(args.future_horizons or []),
     )
     return 0
 
