@@ -49,6 +49,7 @@ class SchedulerConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    enforce_active_layer_first: bool = False
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -100,6 +101,7 @@ class SchedulerConfig:
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
         object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
+        object.__setattr__(self, "enforce_active_layer_first", bool(self.enforce_active_layer_first))
 
 
 @dataclass(frozen=True)
@@ -262,6 +264,10 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.blocked_upper_layer_open_attempts = 0
+        self.active_layer_exhaustion_events = 0
+        self._active_layer_first_trace_max = 200
+        self.active_layer_first_trace: list[dict[str, Any]] = []
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -515,6 +521,17 @@ class SchedulerV1:
                 window_boxes_by_pallet_id=window_boxes_by_pallet_id,
                 deadline=deadline,
             )
+        active_layer_first_stats = {
+            "upper_layer_open_attempts": 0,
+            "blocked_upper_layer_open_attempts": 0,
+            "active_layer_exhaustion_events": 0,
+        }
+        if feasible_candidates:
+            feasible_candidates, active_layer_first_stats = self._apply_active_layer_first_on_scored_candidates(
+                candidates=feasible_candidates,
+                pallets=sim_state.pallets,
+                phase="greedy",
+            )
 
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
@@ -524,6 +541,12 @@ class SchedulerV1:
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
             "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
             "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
+            "active_layer_first_enforced": bool(getattr(self.config, "enforce_active_layer_first", False)),
+            "active_layer_first_upper_layer_open_attempts": int(active_layer_first_stats["upper_layer_open_attempts"]),
+            "active_layer_first_blocked_upper_layer_open_attempts": int(
+                active_layer_first_stats["blocked_upper_layer_open_attempts"]
+            ),
+            "active_layer_first_exhaustion_events": int(active_layer_first_stats["active_layer_exhaustion_events"]),
         }
 
         best_plan: PickPlan | None = None
@@ -630,6 +653,9 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        active_layer_first_upper_open_attempts_local = 0
+        active_layer_first_blocked_attempts_local = 0
+        active_layer_first_exhaustion_events_local = 0
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -663,6 +689,22 @@ class SchedulerV1:
                         continue
                     nodes_expanded += 1
                     expansions.append(expansion)
+
+                if depth == 0 and node.first_plan is None and expansions:
+                    expansions, active_layer_first_stats = self._apply_active_layer_first_on_beam_expansions(
+                        expansions=expansions,
+                        pallets=node.pallets,
+                        phase="micro_root",
+                    )
+                    active_layer_first_upper_open_attempts_local += int(
+                        active_layer_first_stats["upper_layer_open_attempts"]
+                    )
+                    active_layer_first_blocked_attempts_local += int(
+                        active_layer_first_stats["blocked_upper_layer_open_attempts"]
+                    )
+                    active_layer_first_exhaustion_events_local += int(
+                        active_layer_first_stats["active_layer_exhaustion_events"]
+                    )
 
                 if expansions:
                     min_h = min(int(e.terms.height_after_mm) for e in expansions)
@@ -731,6 +773,18 @@ class SchedulerV1:
                                 "batchfill_selected_layer_boxes_mean": float(
                                     float(batchfill_selected_boxes_sum_local)
                                     / max(1, int(batchfill_selected_boxes_count_local))
+                                ),
+                                "active_layer_first_enforced": bool(
+                                    getattr(self.config, "enforce_active_layer_first", False)
+                                ),
+                                "active_layer_first_upper_layer_open_attempts": int(
+                                    active_layer_first_upper_open_attempts_local
+                                ),
+                                "active_layer_first_blocked_upper_layer_open_attempts": int(
+                                    active_layer_first_blocked_attempts_local
+                                ),
+                                "active_layer_first_exhaustion_events": int(
+                                    active_layer_first_exhaustion_events_local
                                 ),
                             }
                             return chosen_plan, stats, None
@@ -814,6 +868,10 @@ class SchedulerV1:
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
             ),
+            "active_layer_first_enforced": bool(getattr(self.config, "enforce_active_layer_first", False)),
+            "active_layer_first_upper_layer_open_attempts": int(active_layer_first_upper_open_attempts_local),
+            "active_layer_first_blocked_upper_layer_open_attempts": int(active_layer_first_blocked_attempts_local),
+            "active_layer_first_exhaustion_events": int(active_layer_first_exhaustion_events_local),
         }
 
         if best_node.first_plan is None:
@@ -1025,6 +1083,228 @@ class SchedulerV1:
             return int(getattr(placement, "layer_id"))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _preview_base_z_mm(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm"))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _active_base_z_mm_for_pallet(pallet: PalletModel) -> int:
+        placements = list(getattr(pallet, "placements", []) or [])
+        if not placements:
+            return 0
+        max_z = 0
+        for placement in placements:
+            try:
+                max_z = max(int(max_z), int(getattr(placement, "z_mm", 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        return int(max_z)
+
+    def _record_active_layer_first_event(
+        self,
+        *,
+        phase: str,
+        pallet_id: int | str,
+        step_index: int,
+        active_base_z_mm: int,
+        active_layer_candidate_count: int,
+        upper_layer_candidate_count: int,
+        blocked_upper_layer_candidate_count: int,
+        upper_base_z_levels: list[int],
+        allowed_upper_opening: bool,
+    ) -> None:
+        event = {
+            "phase": str(phase),
+            "pallet_id": pallet_id,
+            "step_index": int(step_index),
+            "active_base_z_mm": int(active_base_z_mm),
+            "active_layer_candidate_count": int(active_layer_candidate_count),
+            "upper_layer_candidate_count": int(upper_layer_candidate_count),
+            "blocked_upper_layer_candidate_count": int(blocked_upper_layer_candidate_count),
+            "upper_base_z_levels": [int(v) for v in sorted(set(upper_base_z_levels))],
+            "allowed_upper_opening": bool(allowed_upper_opening),
+        }
+        if len(self.active_layer_first_trace) < int(self._active_layer_first_trace_max):
+            self.active_layer_first_trace.append(event)
+
+    def _apply_active_layer_first_on_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+        phase: str,
+    ) -> tuple[list[_ScoredCandidate], dict[str, int]]:
+        stats = {
+            "upper_layer_open_attempts": 0,
+            "blocked_upper_layer_open_attempts": 0,
+            "active_layer_exhaustion_events": 0,
+        }
+        if not candidates or not bool(getattr(self.config, "enforce_active_layer_first", False)):
+            return candidates, stats
+
+        grouped: dict[int | str, list[tuple[int, _ScoredCandidate]]] = {}
+        for idx, candidate in enumerate(candidates):
+            grouped.setdefault(candidate.plan.pallet_id, []).append((idx, candidate))
+
+        blocked_indices: set[int] = set()
+        for pallet_id, group in grouped.items():
+            pallet = pallets.get(pallet_id)
+            if pallet is None:
+                continue
+
+            active_base_z = self._active_base_z_mm_for_pallet(pallet)
+            active_layer_candidate_count = 0
+            upper_layer_candidates: list[tuple[int, int]] = []
+            for idx, candidate in group:
+                base_z = self._preview_base_z_mm(candidate.plan.preview)
+                if base_z is None:
+                    continue
+                if int(base_z) == int(active_base_z):
+                    active_layer_candidate_count += 1
+                    continue
+                if int(base_z) > int(active_base_z):
+                    upper_layer_candidates.append((idx, int(base_z)))
+
+            if not upper_layer_candidates:
+                continue
+
+            upper_count = int(len(upper_layer_candidates))
+            stats["upper_layer_open_attempts"] += upper_count
+            step_index = int(len(list(getattr(pallet, "placements", []) or [])))
+            upper_levels = [int(base_z) for _, base_z in upper_layer_candidates]
+
+            if active_layer_candidate_count > 0:
+                for idx, _ in upper_layer_candidates:
+                    blocked_indices.add(int(idx))
+                stats["blocked_upper_layer_open_attempts"] += upper_count
+                self.blocked_upper_layer_open_attempts += upper_count
+                self._record_active_layer_first_event(
+                    phase=phase,
+                    pallet_id=pallet_id,
+                    step_index=step_index,
+                    active_base_z_mm=int(active_base_z),
+                    active_layer_candidate_count=int(active_layer_candidate_count),
+                    upper_layer_candidate_count=upper_count,
+                    blocked_upper_layer_candidate_count=upper_count,
+                    upper_base_z_levels=upper_levels,
+                    allowed_upper_opening=False,
+                )
+                continue
+
+            stats["active_layer_exhaustion_events"] += 1
+            self.active_layer_exhaustion_events += 1
+            self._record_active_layer_first_event(
+                phase=phase,
+                pallet_id=pallet_id,
+                step_index=step_index,
+                active_base_z_mm=int(active_base_z),
+                active_layer_candidate_count=0,
+                upper_layer_candidate_count=upper_count,
+                blocked_upper_layer_candidate_count=0,
+                upper_base_z_levels=upper_levels,
+                allowed_upper_opening=True,
+            )
+
+        if not blocked_indices:
+            return candidates, stats
+        filtered = [candidate for idx, candidate in enumerate(candidates) if idx not in blocked_indices]
+        return filtered, stats
+
+    def _apply_active_layer_first_on_beam_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        pallets: Mapping[int | str, PalletModel],
+        phase: str,
+    ) -> tuple[list[_BeamExpansion], dict[str, int]]:
+        stats = {
+            "upper_layer_open_attempts": 0,
+            "blocked_upper_layer_open_attempts": 0,
+            "active_layer_exhaustion_events": 0,
+        }
+        if not expansions or not bool(getattr(self.config, "enforce_active_layer_first", False)):
+            return expansions, stats
+
+        grouped: dict[int | str, list[tuple[int, _BeamExpansion, int]]] = {}
+        for idx, expansion in enumerate(expansions):
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            first_plan = expansion.node.first_plan
+            base_z = self._preview_base_z_mm(first_plan.preview if first_plan is not None else None)
+            if base_z is None:
+                continue
+            grouped.setdefault(pallet_id, []).append((idx, expansion, int(base_z)))
+
+        blocked_indices: set[int] = set()
+        for pallet_id, group in grouped.items():
+            pallet = pallets.get(pallet_id)
+            if pallet is None:
+                continue
+
+            active_base_z = self._active_base_z_mm_for_pallet(pallet)
+            active_layer_candidate_count = 0
+            upper_layer_candidates: list[tuple[int, int]] = []
+            for idx, _expansion, base_z in group:
+                if int(base_z) == int(active_base_z):
+                    active_layer_candidate_count += 1
+                    continue
+                if int(base_z) > int(active_base_z):
+                    upper_layer_candidates.append((idx, int(base_z)))
+
+            if not upper_layer_candidates:
+                continue
+
+            upper_count = int(len(upper_layer_candidates))
+            stats["upper_layer_open_attempts"] += upper_count
+            step_index = int(len(list(getattr(pallet, "placements", []) or [])))
+            upper_levels = [int(base_z) for _, base_z in upper_layer_candidates]
+
+            if active_layer_candidate_count > 0:
+                for idx, _ in upper_layer_candidates:
+                    blocked_indices.add(int(idx))
+                stats["blocked_upper_layer_open_attempts"] += upper_count
+                self.blocked_upper_layer_open_attempts += upper_count
+                self._record_active_layer_first_event(
+                    phase=phase,
+                    pallet_id=pallet_id,
+                    step_index=step_index,
+                    active_base_z_mm=int(active_base_z),
+                    active_layer_candidate_count=int(active_layer_candidate_count),
+                    upper_layer_candidate_count=upper_count,
+                    blocked_upper_layer_candidate_count=upper_count,
+                    upper_base_z_levels=upper_levels,
+                    allowed_upper_opening=False,
+                )
+                continue
+
+            stats["active_layer_exhaustion_events"] += 1
+            self.active_layer_exhaustion_events += 1
+            self._record_active_layer_first_event(
+                phase=phase,
+                pallet_id=pallet_id,
+                step_index=step_index,
+                active_base_z_mm=int(active_base_z),
+                active_layer_candidate_count=0,
+                upper_layer_candidate_count=upper_count,
+                blocked_upper_layer_candidate_count=0,
+                upper_base_z_levels=upper_levels,
+                allowed_upper_opening=True,
+            )
+
+        if not blocked_indices:
+            return expansions, stats
+        filtered = [expansion for idx, expansion in enumerate(expansions) if idx not in blocked_indices]
+        return filtered, stats
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))

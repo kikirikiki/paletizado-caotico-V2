@@ -60,6 +60,7 @@ class PolicyConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    enforce_active_layer_first: bool = False
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -184,6 +185,7 @@ class PolicyPackerScheduler:
         hard_floor_phase_min_base_candidates: int = 1,
         hard_floor_phase_lookahead_items: int = 8,
         hard_floor_phase_stand_mix_bonus: float = 0.0,
+        enforce_active_layer_first: bool = False,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -228,6 +230,7 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
+            enforce_active_layer_first=bool(enforce_active_layer_first),
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -275,6 +278,7 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            enforce_active_layer_first=bool(enforce_active_layer_first),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -750,6 +754,13 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_bonus = float(
             getattr(self._scheduler.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0
         )
+        enforce_active_layer_first = bool(getattr(self._scheduler.config, "enforce_active_layer_first", False))
+        blocked_upper_layer_open_attempts = int(
+            getattr(self._scheduler, "blocked_upper_layer_open_attempts", 0) or 0
+        )
+        active_layer_exhaustion_events = int(getattr(self._scheduler, "active_layer_exhaustion_events", 0) or 0)
+        active_layer_first_trace_raw = list(getattr(self._scheduler, "active_layer_first_trace", []) or [])
+        active_layer_first_trace = [item for item in active_layer_first_trace_raw if isinstance(item, dict)]
         hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
         hard_floor_phase_floor_candidates_seen_total = int(
             getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
@@ -776,6 +787,10 @@ class PolicyPackerScheduler:
         )
 
         kpis["score_mode"] = score_mode
+        kpis["enforce_active_layer_first"] = bool(enforce_active_layer_first)
+        kpis["blocked_upper_layer_open_attempts"] = int(blocked_upper_layer_open_attempts)
+        kpis["active_layer_exhaustion_events"] = int(active_layer_exhaustion_events)
+        kpis["active_layer_first_trace"] = active_layer_first_trace
         kpis["height_slack_mm"] = int(height_slack_mm)
         kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)
         kpis["tower_z_band_mm"] = int(tower_z_band_mm)

@@ -112,11 +112,16 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                 "processed_boxes": seed + lookahead_k,
                 "pallet_kpis": {
                     "stand_hw_used_total": lookahead_k,
+                    "blocked_upper_layer_open_attempts": 2,
+                    "active_layer_exhaustion_events": 1,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
                     "layer_monotonicity_first_pallet_by_dest": {
                         "1": {
                             "first_stack_step": 3,
+                            "first_reentry_step": 3,
+                            "first_upper_layer_open_step": 2,
                             "max_z_seen_so_far_by_step": [0, 0, 100, 200],
+                            "reentries_total": 1,
                             "lower_layer_reentry_count": 1,
                             "lower_layer_reentry_total_drop_mm": 100,
                             "lower_layer_reentry_max_drop_mm": 100,
@@ -187,7 +192,13 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     assert all(r["first_stack_step"] == 2 for r in rows)
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
+    assert all(r["throughput_final"] is not None for r in rows)
+    assert all(r["first_upper_layer_open_step"] == 2 for r in rows)
+    assert all(r["first_reentry_step"] == 3 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
+    assert all(r["blocked_upper_layer_open_attempts"] == 2 for r in rows)
+    assert all(r["active_layer_exhaustion_events"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
@@ -209,6 +220,12 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
+    assert "throughput_final" in csv_row
+    assert "reentries_total" in csv_row
+    assert "first_reentry_step" in csv_row
+    assert "first_upper_layer_open_step" in csv_row
+    assert "blocked_upper_layer_open_attempts" in csv_row
+    assert "active_layer_exhaustion_events" in csv_row
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
