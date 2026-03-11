@@ -71,8 +71,12 @@ class SeedSummary:
     run_label: str
     seed: int
     processed_boxes: int | None
+    throughput_final: int | None
     first_stack_step: int | None
+    first_upper_layer_open_step: int | None
     first_stand_hw_step: int | None
+    first_reentry_step: int | None
+    reentries_total: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
     max_z_seen_last_mm: int | None
@@ -86,6 +90,12 @@ class SeedSummary:
     layer_fill_homogeneity_score: float | None
     z_band_fill_homogeneity_score: float | None
     active_layers_peak: int | None
+    active_layer_search_invocations: int | None
+    active_layer_search_successes: int | None
+    active_layer_search_failures: int | None
+    upper_layer_open_deferred_by_search: int | None
+    deadlock_count: int | None
+    deadlock_reason: str | None
     layer_band_mm: int | None
     layer_band_fill_progress_json: str
     active_layers_over_time_json: str
@@ -420,6 +430,7 @@ def run_seed(
     pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
 
     processed_boxes = _safe_int(metrics.get("processed_boxes")) if isinstance(metrics, dict) else None
+    throughput_final = processed_boxes
     stand_hw_used_total = _safe_int(pallet_kpis.get("stand_hw_used_total")) if isinstance(pallet_kpis, dict) else None
     hard_floor_stand_total = (
         _safe_int(pallet_kpis.get("hard_floor_phase_stand_hw_chosen_total"))
@@ -437,6 +448,13 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    reentries_total = _safe_int(mono.get("reentries_total"))
+    if reentries_total is None:
+        reentries_total = _safe_int(mono.get("lower_layer_reentry_count"))
+    first_reentry_step = _safe_int(mono.get("first_reentry_step"))
+    first_upper_layer_open_step = _safe_int(mono.get("first_upper_layer_open_step"))
+    if first_upper_layer_open_step is None:
+        first_upper_layer_open_step = first_stack_step
 
     max_z_series = mono.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -454,13 +472,55 @@ def run_seed(
         if isinstance(step_trace_relevant, list)
         else []
     )
+    if first_reentry_step is None:
+        for row in clean_trace:
+            if bool(row.get("is_reentry")):
+                first_reentry_step = _safe_int(row.get("step"))
+                break
+    if first_upper_layer_open_step is None:
+        for row in clean_trace:
+            if bool(row.get("opened_new_band")):
+                first_upper_layer_open_step = _safe_int(row.get("step"))
+                break
+
+    active_layer_search_invocations = None
+    active_layer_search_successes = None
+    active_layer_search_failures = None
+    upper_layer_open_deferred_by_search = None
+    deadlock_count = 0
+    deadlock_reason = None
+    if isinstance(pallet_kpis, dict):
+        active_layer_search_invocations = _safe_int(pallet_kpis.get("active_layer_search_invocations"))
+        active_layer_search_successes = _safe_int(pallet_kpis.get("active_layer_search_successes"))
+        active_layer_search_failures = _safe_int(pallet_kpis.get("active_layer_search_failures"))
+        upper_layer_open_deferred_by_search = _safe_int(pallet_kpis.get("upper_layer_open_deferred_by_search"))
+        samples = pallet_kpis.get("deadlock_samples", [])
+        if isinstance(samples, list):
+            first_sample = next((item for item in samples if isinstance(item, dict)), None)
+            if first_sample is not None:
+                deadlock_reason = str(
+                    first_sample.get("subreason")
+                    or first_sample.get("reason")
+                    or first_sample.get("stop_reason")
+                    or ""
+                ) or None
+
+    stop_reason = str(metrics.get("stop_reason", "")).upper() if isinstance(metrics, dict) else ""
+    if stop_reason == "DEADLOCK":
+        deadlock_count = 1
+        if deadlock_reason is None:
+            deadlock_reason = "DEADLOCK"
 
     return SeedSummary(
         run_label=run_label,
         seed=int(seed),
         processed_boxes=processed_boxes,
+        throughput_final=throughput_final,
         first_stack_step=first_stack_step,
+        first_upper_layer_open_step=first_upper_layer_open_step,
         first_stand_hw_step=first_stand_hw_step,
+        first_reentry_step=first_reentry_step,
+        reentries_total=reentries_total,
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
         max_z_seen_last_mm=max_z_seen_last_mm,
@@ -476,6 +536,12 @@ def run_seed(
         layer_fill_homogeneity_score=_safe_float(mono.get("layer_fill_homogeneity_score")),
         z_band_fill_homogeneity_score=_safe_float(mono.get("z_band_fill_homogeneity_score")),
         active_layers_peak=active_layers_peak,
+        active_layer_search_invocations=active_layer_search_invocations,
+        active_layer_search_successes=active_layer_search_successes,
+        active_layer_search_failures=active_layer_search_failures,
+        upper_layer_open_deferred_by_search=upper_layer_open_deferred_by_search,
+        deadlock_count=_safe_int(deadlock_count),
+        deadlock_reason=deadlock_reason,
         layer_band_mm=_safe_int(mono.get("layer_band_mm")),
         layer_band_fill_progress_json=json.dumps(mono.get("layer_band_fill_progress", []), ensure_ascii=True),
         active_layers_over_time_json=json.dumps(
@@ -510,12 +576,25 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "seed_count": len(values_sorted),
             "seeds": [int(v.seed) for v in values_sorted],
             "processed_boxes_mean": _mean([v.processed_boxes for v in values_sorted]),
+            "throughput_final_mean": _mean([v.throughput_final for v in values_sorted]),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
+            "first_upper_layer_open_step_mean": _mean([v.first_upper_layer_open_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),
+            "first_reentry_step_mean": _mean([v.first_reentry_step for v in values_sorted]),
+            "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),
             "hard_floor_phase_stand_hw_chosen_total_mean": _mean(
                 [v.hard_floor_phase_stand_hw_chosen_total for v in values_sorted]
             ),
+            "active_layer_search_invocations_mean": _mean(
+                [v.active_layer_search_invocations for v in values_sorted]
+            ),
+            "active_layer_search_successes_mean": _mean([v.active_layer_search_successes for v in values_sorted]),
+            "active_layer_search_failures_mean": _mean([v.active_layer_search_failures for v in values_sorted]),
+            "upper_layer_open_deferred_by_search_mean": _mean(
+                [v.upper_layer_open_deferred_by_search for v in values_sorted]
+            ),
+            "deadlock_count_mean": _mean([v.deadlock_count for v in values_sorted]),
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
