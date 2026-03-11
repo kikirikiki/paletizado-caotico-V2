@@ -80,6 +80,14 @@ class SeedSummary:
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
     lower_layer_reentry_mean_drop_mm: float | None
+    reentries_total: int | None
+    first_reentry_step: int | None
+    max_layer_drop: int | None
+    reentries_drop_ge_2_count: int | None
+    highest_layer_opened: int | None
+    placements_rejected_bounded_backstep: int | None
+    deadlock_count: int | None
+    deadlock_subreasons_json: str
     monotonic_stack_rate: float | None
     placements_below_current_top_band_after_opening_next_band: int | None
     layer_closure_score: float | None
@@ -437,6 +445,19 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    placements_rejected_bounded_backstep = (
+        _safe_int(pallet_kpis.get("placements_rejected_bounded_backstep"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    deadlock_samples = pallet_kpis.get("deadlock_samples", []) if isinstance(pallet_kpis, dict) else []
+    deadlock_subreasons: dict[str, int] = {}
+    if isinstance(deadlock_samples, list):
+        for sample in deadlock_samples:
+            if not isinstance(sample, dict):
+                continue
+            subreason = str(sample.get("subreason", "UNKNOWN") or "UNKNOWN").upper().strip() or "UNKNOWN"
+            deadlock_subreasons[subreason] = int(deadlock_subreasons.get(subreason, 0)) + 1
 
     max_z_series = mono.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -468,6 +489,14 @@ def run_seed(
         lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
         lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
         lower_layer_reentry_mean_drop_mm=_safe_float(mono.get("lower_layer_reentry_mean_drop_mm")),
+        reentries_total=_safe_int(mono.get("reentries_total")),
+        first_reentry_step=_safe_int(mono.get("first_reentry_step")),
+        max_layer_drop=_safe_int(mono.get("max_layer_drop")),
+        reentries_drop_ge_2_count=_safe_int(mono.get("reentries_drop_ge_2_count")),
+        highest_layer_opened=_safe_int(mono.get("highest_layer_opened")),
+        placements_rejected_bounded_backstep=placements_rejected_bounded_backstep,
+        deadlock_count=(len(deadlock_samples) if isinstance(deadlock_samples, list) else None),
+        deadlock_subreasons_json=json.dumps(deadlock_subreasons, ensure_ascii=True),
         monotonic_stack_rate=_safe_float(mono.get("monotonic_stack_rate")),
         placements_below_current_top_band_after_opening_next_band=_safe_int(
             mono.get("placements_below_current_top_band_after_opening_next_band")
@@ -491,7 +520,7 @@ def run_seed(
     )
 
 
-def _mean(values: list[int | None]) -> float | None:
+def _mean(values: list[int | float | None]) -> float | None:
     nums = [float(v) for v in values if v is not None]
     if not nums:
         return None
@@ -519,6 +548,15 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
+            "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
+            "first_reentry_step_mean": _mean([v.first_reentry_step for v in values_sorted]),
+            "max_layer_drop_mean": _mean([v.max_layer_drop for v in values_sorted]),
+            "reentries_drop_ge_2_count_mean": _mean([v.reentries_drop_ge_2_count for v in values_sorted]),
+            "highest_layer_opened_mean": _mean([v.highest_layer_opened for v in values_sorted]),
+            "placements_rejected_bounded_backstep_mean": _mean(
+                [v.placements_rejected_bounded_backstep for v in values_sorted]
+            ),
+            "deadlock_count_mean": _mean([v.deadlock_count for v in values_sorted]),
             "monotonic_stack_rate_mean": _mean([v.monotonic_stack_rate for v in values_sorted]),
             "placements_below_current_top_band_after_opening_next_band_mean": _mean(
                 [v.placements_below_current_top_band_after_opening_next_band for v in values_sorted]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 import copy
 from dataclasses import dataclass, field, replace
 import inspect
@@ -49,6 +50,7 @@ class SchedulerConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    max_layer_backstep: int | None = None
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -100,6 +102,11 @@ class SchedulerConfig:
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
         object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
+        max_layer_backstep = self.max_layer_backstep
+        if max_layer_backstep is None:
+            object.__setattr__(self, "max_layer_backstep", None)
+        else:
+            object.__setattr__(self, "max_layer_backstep", max(0, int(max_layer_backstep)))
 
 
 @dataclass(frozen=True)
@@ -262,6 +269,8 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.placements_rejected_bounded_backstep = 0
+        self._bounded_backstep_rejection_samples: list[dict[str, object]] = []
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -2156,6 +2165,108 @@ class SchedulerV1:
         if bool(stats.slack_set_used) and int(stats.slack_set_n) > 0:
             self.selected_height_slack_filtered_count += 1
 
+    def _bounded_backstep_limit(self) -> int | None:
+        raw = getattr(self.config, "max_layer_backstep", None)
+        if raw is None:
+            return None
+        try:
+            limit = int(raw)
+        except Exception:
+            return None
+        if limit < 0:
+            return None
+        return int(limit)
+
+    @staticmethod
+    def _sorted_unique_layer_bases_from_pallet(pallet: PalletModel) -> list[int]:
+        placements = list(getattr(pallet, "placements", []) or [])
+        base_z_values: set[int] = set()
+        for placement in placements:
+            try:
+                base_z_values.add(int(getattr(placement, "z_mm", 0) or 0))
+            except Exception:
+                continue
+        return sorted(int(v) for v in base_z_values)
+
+    @staticmethod
+    def _candidate_layer_idx_from_base_z(layer_bases_mm: Sequence[int], candidate_base_z_mm: int) -> int:
+        if not layer_bases_mm:
+            return 0
+        return int(bisect_left([int(v) for v in layer_bases_mm], int(candidate_base_z_mm)))
+
+    def _apply_bounded_layer_backstep_guardrail(
+        self,
+        *,
+        pallet: PalletModel,
+        box: Box,
+        preview: PlacementPreview,
+    ) -> PlacementPreview:
+        limit = self._bounded_backstep_limit()
+        if limit is None or not preview.feasible:
+            return preview
+
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return preview
+
+        try:
+            candidate_base_z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        except Exception:
+            return preview
+
+        layer_bases_mm = self._sorted_unique_layer_bases_from_pallet(pallet)
+        highest_open_layer_idx = int(len(layer_bases_mm) - 1)
+        candidate_layer_idx = self._candidate_layer_idx_from_base_z(layer_bases_mm, int(candidate_base_z_mm))
+        layer_drop = max(0, int(highest_open_layer_idx) - int(candidate_layer_idx))
+        should_reject = int(highest_open_layer_idx) >= 0 and int(layer_drop) > int(limit)
+        if not should_reject:
+            return preview
+
+        self.placements_rejected_bounded_backstep += 1
+        if len(self._bounded_backstep_rejection_samples) < 40:
+            sample_box_id = getattr(box, "box_id", None)
+            self._bounded_backstep_rejection_samples.append(
+                {
+                    "box_id": sample_box_id,
+                    "candidate_layer_idx": int(candidate_layer_idx),
+                    "highest_open_layer_idx": int(highest_open_layer_idx),
+                    "drop": int(layer_drop),
+                    "limit": int(limit),
+                    "candidate_base_z_mm": int(candidate_base_z_mm),
+                }
+            )
+        self._logger.info(
+            "bounded_backstep_reject box_id=%s candidate_layer_idx=%s highest_open_layer_idx=%s drop=%s limit=%s base_z_mm=%s",
+            getattr(box, "box_id", None),
+            int(candidate_layer_idx),
+            int(highest_open_layer_idx),
+            int(layer_drop),
+            int(limit),
+            int(candidate_base_z_mm),
+        )
+
+        debug = dict(preview.debug or {})
+        debug.update(
+            {
+                "bounded_backstep_rejected": True,
+                "candidate_layer_idx": int(candidate_layer_idx),
+                "highest_open_layer_idx": int(highest_open_layer_idx),
+                "layer_drop": int(layer_drop),
+                "max_layer_backstep": int(limit),
+                "candidate_base_z_mm": int(candidate_base_z_mm),
+            }
+        )
+        return PlacementPreview(
+            feasible=False,
+            placement=None,
+            packing_gain=0.0,
+            fragmentation=0.0,
+            height_after_mm=None,
+            infeasible_reason="BOUNDED_BACKSTEP",
+            score_adjustment=0.0,
+            debug=debug,
+        )
+
     def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
         kwargs: dict[str, object] = {}
         max_tries = int(self.config.max_tries_per_item) if self.config.max_tries_per_item else 0
@@ -2175,26 +2286,33 @@ class SchedulerV1:
             except Exception:
                 should_relax_stand_gate = False
                 original_stand_gate = None
+        preview: PlacementPreview
         try:
             if not kwargs:
-                return preview_fn(box)
-
-            filtered = self._filter_preview_kwargs(preview_fn, kwargs)
-            if not filtered:
-                return preview_fn(box)
-
-            try:
-                return preview_fn(box, **filtered)
-            except TypeError as exc:
-                if self._is_unexpected_kwarg(exc):
-                    return preview_fn(box)
-                raise
+                preview = preview_fn(box)
+            else:
+                filtered = self._filter_preview_kwargs(preview_fn, kwargs)
+                if not filtered:
+                    preview = preview_fn(box)
+                else:
+                    try:
+                        preview = preview_fn(box, **filtered)
+                    except TypeError as exc:
+                        if self._is_unexpected_kwarg(exc):
+                            preview = preview_fn(box)
+                        else:
+                            raise
         finally:
             if should_relax_stand_gate and original_stand_gate is not None:
                 try:
                     setattr(pallet, "stand_hw_height_margin_gate_mm", int(original_stand_gate))
                 except Exception:
                     pass
+        return self._apply_bounded_layer_backstep_guardrail(
+            pallet=pallet,
+            box=box,
+            preview=preview,
+        )
 
     def _hard_floor_phase_stand_mix_gate_enabled_for_pallet(self, pallet: PalletModel) -> bool:
         if not self._hard_floor_phase_enabled():

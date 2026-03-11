@@ -30,6 +30,11 @@ def test_layer_monotonicity_reentry_basic() -> None:
     assert int(m["lower_layer_reentry_count"]) == 1
     assert int(m["lower_layer_reentry_max_drop_mm"]) == 100
     assert abs(float(m["lower_layer_reentry_mean_drop_mm"]) - 100.0) < 1e-9
+    assert int(m["reentries_total"]) == 1
+    assert int(m["first_reentry_step"]) == 2
+    assert int(m["max_layer_drop"]) == 1
+    assert int(m["reentries_drop_ge_2_count"]) == 0
+    assert int(m["highest_layer_opened"]) == 1
     assert int(m["placements_below_current_top_band_after_opening_next_band"]) == 1
     assert abs(float(m["monotonic_stack_rate"]) - 0.75) < 1e-9
     assert abs(float(m["layer_closure_score"]) - 0.5) < 1e-9
@@ -47,6 +52,27 @@ def test_layer_monotonicity_monotonic_basic() -> None:
     m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100)
 
     assert int(m["lower_layer_reentry_count"]) == 0
+    assert int(m["reentries_total"]) == 0
+    assert m["first_reentry_step"] is None
+    assert int(m["max_layer_drop"]) == 0
+    assert int(m["reentries_drop_ge_2_count"]) == 0
+    assert int(m["highest_layer_opened"]) == 2
     assert abs(float(m["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(m["first_stack_step"]) == 2
     assert int(m["monotonic_violations_count"]) == 0
+
+
+def test_layer_monotonicity_counts_deep_reentry_drop_ge_2() -> None:
+    seq = [
+        _placement(step=0, z=0, layer=0),
+        _placement(step=1, z=100, layer=1),
+        _placement(step=2, z=200, layer=2),
+        _placement(step=3, z=0, layer=0),
+    ]
+
+    m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100)
+
+    assert int(m["reentries_total"]) == 1
+    assert int(m["first_reentry_step"]) == 3
+    assert int(m["max_layer_drop"]) == 2
+    assert int(m["reentries_drop_ge_2_count"]) == 1

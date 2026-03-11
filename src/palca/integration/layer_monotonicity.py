@@ -37,6 +37,13 @@ def _sorted_numeric_dict(d: dict[int, Any]) -> dict[str, Any]:
     return {str(k): d[k] for k in sorted(d)}
 
 
+def _layer_indices_by_base_z(placements: list[Any]) -> list[int]:
+    base_z_values = [_as_int(_placement_value(placement, "z_mm", 0)) for placement in placements]
+    unique_base_z = sorted(set(int(v) for v in base_z_values))
+    idx_by_base_z = {int(z_mm): int(idx) for idx, z_mm in enumerate(unique_base_z)}
+    return [int(idx_by_base_z.get(int(z_mm), 0)) for z_mm in base_z_values]
+
+
 def compute_layer_monotonicity_metrics(
     placements: Iterable[Any],
     *,
@@ -59,6 +66,11 @@ def compute_layer_monotonicity_metrics(
             "lower_layer_reentry_total_drop_mm": 0,
             "lower_layer_reentry_max_drop_mm": 0,
             "lower_layer_reentry_mean_drop_mm": 0.0,
+            "reentries_total": 0,
+            "first_reentry_step": None,
+            "max_layer_drop": 0,
+            "reentries_drop_ge_2_count": 0,
+            "highest_layer_opened": 0,
             "monotonic_stack_rate": 1.0,
             "monotonic_stack_rate_pct": 100.0,
             "monotonic_placements_count": 0,
@@ -85,8 +97,13 @@ def compute_layer_monotonicity_metrics(
     max_z_seen = 0
     max_top_seen = 0
     max_band_seen = 0
+    highest_layer_opened = 0
     monotonic_count = 0
     reentry_drops: list[int] = []
+    reentries_total = 0
+    first_reentry_step: int | None = None
+    max_layer_drop = 0
+    reentries_drop_ge_2_count = 0
     below_top_after_opening_count = 0
 
     max_z_seen_so_far_by_step: list[int] = []
@@ -101,6 +118,8 @@ def compute_layer_monotonicity_metrics(
     band_steps: dict[int, list[int]] = defaultdict(list)
 
     step_trace: list[dict[str, Any]] = []
+    layer_indices = _layer_indices_by_base_z(seq)
+    highest_layer_seen_so_far = -1
 
     for step, placement in enumerate(seq):
         z_mm = _as_int(_placement_value(placement, "z_mm", 0))
@@ -108,26 +127,43 @@ def compute_layer_monotonicity_metrics(
         l_mm = max(0, _as_int(_placement_value(placement, "length_mm", 0)))
         w_mm = max(0, _as_int(_placement_value(placement, "width_mm", 0)))
         layer_id = _as_int(_placement_value(placement, "layer_id", 0))
+        layer_idx_by_base_z = int(layer_indices[step]) if step < len(layer_indices) else 0
 
         band_id = int(z_mm // band_mm)
         area_mm2 = int(l_mm * w_mm)
 
         prev_max_z = int(max_z_seen)
         prev_max_band = int(max_band_seen)
+        highest_open_layer_idx_before_step = int(highest_layer_seen_so_far)
 
         if step == 0:
             is_reentry = False
             reentry_drop_mm = 0
             respects_monotonic_growth = True
+            is_reentry_by_layer = False
+            layer_drop_from_highest_open = 0
         else:
             is_reentry = int(z_mm) < int(prev_max_z)
             reentry_drop_mm = int(prev_max_z - z_mm) if is_reentry else 0
             respects_monotonic_growth = int(z_mm) >= int(prev_max_z)
+            is_reentry_by_layer = int(layer_idx_by_base_z) < int(highest_open_layer_idx_before_step)
+            layer_drop_from_highest_open = (
+                int(highest_open_layer_idx_before_step - layer_idx_by_base_z)
+                if is_reentry_by_layer
+                else 0
+            )
 
         if respects_monotonic_growth:
             monotonic_count += 1
         if is_reentry:
             reentry_drops.append(int(reentry_drop_mm))
+        if is_reentry_by_layer:
+            reentries_total += 1
+            if first_reentry_step is None:
+                first_reentry_step = int(step)
+            max_layer_drop = max(int(max_layer_drop), int(layer_drop_from_highest_open))
+            if int(layer_drop_from_highest_open) >= 2:
+                reentries_drop_ge_2_count += 1
 
         opened_new_band = int(band_id) > int(prev_max_band)
         below_current_top_after_opening = int(prev_max_band) >= 1 and int(band_id) < int(prev_max_band)
@@ -137,6 +173,8 @@ def compute_layer_monotonicity_metrics(
         max_z_seen = max(int(max_z_seen), int(z_mm))
         max_top_seen = max(int(max_top_seen), int(z_mm + h_mm))
         max_band_seen = max(int(max_band_seen), int(band_id))
+        highest_layer_seen_so_far = max(int(highest_layer_seen_so_far), int(layer_idx_by_base_z))
+        highest_layer_opened = max(int(highest_layer_opened), int(layer_idx_by_base_z))
 
         if first_stack_step < 0 and int(z_mm) > 0:
             first_stack_step = int(step)
@@ -160,6 +198,7 @@ def compute_layer_monotonicity_metrics(
                 "height_mm": int(h_mm),
                 "top_z_mm": int(z_mm + h_mm),
                 "layer_id": int(layer_id),
+                "layer_idx_by_base_z": int(layer_idx_by_base_z),
                 "band_id": int(band_id),
                 "max_z_seen_so_far": int(max_z_seen),
                 "max_top_z_seen_so_far": int(max_top_seen),
@@ -167,6 +206,9 @@ def compute_layer_monotonicity_metrics(
                 "opened_new_band": bool(opened_new_band),
                 "is_reentry": bool(is_reentry),
                 "reentry_drop_mm": int(reentry_drop_mm),
+                "highest_open_layer_idx_before_step": int(highest_open_layer_idx_before_step),
+                "is_reentry_by_layer": bool(is_reentry_by_layer),
+                "layer_drop_from_highest_open": int(layer_drop_from_highest_open),
                 "respects_monotonic_growth": bool(respects_monotonic_growth),
                 "below_current_top_band_after_opening_next_band": bool(below_current_top_after_opening),
             }
@@ -255,6 +297,11 @@ def compute_layer_monotonicity_metrics(
         "lower_layer_reentry_total_drop_mm": int(sum(reentry_drops)),
         "lower_layer_reentry_max_drop_mm": int(max(reentry_drops)) if reentry_drops else 0,
         "lower_layer_reentry_mean_drop_mm": float(mean(reentry_drops)) if reentry_drops else 0.0,
+        "reentries_total": int(reentries_total),
+        "first_reentry_step": (int(first_reentry_step) if first_reentry_step is not None else None),
+        "max_layer_drop": int(max_layer_drop),
+        "reentries_drop_ge_2_count": int(reentries_drop_ge_2_count),
+        "highest_layer_opened": int(highest_layer_opened),
         "monotonic_stack_rate": float(monotonic_stack_rate),
         "monotonic_stack_rate_pct": float(100.0 * monotonic_stack_rate),
         "monotonic_placements_count": int(monotonic_count),
