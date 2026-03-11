@@ -143,6 +143,19 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                             ],
                         }
                     },
+                    "top_access_first_pallet_by_dest": {
+                        "1": {
+                            "blocked_count": 2,
+                            "marginal_count": 1,
+                            "blocked_stand_hw": 1,
+                            "marginal_stand_hw": 0,
+                            "first_blocked_step": 7,
+                            "issues_concentrated_at_end": True,
+                            "critical_placements": [
+                                {"step_index": 7, "accessibility_class": "blocked", "blocked_reason_exact": "mixed"}
+                            ],
+                        }
+                    },
                 },
             }
         }
@@ -189,6 +202,12 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
+    assert all(r["blocked_count"] == 2 for r in rows)
+    assert all(r["marginal_count"] == 1 for r in rows)
+    assert all(r["blocked_stand_hw"] == 1 for r in rows)
+    assert all(r["first_blocked_step"] == 7 for r in rows)
+    assert all(r["issues_concentrated_at_end"] is True for r in rows)
+    assert all("blocked_reason_exact" in r["critical_placements_json"] for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
 
