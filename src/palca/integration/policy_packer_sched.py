@@ -73,6 +73,7 @@ class PolicyConfig:
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
+    enforce_active_layer_closure_reservation: bool = False
     online_controller: bool = False
     controller_debug: bool = False
 
@@ -201,6 +202,7 @@ class PolicyPackerScheduler:
         batchfill_starters_max: int = 6,
         batchfill_budget_ms: int = 150,
         batchfill_greedy_topk: int = 12,
+        enforce_active_layer_closure_reservation: bool = False,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -240,6 +242,7 @@ class PolicyPackerScheduler:
             batchfill_starters_max=batchfill_starters_max,
             batchfill_budget_ms=batchfill_budget_ms,
             batchfill_greedy_topk=batchfill_greedy_topk,
+            enforce_active_layer_closure_reservation=bool(enforce_active_layer_closure_reservation),
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -288,6 +291,7 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            enforce_active_layer_closure_reservation=bool(enforce_active_layer_closure_reservation),
             online_controller=online_controller,
             controller_debug=controller_debug,
         )
@@ -685,6 +689,21 @@ class PolicyPackerScheduler:
         kpis["batchfill_selected_layer_boxes_mean"] = float(
             float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
         )
+        kpis["enforce_active_layer_closure_reservation"] = bool(
+            getattr(self._scheduler.config, "enforce_active_layer_closure_reservation", False)
+        )
+        kpis["upper_layer_open_attempts_total"] = int(
+            getattr(self._scheduler, "upper_layer_open_attempts_total", 0) or 0
+        )
+        kpis["blocked_upper_layer_open_attempts"] = int(
+            getattr(self._scheduler, "blocked_upper_layer_open_attempts", 0) or 0
+        )
+        kpis["closure_reservation_hits"] = int(getattr(self._scheduler, "closure_reservation_hits", 0) or 0)
+        kpis["closure_reservation_misses"] = int(getattr(self._scheduler, "closure_reservation_misses", 0) or 0)
+        kpis["upper_layer_open_attempts_trace"] = [
+            dict(item)
+            for item in list(getattr(self._scheduler, "upper_layer_open_attempts_trace", []) or [])
+        ]
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)
@@ -1093,10 +1112,12 @@ class PolicyPackerScheduler:
         snapshots: dict[int, SchedulerRampState] = {}
         for ramp_id, ramp in ramps.items():
             queue = tuple(self._to_box(item) for item in list(getattr(ramp, "queue", [])))
+            staging = tuple(self._to_box(item) for item in list(getattr(ramp, "staging", [])))
             upstream = tuple(self._to_box(item) for item in list(getattr(ramp, "upstream", [])))
             capacity = int(getattr(ramp, "capacity", len(queue)) or len(queue))
             snapshots[int(ramp_id)] = SchedulerRampState(
                 queue=queue,
+                staging=staging,
                 upstream=upstream,
                 capacity=max(0, capacity),
             )

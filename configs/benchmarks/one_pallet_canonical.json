@@ -71,6 +71,7 @@
     "batchfill_starters_max": 6,
     "batchfill_budget_ms": 150,
     "batchfill_greedy_topk": 12,
+    "enforce_active_layer_closure_reservation": false,
     "online_controller": false,
     "controller_debug": false,
     "weight_col": null,

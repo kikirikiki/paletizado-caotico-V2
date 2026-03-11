@@ -266,6 +266,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Top-K de candidatos usados por el fill greedy interno de BatchFill",
     )
     parser.add_argument(
+        "--enforce-active-layer-closure-reservation",
+        action="store_true",
+        help="Bloquea apertura de capa superior si la capa activa mantiene potencial de cierre visible.",
+    )
+    parser.add_argument(
         "--online-controller",
         action="store_true",
         help="Habilita controller online de modos NORMAL/PUSH/RESCUE sobre palca",
@@ -470,6 +475,7 @@ def run_simulation(
     batchfill_starters_max: int = 6,
     batchfill_budget_ms: int = 150,
     batchfill_greedy_topk: int = 12,
+    enforce_active_layer_closure_reservation: bool = False,
     online_controller: bool = False,
     controller_debug: bool = False,
     weight_col: str | None = None,
@@ -625,6 +631,7 @@ def run_simulation(
             batchfill_starters_max=int(batchfill_starters_max),
             batchfill_budget_ms=int(batchfill_budget_ms),
             batchfill_greedy_topk=int(batchfill_greedy_topk),
+            enforce_active_layer_closure_reservation=bool(enforce_active_layer_closure_reservation),
             online_controller=bool(online_controller),
             controller_debug=bool(controller_debug),
             priority_weight=priority_weight,
@@ -782,6 +789,7 @@ def run_simulation(
             "batchfill_starters_max": int(batchfill_starters_max),
             "batchfill_budget_ms": int(batchfill_budget_ms),
             "batchfill_greedy_topk": int(batchfill_greedy_topk),
+            "enforce_active_layer_closure_reservation": bool(enforce_active_layer_closure_reservation),
             "online_controller": bool(online_controller),
             "controller_debug": bool(controller_debug),
             "weight_col": weight_col,
@@ -886,6 +894,7 @@ def main() -> None:
         batchfill_starters_max=int(args.batchfill_starters_max),
         batchfill_budget_ms=int(args.batchfill_budget_ms),
         batchfill_greedy_topk=int(args.batchfill_greedy_topk),
+        enforce_active_layer_closure_reservation=bool(args.enforce_active_layer_closure_reservation),
         online_controller=bool(args.online_controller),
         controller_debug=bool(args.controller_debug),
         weight_col=args.weight_col,

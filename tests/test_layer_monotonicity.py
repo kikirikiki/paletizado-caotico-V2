@@ -28,11 +28,14 @@ def test_layer_monotonicity_reentry_basic() -> None:
 
     assert int(m["first_stack_step"]) == 1
     assert int(m["lower_layer_reentry_count"]) == 1
+    assert int(m["reentries_total"]) == 1
+    assert int(m["first_reentry_step"]) == 2
     assert int(m["lower_layer_reentry_max_drop_mm"]) == 100
     assert abs(float(m["lower_layer_reentry_mean_drop_mm"]) - 100.0) < 1e-9
     assert int(m["placements_below_current_top_band_after_opening_next_band"]) == 1
     assert abs(float(m["monotonic_stack_rate"]) - 0.75) < 1e-9
     assert abs(float(m["layer_closure_score"]) - 0.5) < 1e-9
+    assert int(m["first_upper_layer_open_step"]) == 1
 
 
 def test_layer_monotonicity_monotonic_basic() -> None:
@@ -50,3 +53,15 @@ def test_layer_monotonicity_monotonic_basic() -> None:
     assert abs(float(m["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(m["first_stack_step"]) == 2
     assert int(m["monotonic_violations_count"]) == 0
+    assert int(m["first_reentry_step"]) == -1
+    assert int(m["first_upper_layer_open_step"]) == 2
+
+
+def test_layer_monotonicity_uses_base_z_for_upper_layer_open_with_tall_stand_hw() -> None:
+    seq = [
+        _placement(step=0, z=0, layer=0, h=600),
+        _placement(step=1, z=0, layer=0, h=605),
+        _placement(step=2, z=600, layer=1, h=120),
+    ]
+    m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100)
+    assert int(m["first_upper_layer_open_step"]) == 2
