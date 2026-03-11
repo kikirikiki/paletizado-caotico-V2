@@ -231,3 +231,23 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+
+
+@pytest.mark.slow
+def test_canonical_baseline_processed_boxes_are_stable(tmp_path: Path) -> None:
+    summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "canonical_stability",
+        seeds_override=[50021, 50022, 50023, 50024, 50025],
+        variant_name="variant",
+    )
+
+    rows = [r for r in summary["rows"] if r["run_label"] == "baseline"]
+    got = {int(r["seed"]): int(r["processed_boxes"]) for r in rows}
+    assert got == {
+        50021: 21,
+        50022: 22,
+        50023: 22,
+        50024: 21,
+        50025: 21,
+    }
