@@ -5,6 +5,7 @@ from typing import Iterable
 
 from ..packer.pallet_model import PalletModel
 from .layer_monotonicity import compute_layer_monotonicity_metrics
+from .robot_top_access import compute_top_access_diagnostics
 
 
 def _base_layer_coverage_metrics(pallet: PalletModel) -> tuple[int, float, float, int, int]:
@@ -98,6 +99,7 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     stand_hw_gate_allows_total = 0
     stand_hw_rejected_support_total = 0
     layer_monotonicity_first_pallet_by_dest: dict[int, dict[str, object]] = {}
+    top_access_first_pallet_by_dest: dict[int, dict[str, object]] = {}
 
     for dest, pallets in pallets_by_dest.items():
         pallet_list = list(pallets)
@@ -113,6 +115,11 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             layer_band_mm=100,
             bin_area_mm2=int(first_pallet.bin_area_mm2),
             relevant_steps_limit=40,
+        )
+        top_access_first_pallet_by_dest[dest] = compute_top_access_diagnostics(
+            first_pallet.placements,
+            bin_length_mm=int(first_pallet.spec.bin_length_mm),
+            bin_width_mm=int(first_pallet.spec.bin_width_mm),
         )
 
         vol_values = [volume_utilization(pallet) for pallet in pallet_list]
@@ -224,6 +231,17 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         "layer_monotonicity_first_pallet": (
             dict(layer_monotonicity_first_pallet_by_dest[first_dest])
             if first_dest is not None
+            else {}
+        ),
+        "top_access_first_pallet_by_dest": {
+            int(dest): dict(values) for dest, values in top_access_first_pallet_by_dest.items()
+        },
+        "top_access_first_pallet_dest": (
+            int(first_dest) if first_dest is not None else None
+        ),
+        "top_access_first_pallet": (
+            dict(top_access_first_pallet_by_dest[first_dest])
+            if first_dest is not None and first_dest in top_access_first_pallet_by_dest
             else {}
         ),
     }

@@ -86,6 +86,13 @@ class SeedSummary:
     layer_fill_homogeneity_score: float | None
     z_band_fill_homogeneity_score: float | None
     active_layers_peak: int | None
+    blocked_count: int | None
+    marginal_count: int | None
+    blocked_stand_hw: int | None
+    marginal_stand_hw: int | None
+    first_blocked_step: int | None
+    issues_concentrated_at_end: bool | None
+    critical_placements_json: str
     layer_band_mm: int | None
     layer_band_fill_progress_json: str
     active_layers_over_time_json: str
@@ -393,6 +400,38 @@ def _select_first_pallet_monotonicity(
     return {}
 
 
+def _select_first_pallet_top_access(
+    pallet_kpis: dict[str, Any],
+    *,
+    forced_destination: int | None,
+) -> dict[str, Any]:
+    by_dest = pallet_kpis.get("top_access_first_pallet_by_dest", {})
+    if isinstance(by_dest, dict):
+        if forced_destination is not None:
+            if forced_destination in by_dest and isinstance(by_dest[forced_destination], dict):
+                return dict(by_dest[forced_destination])
+            key = str(int(forced_destination))
+            if key in by_dest and isinstance(by_dest[key], dict):
+                return dict(by_dest[key])
+
+        sortable_keys: list[tuple[int, str]] = []
+        for key in by_dest.keys():
+            try:
+                sortable_keys.append((int(key), str(key)))
+            except Exception:
+                sortable_keys.append((1_000_000_000, str(key)))
+        for _, key in sorted(sortable_keys):
+            raw = by_dest.get(key)
+            if isinstance(raw, dict):
+                return dict(raw)
+
+    top_level = pallet_kpis.get("top_access_first_pallet")
+    if isinstance(top_level, dict):
+        return dict(top_level)
+
+    return {}
+
+
 def run_seed(
     *,
     run_label: str,
@@ -437,6 +476,10 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    top_access = _select_first_pallet_top_access(
+        pallet_kpis if isinstance(pallet_kpis, dict) else {},
+        forced_destination=forced_destination,
+    )
 
     max_z_series = mono.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -452,6 +495,12 @@ def run_seed(
     clean_trace = (
         [item for item in step_trace_relevant if isinstance(item, dict)]
         if isinstance(step_trace_relevant, list)
+        else []
+    )
+    critical_placements = top_access.get("critical_placements", [])
+    clean_critical_placements = (
+        [item for item in critical_placements if isinstance(item, dict)]
+        if isinstance(critical_placements, list)
         else []
     )
 
@@ -476,6 +525,17 @@ def run_seed(
         layer_fill_homogeneity_score=_safe_float(mono.get("layer_fill_homogeneity_score")),
         z_band_fill_homogeneity_score=_safe_float(mono.get("z_band_fill_homogeneity_score")),
         active_layers_peak=active_layers_peak,
+        blocked_count=_safe_int(top_access.get("blocked_count")),
+        marginal_count=_safe_int(top_access.get("marginal_count")),
+        blocked_stand_hw=_safe_int(top_access.get("blocked_stand_hw")),
+        marginal_stand_hw=_safe_int(top_access.get("marginal_stand_hw")),
+        first_blocked_step=_safe_int(top_access.get("first_blocked_step")),
+        issues_concentrated_at_end=(
+            bool(top_access.get("issues_concentrated_at_end"))
+            if top_access.get("issues_concentrated_at_end") is not None
+            else None
+        ),
+        critical_placements_json=json.dumps(clean_critical_placements, ensure_ascii=True),
         layer_band_mm=_safe_int(mono.get("layer_band_mm")),
         layer_band_fill_progress_json=json.dumps(mono.get("layer_band_fill_progress", []), ensure_ascii=True),
         active_layers_over_time_json=json.dumps(
@@ -527,6 +587,21 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "layer_fill_homogeneity_score_mean": _mean([v.layer_fill_homogeneity_score for v in values_sorted]),
             "z_band_fill_homogeneity_score_mean": _mean([v.z_band_fill_homogeneity_score for v in values_sorted]),
             "active_layers_peak_mean": _mean([v.active_layers_peak for v in values_sorted]),
+            "blocked_count_mean": _mean([v.blocked_count for v in values_sorted]),
+            "marginal_count_mean": _mean([v.marginal_count for v in values_sorted]),
+            "blocked_stand_hw_mean": _mean([v.blocked_stand_hw for v in values_sorted]),
+            "marginal_stand_hw_mean": _mean([v.marginal_stand_hw for v in values_sorted]),
+            "first_blocked_step_mean": _mean([v.first_blocked_step for v in values_sorted]),
+            "issues_concentrated_at_end_share": _mean(
+                [
+                    (
+                        None
+                        if v.issues_concentrated_at_end is None
+                        else int(bool(v.issues_concentrated_at_end))
+                    )
+                    for v in values_sorted
+                ]
+            ),
             "processed_boxes_min": min(v.processed_boxes for v in values_sorted if v.processed_boxes is not None)
             if any(v.processed_boxes is not None for v in values_sorted)
             else None,
@@ -583,9 +658,15 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         "first_stand_hw_step",
         "stand_hw_used_total",
         "hard_floor_phase_stand_hw_chosen_total",
+        "blocked_count",
+        "marginal_count",
+        "blocked_stand_hw",
+        "marginal_stand_hw",
+        "first_blocked_step",
+        "issues_concentrated_at_end",
     ]
     print(" | ".join(headers))
-    print("-" * 110)
+    print("-" * 170)
     for row in sorted(rows, key=lambda r: (r.run_label, r.seed)):
         print(
             " | ".join(
@@ -597,6 +678,12 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
                     str(row.first_stand_hw_step),
                     str(row.stand_hw_used_total),
                     str(row.hard_floor_phase_stand_hw_chosen_total),
+                    str(row.blocked_count),
+                    str(row.marginal_count),
+                    str(row.blocked_stand_hw),
+                    str(row.marginal_stand_hw),
+                    str(row.first_blocked_step),
+                    str(row.issues_concentrated_at_end),
                 ]
             )
         )
