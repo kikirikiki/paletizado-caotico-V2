@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from palca.integration.layer_pattern_audit import audit_layer_pattern_poison
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -602,6 +603,184 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         )
 
 
+def _serialize_csv_value(value: Any) -> Any:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=True)
+    return value
+
+
+def _write_rows_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: _serialize_csv_value(row.get(key)) for key in fieldnames})
+
+
+def _run_layer_pattern_poison_audit(
+    *,
+    rows: list[SeedSummary],
+    run_params_by_label: dict[str, dict[str, Any]],
+    run_output_dir: Path,
+    counterfactual_top_k: int,
+    audit_horizon_step: int,
+) -> dict[str, Any]:
+    summary_rows: list[dict[str, Any]] = []
+    step_rows: list[dict[str, Any]] = []
+    counter_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        params = dict(run_params_by_label.get(str(row.run_label), {}))
+        forced_destination = _safe_int(params.get("force_destination"))
+        placements_seq = _extract_placement_sequence(
+            Path(str(row.placements_json)),
+            forced_destination=forced_destination,
+        )
+        audit = audit_layer_pattern_poison(
+            seed=int(row.seed),
+            placements=placements_seq,
+            params=params,
+            counterfactual_top_k=int(max(1, counterfactual_top_k)),
+            audit_horizon_step=int(max(0, audit_horizon_step)),
+        )
+
+        seed_summary = dict(audit.get("seed_summary", {}))
+        seed_summary["run_label"] = str(row.run_label)
+        summary_rows.append(seed_summary)
+
+        for item in audit.get("step_rows", []):
+            if not isinstance(item, dict):
+                continue
+            out = dict(item)
+            out["run_label"] = str(row.run_label)
+            step_rows.append(out)
+
+        for item in audit.get("counterfactual_rows", []):
+            if not isinstance(item, dict):
+                continue
+            out = dict(item)
+            out["run_label"] = str(row.run_label)
+            counter_rows.append(out)
+
+    summary_rows.sort(key=lambda r: (str(r.get("run_label", "")), _safe_int(r.get("seed")) or 0))
+    step_rows.sort(
+        key=lambda r: (
+            str(r.get("run_label", "")),
+            _safe_int(r.get("seed")) or 0,
+            _safe_int(r.get("step")) or 0,
+        )
+    )
+    counter_rows.sort(
+        key=lambda r: (
+            str(r.get("run_label", "")),
+            _safe_int(r.get("seed")) or 0,
+            _safe_int(r.get("step")) or 0,
+            _safe_int(r.get("candidate_rank_by_fillability")) or 0,
+        )
+    )
+
+    summary_json_path = run_output_dir / "layer_pattern_poison_summary.json"
+    summary_csv_path = run_output_dir / "layer_pattern_poison_summary.csv"
+    step_csv_path = run_output_dir / "layer_pattern_poison_steps.csv"
+    counter_csv_path = run_output_dir / "layer_pattern_poison_counterfactuals.csv"
+
+    summary_payload = {
+        "schema_version": 1,
+        "audit_name": "layer_pattern_poison",
+        "counterfactual_top_k": int(max(1, counterfactual_top_k)),
+        "audit_horizon_step": int(max(0, audit_horizon_step)),
+        "seed_summaries": summary_rows,
+        "step_rows_count": len(step_rows),
+        "counterfactual_rows_count": len(counter_rows),
+        "files": {
+            "summary_json": str(summary_json_path),
+            "summary_csv": str(summary_csv_path),
+            "step_csv": str(step_csv_path),
+            "counterfactual_csv": str(counter_csv_path),
+        },
+    }
+    summary_json_path.write_text(
+        json.dumps(summary_payload, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+    summary_fields = [
+        "run_label",
+        "seed",
+        "first_reentry_step",
+        "first_upper_layer_open_step",
+        "first_poison_step",
+        "poison_steps_topk",
+        "dominant_bad_residual_shapes",
+        "recurrent_poison_dims_orientations",
+        "count_steps_with_better_counterfactual",
+        "pattern_limited_root_cause_class",
+    ]
+    _write_rows_csv(summary_csv_path, summary_rows, summary_fields)
+
+    step_fields = [
+        "run_label",
+        "seed",
+        "step",
+        "active_layer_idx",
+        "placed_dims",
+        "placed_orientation",
+        "placed_orientation_family",
+        "placed_dims_orientation",
+        "placed_z_mm",
+        "first_reentry_step",
+        "first_upper_layer_open_step",
+        "in_window_first_reentry",
+        "in_window_first_upper_layer_open",
+        "in_window_h15",
+        "residual_free_rect_decomposition",
+        "active_layer_fillability_score",
+        "largest_fillable_free_rect_area_mm2",
+        "unfillable_free_rect_area_mm2",
+        "thin_strip_area_mm2",
+        "free_rect_count",
+        "box_compatibility_count",
+        "dominant_bad_residual_shape",
+        "poison_risk_score",
+        "counterfactual_better_same_step_exists",
+        "counterfactual_best_fillability_delta",
+        "counterfactual_best_dims_orientation",
+        "counterfactual_best_dims",
+        "counterfactual_best_orientation",
+        "poison_step_candidate_rank",
+    ]
+    _write_rows_csv(step_csv_path, step_rows, step_fields)
+
+    counter_fields = [
+        "run_label",
+        "seed",
+        "step",
+        "candidate_rank_by_fillability",
+        "candidate_token",
+        "candidate_box_id",
+        "candidate_placement_z_mm",
+        "candidate_dims_orientation",
+        "candidate_orientation_name",
+        "candidate_orientation_family",
+        "candidate_length_mm",
+        "candidate_width_mm",
+        "candidate_height_mm",
+        "candidate_fillability_score",
+        "candidate_poison_risk_score",
+        "candidate_free_rect_count",
+        "candidate_unfillable_free_rect_area_mm2",
+        "candidate_thin_strip_area_mm2",
+        "candidate_box_compatibility_count",
+        "candidate_dominant_bad_residual_shape",
+        "chosen_fillability_score",
+        "fillability_delta_vs_chosen",
+    ]
+    _write_rows_csv(counter_csv_path, counter_rows, counter_fields)
+
+    return summary_payload
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -610,6 +789,9 @@ def run_benchmark(
     set_overrides: list[str] | None = None,
     seeds_override: list[int] | None = None,
     variant_name: str = "variant",
+    layer_pattern_poison_audit: bool = False,
+    layer_pattern_poison_audit_top_k: int = 5,
+    layer_pattern_poison_audit_horizon_step: int = 15,
 ) -> dict[str, Any]:
     profile = load_profile(profile_path)
 
@@ -675,6 +857,7 @@ def run_benchmark(
     ]
     if variant_requested:
         runs.append((str(variant_name), variant_excel, variant_params, str(variant_hash)))
+    run_params_by_label = {str(label): dict(params) for label, _, params, _ in runs}
 
     for run_label, excel_path, params, effective_hash in runs:
         for seed in seeds:
@@ -689,6 +872,16 @@ def run_benchmark(
             rows.append(row)
 
     rows_sorted = sorted(rows, key=lambda r: (r.run_label, r.seed))
+
+    layer_pattern_audit_payload: dict[str, Any] | None = None
+    if layer_pattern_poison_audit:
+        layer_pattern_audit_payload = _run_layer_pattern_poison_audit(
+            rows=rows_sorted,
+            run_params_by_label=run_params_by_label,
+            run_output_dir=run_output_dir,
+            counterfactual_top_k=int(max(1, layer_pattern_poison_audit_top_k)),
+            audit_horizon_step=int(max(0, layer_pattern_poison_audit_horizon_step)),
+        )
 
     csv_path = run_output_dir / "summary.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -747,9 +940,30 @@ def run_benchmark(
         "aggregates": aggregates,
         "discriminative": discriminative,
         "rows": [asdict(r) for r in rows_sorted],
+        "layer_pattern_poison_audit": layer_pattern_audit_payload,
         "files": {
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
+            "layer_pattern_poison_summary_json": (
+                layer_pattern_audit_payload["files"]["summary_json"]
+                if isinstance(layer_pattern_audit_payload, dict)
+                else None
+            ),
+            "layer_pattern_poison_summary_csv": (
+                layer_pattern_audit_payload["files"]["summary_csv"]
+                if isinstance(layer_pattern_audit_payload, dict)
+                else None
+            ),
+            "layer_pattern_poison_step_csv": (
+                layer_pattern_audit_payload["files"]["step_csv"]
+                if isinstance(layer_pattern_audit_payload, dict)
+                else None
+            ),
+            "layer_pattern_poison_counterfactual_csv": (
+                layer_pattern_audit_payload["files"]["counterfactual_csv"]
+                if isinstance(layer_pattern_audit_payload, dict)
+                else None
+            ),
         },
     }
 
@@ -764,6 +978,9 @@ def run_benchmark(
     print(f"[benchmark] outdir={run_output_dir}")
     print(f"[benchmark] summary_csv={csv_path}")
     print(f"[benchmark] summary_json={summary_json_path}")
+    if isinstance(layer_pattern_audit_payload, dict):
+        print(f"[benchmark] layer_pattern_poison_summary_csv={layer_pattern_audit_payload['files']['summary_csv']}")
+        print(f"[benchmark] layer_pattern_poison_summary_json={layer_pattern_audit_payload['files']['summary_json']}")
     if baseline_flat:
         print(
             "[benchmark][warning] baseline flat across seeds in processed_boxes; "
@@ -808,6 +1025,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional seed override list. Defaults to profile seeds.",
     )
+    parser.add_argument(
+        "--layer-pattern-poison-audit",
+        action="store_true",
+        help="Enable offline layer pattern poison audit (diagnostic only).",
+    )
+    parser.add_argument(
+        "--layer-pattern-poison-audit-top-k",
+        type=int,
+        default=5,
+        help="Top-K viable same-step alternatives for poison counterfactuals.",
+    )
+    parser.add_argument(
+        "--layer-pattern-poison-audit-horizon-step",
+        type=int,
+        default=15,
+        help="Minimum audited step horizon (inclusive); audit always extends to first reentry when later.",
+    )
     return parser
 
 
@@ -820,6 +1054,9 @@ def main(argv: list[str] | None = None) -> int:
         set_overrides=list(args.set or []),
         seeds_override=(list(args.seeds) if args.seeds else None),
         variant_name=str(args.variant_name),
+        layer_pattern_poison_audit=bool(args.layer_pattern_poison_audit),
+        layer_pattern_poison_audit_top_k=int(args.layer_pattern_poison_audit_top_k),
+        layer_pattern_poison_audit_horizon_step=int(args.layer_pattern_poison_audit_horizon_step),
     )
     return 0
 
