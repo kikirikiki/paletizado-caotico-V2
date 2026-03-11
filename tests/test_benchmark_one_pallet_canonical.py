@@ -212,3 +212,140 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+
+
+def _fake_run_simulation_for_poison_tests(**kwargs):
+    seed = int(kwargs["episode_seed"])
+    out_path = Path(str(kwargs["out_path"]))
+    dump_path = Path(str(kwargs["dump_placements_path"]))
+
+    payload = {
+        "metrics": {
+            "processed_boxes": 20 + (seed % 2),
+            "pallet_kpis": {
+                "layer_monotonicity_first_pallet_by_dest": {
+                    "1": {
+                        "layer_band_mm": 100,
+                        "active_layers_over_time": [1, 1, 1],
+                        "step_trace_relevant": [],
+                    }
+                }
+            },
+        }
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    dump_payload = {
+        "pallets": {
+            "1": [
+                {
+                    "step_index": 0,
+                    "box_id": "A",
+                    "length_mm": 70,
+                    "width_mm": 70,
+                    "height_mm": 20,
+                    "x_mm": 0,
+                    "y_mm": 0,
+                    "z_mm": 0,
+                    "layer_id": 0,
+                    "orientation_family": "planar",
+                    "orientation_name": "LWH",
+                },
+                {
+                    "step_index": 1,
+                    "box_id": "B",
+                    "length_mm": 50,
+                    "width_mm": 50,
+                    "height_mm": 20,
+                    "x_mm": 0,
+                    "y_mm": 0,
+                    "z_mm": 0,
+                    "layer_id": 0,
+                    "orientation_family": "planar",
+                    "orientation_name": "LWH",
+                },
+                {
+                    "step_index": 2,
+                    "box_id": "C",
+                    "length_mm": 50,
+                    "width_mm": 50,
+                    "height_mm": 20,
+                    "x_mm": 50,
+                    "y_mm": 0,
+                    "z_mm": 0,
+                    "layer_id": 0,
+                    "orientation_family": "planar",
+                    "orientation_name": "LWH",
+                },
+            ]
+        }
+    }
+    dump_path.parent.mkdir(parents=True, exist_ok=True)
+    dump_path.write_text(json.dumps(dump_payload), encoding="utf-8")
+    return payload
+
+
+def test_run_benchmark_without_poison_audit_keeps_baseline_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bench, "run_simulation", _fake_run_simulation_for_poison_tests)
+
+    summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_no_audit",
+        seeds_override=[50021, 50022],
+        layer_pattern_poison_audit=False,
+    )
+
+    rows = sorted(summary["rows"], key=lambda row: int(row["seed"]))
+    assert [int(row["processed_boxes"]) for row in rows] == [21, 20]
+    assert summary["layer_pattern_poison_audit"] is None
+    assert summary["files"]["layer_pattern_poison_summary_csv"] is None
+    assert summary["files"]["layer_pattern_poison_step_csv"] is None
+    assert summary["files"]["layer_pattern_poison_counterfactual_csv"] is None
+
+
+def test_run_benchmark_exports_poison_audit_tables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bench, "run_simulation", _fake_run_simulation_for_poison_tests)
+
+    summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_with_audit",
+        seeds_override=[50021],
+        layer_pattern_poison_audit=True,
+        layer_pattern_poison_audit_top_k=3,
+        layer_pattern_poison_audit_horizon_step=1,
+    )
+
+    assert isinstance(summary["layer_pattern_poison_audit"], dict)
+
+    summary_csv = Path(summary["files"]["layer_pattern_poison_summary_csv"])
+    step_csv = Path(summary["files"]["layer_pattern_poison_step_csv"])
+    counter_csv = Path(summary["files"]["layer_pattern_poison_counterfactual_csv"])
+    assert summary_csv.exists()
+    assert step_csv.exists()
+    assert counter_csv.exists()
+
+    with summary_csv.open("r", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert "first_poison_step" in row
+    assert "pattern_limited_root_cause_class" in row
+    assert "count_steps_with_better_counterfactual" in row
+
+    with step_csv.open("r", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert "active_layer_fillability_score" in row
+    assert "largest_fillable_free_rect_area_mm2" in row
+    assert "counterfactual_best_fillability_delta" in row
+    assert "counterfactual_best_dims_orientation" in row
+
+    with counter_csv.open("r", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+    assert "candidate_rank_by_fillability" in row
+    assert "candidate_fillability_score" in row
+    assert "fillability_delta_vs_chosen" in row
