@@ -27,6 +27,9 @@ def test_layer_monotonicity_reentry_basic() -> None:
     m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100)
 
     assert int(m["first_stack_step"]) == 1
+    assert int(m["reentries_total"]) == 1
+    assert int(m["first_reentry_step"]) == 2
+    assert int(m["highest_layer_opened"]) == 1
     assert int(m["lower_layer_reentry_count"]) == 1
     assert int(m["lower_layer_reentry_max_drop_mm"]) == 100
     assert abs(float(m["lower_layer_reentry_mean_drop_mm"]) - 100.0) < 1e-9
@@ -46,6 +49,9 @@ def test_layer_monotonicity_monotonic_basic() -> None:
 
     m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100)
 
+    assert int(m["reentries_total"]) == 0
+    assert int(m["first_reentry_step"]) == -1
+    assert int(m["highest_layer_opened"]) == 2
     assert int(m["lower_layer_reentry_count"]) == 0
     assert abs(float(m["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(m["first_stack_step"]) == 2

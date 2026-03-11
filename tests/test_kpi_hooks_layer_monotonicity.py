@@ -20,6 +20,9 @@ def test_aggregate_pallet_kpis_exposes_first_pallet_layer_monotonicity() -> None
     mono = by_dest.get(1)
     assert isinstance(mono, dict)
 
+    assert int(mono.get("reentries_total", 0)) == 1
+    assert int(mono.get("first_reentry_step", -1)) == 2
+    assert int(mono.get("highest_layer_opened", 0)) == 1
     assert int(mono.get("lower_layer_reentry_count", 0)) == 1
     assert "layer_band_fill_progress" in mono
     assert "active_layers_over_time" in mono

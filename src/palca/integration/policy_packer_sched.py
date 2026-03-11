@@ -184,6 +184,7 @@ class PolicyPackerScheduler:
         hard_floor_phase_min_base_candidates: int = 1,
         hard_floor_phase_lookahead_items: int = 8,
         hard_floor_phase_stand_mix_bonus: float = 0.0,
+        enforce_no_layer_reentry: bool = False,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -228,6 +229,7 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
+            enforce_no_layer_reentry=bool(enforce_no_layer_reentry),
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -774,6 +776,16 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+        enforce_no_layer_reentry = bool(getattr(self._scheduler.config, "enforce_no_layer_reentry", False))
+        placements_rejected_no_layer_reentry = int(
+            getattr(self._scheduler, "no_layer_reentry_rejections_total", 0) or 0
+        )
+        no_layer_reentry_first_reject_step = getattr(self._scheduler, "no_layer_reentry_first_reject_step", None)
+        if no_layer_reentry_first_reject_step is None:
+            no_layer_reentry_first_reject_step = -1
+        no_layer_reentry_highest_layer_opened = int(
+            getattr(self._scheduler, "no_layer_reentry_highest_layer_opened", 0) or 0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -813,6 +825,10 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )
+        kpis["enforce_no_layer_reentry"] = bool(enforce_no_layer_reentry)
+        kpis["placements_rejected_no_layer_reentry"] = int(placements_rejected_no_layer_reentry)
+        kpis["no_layer_reentry_first_reject_step"] = int(no_layer_reentry_first_reject_step)
+        kpis["no_layer_reentry_highest_layer_opened"] = int(no_layer_reentry_highest_layer_opened)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
