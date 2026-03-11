@@ -184,6 +184,10 @@ class PolicyPackerScheduler:
         hard_floor_phase_min_base_candidates: int = 1,
         hard_floor_phase_lookahead_items: int = 8,
         hard_floor_phase_stand_mix_bonus: float = 0.0,
+        enable_early_layer_prefix_beam: bool = False,
+        early_layer_prefix_depth: int = 3,
+        early_layer_prefix_steps: int = 4,
+        early_layer_prefix_width: int = 4,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -228,6 +232,10 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
+            enable_early_layer_prefix_beam=bool(enable_early_layer_prefix_beam),
+            early_layer_prefix_depth=max(1, int(early_layer_prefix_depth)),
+            early_layer_prefix_steps=max(1, int(early_layer_prefix_steps)),
+            early_layer_prefix_width=max(1, int(early_layer_prefix_width)),
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -774,6 +782,31 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+        early_layer_prefix_beam_enabled = bool(
+            getattr(self._scheduler.config, "enable_early_layer_prefix_beam", False)
+        )
+        early_layer_prefix_depth = int(
+            getattr(self._scheduler.config, "early_layer_prefix_depth", 3) or 3
+        )
+        early_layer_prefix_steps = int(
+            getattr(self._scheduler.config, "early_layer_prefix_steps", 4) or 4
+        )
+        early_layer_prefix_width = int(
+            getattr(self._scheduler.config, "early_layer_prefix_width", 4) or 4
+        )
+        early_layer_prefix_beam_invocations = int(
+            getattr(self._scheduler, "early_layer_prefix_beam_invocations", 0) or 0
+        )
+        early_layer_prefix_beam_changed_choice_count = int(
+            getattr(self._scheduler, "early_layer_prefix_beam_changed_choice_count", 0) or 0
+        )
+        early_layer_prefix_beam_best_score_delta_sum = float(
+            getattr(self._scheduler, "early_layer_prefix_beam_best_score_delta_sum", 0.0) or 0.0
+        )
+        early_layer_prefix_beam_thin_unfillable_mix_count = int(
+            getattr(self._scheduler, "early_layer_prefix_beam_thin_unfillable_mix_count", 0) or 0
+        )
+        early_layer_prefix_beam_events = list(getattr(self._scheduler, "early_layer_prefix_beam_events", []) or [])
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -813,6 +846,20 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )
+        kpis["enable_early_layer_prefix_beam"] = bool(early_layer_prefix_beam_enabled)
+        kpis["early_layer_prefix_depth"] = int(early_layer_prefix_depth)
+        kpis["early_layer_prefix_steps"] = int(early_layer_prefix_steps)
+        kpis["early_layer_prefix_width"] = int(early_layer_prefix_width)
+        kpis["early_layer_prefix_beam_invocations"] = int(early_layer_prefix_beam_invocations)
+        kpis["early_layer_prefix_beam_changed_choice_count"] = int(early_layer_prefix_beam_changed_choice_count)
+        kpis["early_layer_prefix_beam_changed_choice_rate"] = float(
+            float(early_layer_prefix_beam_changed_choice_count) / max(1, early_layer_prefix_beam_invocations)
+        )
+        kpis["early_layer_prefix_beam_best_score_delta"] = float(
+            float(early_layer_prefix_beam_best_score_delta_sum) / max(1, early_layer_prefix_beam_invocations)
+        )
+        kpis["early_layer_prefix_beam_thin_unfillable_mix_count"] = int(early_layer_prefix_beam_thin_unfillable_mix_count)
+        kpis["early_layer_prefix_beam_events"] = [dict(event) for event in early_layer_prefix_beam_events]
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
