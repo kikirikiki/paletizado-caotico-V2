@@ -110,13 +110,18 @@ def test_run_benchmark_generates_summary_with_expected_structure(
         payload = {
             "metrics": {
                 "processed_boxes": seed + lookahead_k,
+                "throughput_per_hour": float(seed + lookahead_k) * 10.0,
                 "pallet_kpis": {
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
+                    "placements_rejected_no_layer_reentry": 2,
                     "layer_monotonicity_first_pallet_by_dest": {
                         "1": {
                             "first_stack_step": 3,
                             "max_z_seen_so_far_by_step": [0, 0, 100, 200],
+                            "reentries_total": 1,
+                            "first_reentry_step": 3,
+                            "highest_layer_opened": 2,
                             "lower_layer_reentry_count": 1,
                             "lower_layer_reentry_total_drop_mm": 100,
                             "lower_layer_reentry_max_drop_mm": 100,
@@ -187,6 +192,11 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     assert all(r["first_stack_step"] == 2 for r in rows)
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
+    assert all(abs(float(r["throughput_final"]) - float(r["processed_boxes"])) < 1e-9 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
+    assert all(r["first_reentry_step"] == 3 for r in rows)
+    assert all(r["highest_layer_opened"] == 2 for r in rows)
+    assert all(r["placements_rejected_no_layer_reentry"] == 2 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
@@ -211,4 +221,7 @@ def test_run_benchmark_generates_summary_with_expected_structure(
         csv_row = next(csv.DictReader(handle))
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
+    assert "throughput_final" in csv_row
+    assert "reentries_total" in csv_row
+    assert "placements_rejected_no_layer_reentry" in csv_row
     assert "step_trace_relevant_json" in csv_row

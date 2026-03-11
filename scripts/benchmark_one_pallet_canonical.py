@@ -71,11 +71,16 @@ class SeedSummary:
     run_label: str
     seed: int
     processed_boxes: int | None
+    throughput_final: float | None
     first_stack_step: int | None
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
     max_z_seen_last_mm: int | None
+    reentries_total: int | None
+    first_reentry_step: int | None
+    highest_layer_opened: int | None
+    placements_rejected_no_layer_reentry: int | None
     lower_layer_reentry_count: int | None
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
@@ -420,6 +425,13 @@ def run_seed(
     pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
 
     processed_boxes = _safe_int(metrics.get("processed_boxes")) if isinstance(metrics, dict) else None
+    throughput_final = None
+    if isinstance(metrics, dict):
+        throughput_final = _safe_float(metrics.get("processed_boxes"))
+        if throughput_final is None:
+            throughput_final = _safe_float(metrics.get("throughput_per_hour"))
+        if throughput_final is None:
+            throughput_final = _safe_float(metrics.get("throughput"))
     stand_hw_used_total = _safe_int(pallet_kpis.get("stand_hw_used_total")) if isinstance(pallet_kpis, dict) else None
     hard_floor_stand_total = (
         _safe_int(pallet_kpis.get("hard_floor_phase_stand_hw_chosen_total"))
@@ -437,6 +449,9 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    reentries_total = _safe_int(mono.get("reentries_total"))
+    if reentries_total is None:
+        reentries_total = _safe_int(mono.get("lower_layer_reentry_count"))
 
     max_z_series = mono.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -447,6 +462,9 @@ def run_seed(
     active_layers_peak = None
     if isinstance(active_layers_series, list) and active_layers_series:
         active_layers_peak = max((_safe_int(v) or 0) for v in active_layers_series)
+    highest_layer_opened = _safe_int(mono.get("highest_layer_opened"))
+    if highest_layer_opened is None and active_layers_peak is not None:
+        highest_layer_opened = max(0, int(active_layers_peak) - 1)
 
     step_trace_relevant = mono.get("step_trace_relevant", [])
     clean_trace = (
@@ -459,11 +477,20 @@ def run_seed(
         run_label=run_label,
         seed=int(seed),
         processed_boxes=processed_boxes,
+        throughput_final=throughput_final,
         first_stack_step=first_stack_step,
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
         max_z_seen_last_mm=max_z_seen_last_mm,
+        reentries_total=reentries_total,
+        first_reentry_step=_safe_int(mono.get("first_reentry_step")),
+        highest_layer_opened=highest_layer_opened,
+        placements_rejected_no_layer_reentry=(
+            _safe_int(pallet_kpis.get("placements_rejected_no_layer_reentry"))
+            if isinstance(pallet_kpis, dict)
+            else None
+        ),
         lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
         lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
         lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
@@ -510,11 +537,18 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "seed_count": len(values_sorted),
             "seeds": [int(v.seed) for v in values_sorted],
             "processed_boxes_mean": _mean([v.processed_boxes for v in values_sorted]),
+            "throughput_final_mean": _mean([v.throughput_final for v in values_sorted]),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),
             "hard_floor_phase_stand_hw_chosen_total_mean": _mean(
                 [v.hard_floor_phase_stand_hw_chosen_total for v in values_sorted]
+            ),
+            "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
+            "first_reentry_step_mean": _mean([v.first_reentry_step for v in values_sorted]),
+            "highest_layer_opened_mean": _mean([v.highest_layer_opened for v in values_sorted]),
+            "placements_rejected_no_layer_reentry_mean": _mean(
+                [v.placements_rejected_no_layer_reentry for v in values_sorted]
             ),
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
@@ -579,6 +613,11 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         "run",
         "seed",
         "processed_boxes",
+        "throughput_final",
+        "reentries_total",
+        "first_reentry_step",
+        "highest_layer_opened",
+        "placements_rejected_no_layer_reentry",
         "first_stack_step",
         "first_stand_hw_step",
         "stand_hw_used_total",
@@ -593,6 +632,11 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
                     str(row.run_label),
                     str(row.seed),
                     str(row.processed_boxes),
+                    str(row.throughput_final),
+                    str(row.reentries_total),
+                    str(row.first_reentry_step),
+                    str(row.highest_layer_opened),
+                    str(row.placements_rejected_no_layer_reentry),
                     str(row.first_stack_step),
                     str(row.first_stand_hw_step),
                     str(row.stand_hw_used_total),
