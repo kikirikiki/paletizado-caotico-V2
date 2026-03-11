@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
+from ..layering import DEFAULT_LAYER_BAND_MM, layer_idx_from_base_z_mm
 from ..packer.pallet_model import PalletModel
 from ..scoring.height_slack import (
     ScoreMode,
@@ -59,6 +60,7 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    enforce_no_layer_reentry: bool = False
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -100,6 +102,7 @@ class SchedulerConfig:
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
         object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
+        object.__setattr__(self, "enforce_no_layer_reentry", bool(self.enforce_no_layer_reentry))
 
 
 @dataclass(frozen=True)
@@ -262,6 +265,9 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.no_layer_reentry_rejections_total = 0
+        self.no_layer_reentry_first_reject_step: int | None = None
+        self.no_layer_reentry_highest_layer_opened = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -312,6 +318,9 @@ class SchedulerV1:
                     "items_feasible": 0,
                     "cutoff": bool(micro_stats.get("cutoff", False)),
                     "cutoff_reason": str(micro_stats.get("cutoff_reason", "")),
+                    "placements_rejected_no_layer_reentry": int(
+                        micro_stats.get("placements_rejected_no_layer_reentry", 0) or 0
+                    ),
                     "micro_plan": dict(micro_stats),
                     "mode": "micro",
                 }
@@ -357,6 +366,7 @@ class SchedulerV1:
 
         items_evaluated = 0
         items_feasible = 0
+        reentry_guardrail_rejections = 0
         feasible_candidates: list[_ScoredCandidate] = []
         window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
@@ -463,6 +473,15 @@ class SchedulerV1:
                                 ),
                             }
                     continue
+                if self._rejects_no_layer_reentry(
+                    pallet_id=pallet_id,
+                    pallet=pallet,
+                    preview=preview,
+                    box=box,
+                    source="greedy",
+                ):
+                    reentry_guardrail_rejections += 1
+                    continue
                 items_feasible += 1
 
                 height_after_mm = self._resolve_height_after_mm(preview, pallet)
@@ -524,6 +543,7 @@ class SchedulerV1:
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
             "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
             "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
+            "placements_rejected_no_layer_reentry": int(reentry_guardrail_rejections),
         }
 
         best_plan: PickPlan | None = None
@@ -626,6 +646,7 @@ class SchedulerV1:
         depth_effective = 0
         cutoff = False
         cutoff_reason = ""
+        guardrail_rejects_before = int(self.no_layer_reentry_rejections_total)
         batchfill_calls_local = 0
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
@@ -726,6 +747,9 @@ class SchedulerV1:
                                 "height_slack_mm": int(self.config.height_slack_mm),
                                 "cutoff": bool(cutoff),
                                 "cutoff_reason": str(cutoff_reason),
+                                "placements_rejected_no_layer_reentry": int(
+                                    int(self.no_layer_reentry_rejections_total) - int(guardrail_rejects_before)
+                                ),
                                 "batchfill_calls": int(batchfill_calls_local),
                                 "batchfill_applied": int(batchfill_applied_local),
                                 "batchfill_selected_layer_boxes_mean": float(
@@ -809,6 +833,9 @@ class SchedulerV1:
             "height_slack_mm": int(self.config.height_slack_mm),
             "cutoff": bool(cutoff),
             "cutoff_reason": str(cutoff_reason),
+            "placements_rejected_no_layer_reentry": int(
+                int(self.no_layer_reentry_rejections_total) - int(guardrail_rejects_before)
+            ),
             "batchfill_calls": int(batchfill_calls_local),
             "batchfill_applied": int(batchfill_applied_local),
             "batchfill_selected_layer_boxes_mean": float(
@@ -950,6 +977,14 @@ class SchedulerV1:
         preview = self._preview_place(pallet, box)
         if not preview.feasible:
             return None
+        if self._rejects_no_layer_reentry(
+            pallet_id=pallet_id,
+            pallet=pallet,
+            preview=preview,
+            box=box,
+            source="micro",
+        ):
+            return None
 
         height_after_mm = self._resolve_height_after_mm(preview, pallet)
         terms = self._score_candidate(
@@ -1026,6 +1061,80 @@ class SchedulerV1:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _placement_base_layer_idx(placement: object | None) -> int | None:
+        if placement is None:
+            return None
+        try:
+            z_mm = int(getattr(placement, "z_mm", 0) or 0)
+        except Exception:
+            return None
+        return int(layer_idx_from_base_z_mm(z_mm, layer_band_mm=DEFAULT_LAYER_BAND_MM))
+
+    def _highest_open_layer_idx(self, pallet: PalletModel) -> int:
+        highest = 0
+        placements = list(getattr(pallet, "placements", []) or [])
+        for placement in placements:
+            layer_idx = self._placement_base_layer_idx(placement)
+            if layer_idx is None:
+                continue
+            highest = max(int(highest), int(layer_idx))
+        return int(highest)
+
+    def _rejects_no_layer_reentry(
+        self,
+        *,
+        pallet_id: int | str | None,
+        pallet: PalletModel,
+        preview: PlacementPreview | None,
+        box: Box | None,
+        source: str,
+        record_metrics: bool = True,
+    ) -> bool:
+        if not bool(getattr(self.config, "enforce_no_layer_reentry", False)):
+            return False
+        if preview is None:
+            return False
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return False
+
+        candidate_layer_idx = self._placement_base_layer_idx(placement)
+        if candidate_layer_idx is None:
+            return False
+
+        highest_open_layer_idx = self._highest_open_layer_idx(pallet)
+        self.no_layer_reentry_highest_layer_opened = max(
+            int(self.no_layer_reentry_highest_layer_opened),
+            int(highest_open_layer_idx),
+            int(candidate_layer_idx),
+        )
+        if int(candidate_layer_idx) >= int(highest_open_layer_idx):
+            return False
+
+        step_idx = 0
+        if pallet_id is not None and pallet_id in self._spatial_step_index_by_pallet:
+            step_idx = int(self._spatial_step_index_by_pallet.get(pallet_id, 0) or 0)
+        else:
+            step_idx = len(list(getattr(pallet, "placements", []) or []))
+
+        if record_metrics:
+            self.no_layer_reentry_rejections_total += 1
+            if self.no_layer_reentry_first_reject_step is None:
+                self.no_layer_reentry_first_reject_step = int(step_idx)
+
+        self._logger.debug(
+            "NO_LAYER_REENTRY reject source=%s pallet=%s step=%s box_id=%s candidate_layer_idx=%s highest_open_layer_idx=%s base_z_mm=%s",
+            source,
+            pallet_id,
+            int(step_idx),
+            (getattr(box, "box_id", None) if box is not None else None),
+            int(candidate_layer_idx),
+            int(highest_open_layer_idx),
+            int(getattr(placement, "z_mm", 0) or 0),
+        )
+        return True
+
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))
         local_deadline = time.perf_counter() + (float(budget_ms) / 1000.0)
@@ -1051,6 +1160,15 @@ class SchedulerV1:
             starter_preview_local = self._preview_place(pallet_clone, starter_box)
             if not starter_preview_local.feasible:
                 return None
+            if self._rejects_no_layer_reentry(
+                pallet_id=getattr(starter_box, "destination", None),
+                pallet=pallet_clone,
+                preview=starter_preview_local,
+                box=starter_box,
+                source="batchfill",
+                record_metrics=False,
+            ):
+                return None
             starter_placement = pallet_clone.commit_place(starter_preview_local)
         except Exception:
             return None
@@ -1072,6 +1190,15 @@ class SchedulerV1:
                     break
                 preview = self._preview_place(pallet_clone, box)
                 if not preview.feasible:
+                    continue
+                if self._rejects_no_layer_reentry(
+                    pallet_id=getattr(box, "destination", None),
+                    pallet=pallet_clone,
+                    preview=preview,
+                    box=box,
+                    source="batchfill",
+                    record_metrics=False,
+                ):
                     continue
                 preview_layer_id = self._preview_layer_id(preview)
                 if preview_layer_id != starter_layer_id:
@@ -1877,8 +2004,12 @@ class SchedulerV1:
         for pallet_id, pallet in pallets.items():
             counts: dict[tuple[int, int], int] = {}
             step_idx = 0
+            highest_layer_idx_for_pallet = 0
             for placement in list(getattr(pallet, "placements", []) or []):
                 step_idx += 1
+                layer_idx = self._placement_base_layer_idx(placement)
+                if layer_idx is not None:
+                    highest_layer_idx_for_pallet = max(int(highest_layer_idx_for_pallet), int(layer_idx))
                 xy = self._placement_xy_mm(placement)
                 if xy is None:
                     continue
@@ -1888,6 +2019,10 @@ class SchedulerV1:
                 counts[key] = int(counts.get(key, 0)) + 1
             self._spatial_bin_counts[pallet_id] = counts
             self._spatial_step_index_by_pallet[pallet_id] = int(step_idx)
+            self.no_layer_reentry_highest_layer_opened = max(
+                int(self.no_layer_reentry_highest_layer_opened),
+                int(highest_layer_idx_for_pallet),
+            )
             prev_idx = int(prev_step_index.get(pallet_id, 0) or 0)
             if int(step_idx) == 0 and prev_idx > 0:
                 self._hard_floor_phase_exited_no_floor_pallets.discard(pallet_id)

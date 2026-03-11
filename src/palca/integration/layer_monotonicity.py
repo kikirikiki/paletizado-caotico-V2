@@ -4,6 +4,8 @@ from collections import defaultdict
 from statistics import mean
 from typing import Any, Iterable
 
+from ..layering import DEFAULT_LAYER_BAND_MM, layer_idx_from_base_z_mm
+
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
@@ -40,7 +42,7 @@ def _sorted_numeric_dict(d: dict[int, Any]) -> dict[str, Any]:
 def compute_layer_monotonicity_metrics(
     placements: Iterable[Any],
     *,
-    layer_band_mm: int = 100,
+    layer_band_mm: int = DEFAULT_LAYER_BAND_MM,
     bin_area_mm2: int | None = None,
     relevant_steps_limit: int = 40,
 ) -> dict[str, Any]:
@@ -55,6 +57,9 @@ def compute_layer_monotonicity_metrics(
             "first_stack_step": -1,
             "max_z_seen_so_far_by_step": [],
             "max_top_z_seen_so_far_by_step": [],
+            "reentries_total": 0,
+            "first_reentry_step": -1,
+            "highest_layer_opened": 0,
             "lower_layer_reentry_count": 0,
             "lower_layer_reentry_total_drop_mm": 0,
             "lower_layer_reentry_max_drop_mm": 0,
@@ -87,6 +92,7 @@ def compute_layer_monotonicity_metrics(
     max_band_seen = 0
     monotonic_count = 0
     reentry_drops: list[int] = []
+    first_reentry_step = -1
     below_top_after_opening_count = 0
 
     max_z_seen_so_far_by_step: list[int] = []
@@ -109,7 +115,7 @@ def compute_layer_monotonicity_metrics(
         w_mm = max(0, _as_int(_placement_value(placement, "width_mm", 0)))
         layer_id = _as_int(_placement_value(placement, "layer_id", 0))
 
-        band_id = int(z_mm // band_mm)
+        band_id = layer_idx_from_base_z_mm(z_mm, layer_band_mm=band_mm)
         area_mm2 = int(l_mm * w_mm)
 
         prev_max_z = int(max_z_seen)
@@ -128,6 +134,8 @@ def compute_layer_monotonicity_metrics(
             monotonic_count += 1
         if is_reentry:
             reentry_drops.append(int(reentry_drop_mm))
+            if first_reentry_step < 0:
+                first_reentry_step = int(step)
 
         opened_new_band = int(band_id) > int(prev_max_band)
         below_current_top_after_opening = int(prev_max_band) >= 1 and int(band_id) < int(prev_max_band)
@@ -251,6 +259,9 @@ def compute_layer_monotonicity_metrics(
         "first_stack_step": int(first_stack_step),
         "max_z_seen_so_far_by_step": [int(v) for v in max_z_seen_so_far_by_step],
         "max_top_z_seen_so_far_by_step": [int(v) for v in max_top_z_seen_so_far_by_step],
+        "reentries_total": int(len(reentry_drops)),
+        "first_reentry_step": int(first_reentry_step),
+        "highest_layer_opened": int(max_band_seen),
         "lower_layer_reentry_count": int(len(reentry_drops)),
         "lower_layer_reentry_total_drop_mm": int(sum(reentry_drops)),
         "lower_layer_reentry_max_drop_mm": int(max(reentry_drops)) if reentry_drops else 0,
