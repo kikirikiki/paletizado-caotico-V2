@@ -4,9 +4,6 @@ import math
 from typing import Any, Iterable
 
 BLOCKED_REASONS = {
-    "top_open_area_too_small",
-    "top_bbox_too_narrow",
-    "top_bbox_too_short",
     "overhead_blocked",
     "mixed",
 }
@@ -160,53 +157,27 @@ def _largest_clear_rect_containing_target(
     return int(best_l), int(best_w), int(best_area)
 
 
-def _blocked_reason(
-    *,
-    overhead_blocked_height_mm: int,
-    narrow_fail: bool,
-    short_fail: bool,
-    area_fail: bool,
-    top_open_bbox_l_mm: int,
-    top_open_bbox_w_mm: int,
-) -> str | None:
-    if overhead_blocked_height_mm > 0 and top_open_bbox_l_mm <= 0 and top_open_bbox_w_mm <= 0:
-        return "overhead_blocked"
-
-    reasons: list[str] = []
-    if overhead_blocked_height_mm > 0:
-        reasons.append("overhead_blocked")
-    if narrow_fail:
-        reasons.append("top_bbox_too_narrow")
-    if short_fail:
-        reasons.append("top_bbox_too_short")
-    if area_fail:
-        reasons.append("top_open_area_too_small")
-
-    if not reasons:
-        return None
-    if len(reasons) == 1:
-        return reasons[0]
-    return "mixed"
-
-
 def compute_top_access_diagnostics(
     placements: Iterable[Any],
     *,
     bin_length_mm: int | None = None,
     bin_width_mm: int | None = None,
     insertion_margin_mm: int = 40,
+    tool_margin_mm: int = 0,
     marginal_ratio: float = 0.90,
     critical_limit: int = 8,
 ) -> dict[str, Any]:
     seq = list(placements)
     n = len(seq)
     margin_mm = max(0, int(insertion_margin_mm))
+    tool_margin = max(0, int(tool_margin_mm))
     ratio = max(0.0, min(1.0, float(marginal_ratio)))
 
     if n <= 0:
         return {
             "placements_count": 0,
             "insertion_margin_mm": int(margin_mm),
+            "tool_margin_mm": int(tool_margin),
             "marginal_ratio": float(ratio),
             "blocked_count": 0,
             "marginal_count": 0,
@@ -235,6 +206,28 @@ def compute_top_access_diagnostics(
         x1 = int(x0 + l_mm)
         y1 = int(y0 + w_mm)
         target_rect = (int(x0), int(y0), int(x1), int(y1))
+        hard_target_rect = (
+            int(x0 - tool_margin),
+            int(y0 - tool_margin),
+            int(x1 + tool_margin),
+            int(y1 + tool_margin),
+        )
+        if bin_length_mm is not None:
+            hard_target_rect = (
+                max(0, int(hard_target_rect[0])),
+                int(hard_target_rect[1]),
+                min(int(bin_length_mm), int(hard_target_rect[2])),
+                int(hard_target_rect[3]),
+            )
+        if bin_width_mm is not None:
+            hard_target_rect = (
+                int(hard_target_rect[0]),
+                max(0, int(hard_target_rect[1])),
+                int(hard_target_rect[2]),
+                min(int(bin_width_mm), int(hard_target_rect[3])),
+            )
+        if hard_target_rect[2] <= hard_target_rect[0] or hard_target_rect[3] <= hard_target_rect[1]:
+            hard_target_rect = target_rect
 
         zone_x0 = int(x0 - margin_mm)
         zone_y0 = int(y0 - margin_mm)
@@ -265,7 +258,7 @@ def compute_top_access_diagnostics(
             ptop = int(pz + ph)
             prev_rect = (int(px0), int(py0), int(px0 + pl), int(py0 + pw))
 
-            if ptop > z_mm and _rect_overlap_area(target_rect, prev_rect) > 0:
+            if ptop > z_mm and _rect_overlap_area(hard_target_rect, prev_rect) > 0:
                 overhead_top_z_max = int(ptop if overhead_top_z_max is None else max(overhead_top_z_max, ptop))
 
             if ptop > z_mm:
@@ -286,33 +279,33 @@ def compute_top_access_diagnostics(
             blockers=blockers,
         )
 
-        required_l_mm = int(l_mm + 2 * margin_mm)
-        required_w_mm = int(w_mm + 2 * margin_mm)
+        required_l_mm = int(l_mm + margin_mm)
+        required_w_mm = int(w_mm + margin_mm)
         required_area_mm2 = int(required_l_mm * required_w_mm)
         required_l_marginal_mm = int(math.ceil(required_l_mm * ratio))
         required_w_marginal_mm = int(math.ceil(required_w_mm * ratio))
         required_area_marginal_mm2 = int(math.ceil(required_area_mm2 * ratio))
 
         has_hard_overhead = overhead_blocked_height_mm > 0
-        meets_access = (
-            (not has_hard_overhead)
-            and top_open_bbox_l_mm >= required_l_mm
+        meets_access_aux = (
+            top_open_bbox_l_mm >= required_l_mm
             and top_open_bbox_w_mm >= required_w_mm
             and top_open_area_mm2 >= required_area_mm2
         )
-        meets_marginal = (
-            (not has_hard_overhead)
-            and top_open_bbox_l_mm >= required_l_marginal_mm
+        meets_marginal_aux = (
+            top_open_bbox_l_mm >= required_l_marginal_mm
             and top_open_bbox_w_mm >= required_w_marginal_mm
             and top_open_area_mm2 >= required_area_marginal_mm2
         )
 
-        if meets_access:
+        if has_hard_overhead:
+            accessibility_class = "blocked"
+        elif meets_access_aux:
             accessibility_class = "accessible"
-        elif meets_marginal:
+        elif meets_marginal_aux:
             accessibility_class = "marginal"
         else:
-            accessibility_class = "blocked"
+            accessibility_class = "marginal"
 
         narrow_fail = top_open_bbox_w_mm < required_w_marginal_mm
         short_fail = top_open_bbox_l_mm < required_l_marginal_mm
@@ -321,19 +314,11 @@ def compute_top_access_diagnostics(
             and (not narrow_fail)
             and (not short_fail)
         )
-
-        blocked_reason_exact = _blocked_reason(
-            overhead_blocked_height_mm=overhead_blocked_height_mm,
-            narrow_fail=bool(narrow_fail),
-            short_fail=bool(short_fail),
-            area_fail=bool(area_fail),
-            top_open_bbox_l_mm=int(top_open_bbox_l_mm),
-            top_open_bbox_w_mm=int(top_open_bbox_w_mm),
-        )
-        if accessibility_class != "blocked":
+        blocked_reason_exact: str | None
+        if accessibility_class == "blocked":
+            blocked_reason_exact = "overhead_blocked"
+        else:
             blocked_reason_exact = None
-        elif blocked_reason_exact not in BLOCKED_REASONS:
-            blocked_reason_exact = "mixed"
 
         per_placement.append(
             {
@@ -359,6 +344,11 @@ def compute_top_access_diagnostics(
                 "top_open_area_mm2": int(top_open_area_mm2),
                 "top_open_bbox_l_mm": int(top_open_bbox_l_mm),
                 "top_open_bbox_w_mm": int(top_open_bbox_w_mm),
+                "aux_opening_meets_access": bool(meets_access_aux),
+                "aux_opening_meets_marginal": bool(meets_marginal_aux),
+                "aux_opening_fail_narrow": bool(narrow_fail),
+                "aux_opening_fail_short": bool(short_fail),
+                "aux_opening_fail_area": bool(area_fail),
                 "overhead_blocked_height_mm": int(overhead_blocked_height_mm),
                 "vertical_access_margin_mm": int(vertical_margin_mm),
                 "accessibility_class": str(accessibility_class),
@@ -420,6 +410,7 @@ def compute_top_access_diagnostics(
     return {
         "placements_count": int(n),
         "insertion_margin_mm": int(margin_mm),
+        "tool_margin_mm": int(tool_margin),
         "marginal_ratio": float(ratio),
         "blocked_count": int(blocked_count),
         "marginal_count": int(marginal_count),
