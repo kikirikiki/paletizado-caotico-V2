@@ -9,7 +9,9 @@ from typing import Any, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
+from ..packer.maxrects2d import MaxRects2D, MaxRectsCandidate, Rect
 from ..packer.pallet_model import PalletModel
+from ..packer.scoring import fragmentation
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -49,6 +51,9 @@ class SchedulerConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    enable_early_layer_fillability_rerank: bool = False
+    early_layer_fillability_steps: int = 4
+    early_layer_fillability_topk: int = 5
     micro_plan_enabled: bool = False
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
@@ -100,6 +105,13 @@ class SchedulerConfig:
         )
         object.__setattr__(self, "hard_floor_phase_lookahead_items", max(1, int(self.hard_floor_phase_lookahead_items)))
         object.__setattr__(self, "hard_floor_phase_stand_mix_bonus", max(0.0, float(self.hard_floor_phase_stand_mix_bonus)))
+        object.__setattr__(
+            self,
+            "enable_early_layer_fillability_rerank",
+            bool(self.enable_early_layer_fillability_rerank),
+        )
+        object.__setattr__(self, "early_layer_fillability_steps", max(1, int(self.early_layer_fillability_steps)))
+        object.__setattr__(self, "early_layer_fillability_topk", max(1, int(self.early_layer_fillability_topk)))
 
 
 @dataclass(frozen=True)
@@ -206,6 +218,17 @@ class _HardFloorScoredExpansion:
     stand_mix_bonus_applied: bool = False
 
 
+@dataclass(frozen=True)
+class _EarlyLayerFillabilityResidual:
+    fillability_score: float
+    largest_fillable_free_rect_area_mm2: int
+    unfillable_free_rect_area_mm2: int
+    thin_strip_area_mm2: int
+    free_rect_count: int
+    fragmentation: float
+    dominant_bad_residual_shape: str
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -262,6 +285,11 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.early_layer_rerank_invocations = 0
+        self.early_layer_rerank_changed_choice_count = 0
+        self.early_layer_rerank_fillability_delta_sum = 0.0
+        self.early_layer_rerank_thin_unfillable_mix_count = 0
+        self.early_layer_rerank_events: list[dict[str, Any]] = []
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -534,6 +562,7 @@ class SchedulerV1:
             )
             selected: _ScoredCandidate | None = None
             slack_stats: SlackDecisionStats | None = None
+            selection_pool_for_rerank: list[_ScoredCandidate] = list(feasible_candidates)
             if hard_floor_candidates:
                 hard_floor_selected = max(
                     hard_floor_candidates,
@@ -545,6 +574,7 @@ class SchedulerV1:
                     ),
                 )
                 selected = hard_floor_selected.candidate
+                selection_pool_for_rerank = [item.candidate for item in hard_floor_candidates]
                 self._record_hard_floor_phase_choice(
                     selected.plan,
                     selected.terms.scalar_score,
@@ -573,6 +603,13 @@ class SchedulerV1:
                     selected = best_by_slack
 
             if selected is not None:
+                selected = self._maybe_apply_early_layer_fillability_rerank_scored_candidates(
+                    candidates=selection_pool_for_rerank,
+                    selected=selected,
+                    pallets=sim_state.pallets,
+                    now=float(sim_state.now),
+                    source="greedy",
+                )
                 best_plan = selected.plan
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
@@ -630,6 +667,7 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        root_candidates_for_rerank: list[_ScoredCandidate] = []
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -688,6 +726,11 @@ class SchedulerV1:
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    root_candidates_for_rerank = [
+                        self._scored_candidate_from_expansion(expansion)
+                        for expansion in expansions
+                        if expansion.node.first_plan is not None
+                    ]
                     hard_floor_expansions = self._hard_floor_phase_filter_beam_expansions(
                         expansions=expansions,
                         pallets=node.pallets,
@@ -702,12 +745,37 @@ class SchedulerV1:
                                 -float(item.expansion.terms.dt_extra),
                             ),
                         )
-                        chosen_plan = chosen.expansion.node.first_plan
+                        chosen_scored = self._scored_candidate_from_expansion(chosen.expansion)
+                        chosen_scored = self._maybe_apply_early_layer_fillability_rerank_scored_candidates(
+                            candidates=[self._scored_candidate_from_expansion(item.expansion) for item in hard_floor_expansions],
+                            selected=chosen_scored,
+                            pallets=node.pallets,
+                            now=float(sim_state.now),
+                            source="micro_hard_floor",
+                        )
+                        chosen_plan = chosen_scored.plan
                         if chosen_plan is not None:
+                            chosen_identity = self._pick_plan_identity(chosen_plan)
+                            matched_hard_floor = next(
+                                (
+                                    item
+                                    for item in hard_floor_expansions
+                                    if self._pick_plan_identity(item.expansion.node.first_plan) == chosen_identity
+                                ),
+                                None,
+                            )
                             self._record_hard_floor_phase_choice(
                                 chosen_plan,
-                                chosen.base_score,
-                                stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
+                                (
+                                    float(matched_hard_floor.base_score)
+                                    if matched_hard_floor is not None
+                                    else float(chosen_scored.terms.scalar_score)
+                                ),
+                                stand_mix_bonus_applied=bool(
+                                    matched_hard_floor.stand_mix_bonus_applied
+                                    if matched_hard_floor is not None
+                                    else False
+                                ),
                             )
                             stats = {
                                 "enabled": True,
@@ -818,7 +886,410 @@ class SchedulerV1:
 
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
-        return best_node.first_plan, stats, root_slack_stats
+        selected_plan = best_node.first_plan
+        if root_candidates_for_rerank:
+            selected_scored = next(
+                (
+                    candidate
+                    for candidate in root_candidates_for_rerank
+                    if self._pick_plan_identity(candidate.plan) == self._pick_plan_identity(selected_plan)
+                ),
+                None,
+            )
+            if selected_scored is not None:
+                selected_scored = self._maybe_apply_early_layer_fillability_rerank_scored_candidates(
+                    candidates=root_candidates_for_rerank,
+                    selected=selected_scored,
+                    pallets=sim_state.pallets,
+                    now=float(sim_state.now),
+                    source="micro",
+                )
+                selected_plan = selected_scored.plan
+                stats["selected_height_after_mm"] = self._resolve_height_after_mm(selected_plan.preview)
+        return selected_plan, stats, root_slack_stats
+
+    def _pick_plan_identity(self, plan: PickPlan | None) -> tuple[Any, ...]:
+        if plan is None:
+            return ("none",)
+        preview = getattr(plan, "preview", None)
+        placement = getattr(preview, "placement", None) if preview is not None else None
+        if placement is None:
+            return (
+                int(getattr(plan, "ramp_id", 0) or 0),
+                int(getattr(plan, "buffer_index", 0) or 0),
+                getattr(plan, "box_id", None),
+                getattr(plan, "pallet_id", None),
+                "none",
+            )
+        return (
+            int(getattr(plan, "ramp_id", 0) or 0),
+            int(getattr(plan, "buffer_index", 0) or 0),
+            getattr(plan, "box_id", None),
+            getattr(plan, "pallet_id", None),
+            int(getattr(placement, "x_mm", 0) or 0),
+            int(getattr(placement, "y_mm", 0) or 0),
+            int(getattr(placement, "z_mm", 0) or 0),
+            int(getattr(placement, "length_mm", 0) or 0),
+            int(getattr(placement, "width_mm", 0) or 0),
+            int(getattr(placement, "height_mm", 0) or 0),
+            int(getattr(placement, "layer_id", 0) or 0),
+            str(getattr(placement, "orientation_name", "") or ""),
+            str(getattr(placement, "orientation_family", "") or ""),
+        )
+
+    def _scored_candidate_from_expansion(self, expansion: _BeamExpansion) -> _ScoredCandidate:
+        plan = expansion.node.first_plan
+        if plan is None:
+            raise ValueError("Beam expansion without first_plan")
+        return _ScoredCandidate(
+            plan=plan,
+            box=expansion.box,
+            terms=expansion.terms,
+        )
+
+    def _is_early_layer_slot(self, pallet: PalletModel, preview: PlacementPreview) -> bool:
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return False
+        layer_id = int(getattr(placement, "layer_id", 0) or 0)
+        placed_count = 0
+        for prev in list(getattr(pallet, "placements", []) or []):
+            try:
+                if int(getattr(prev, "layer_id", 0) or 0) == int(layer_id):
+                    placed_count += 1
+            except Exception:
+                continue
+        return int(placed_count) < int(self.config.early_layer_fillability_steps)
+
+    def _candidate_rerank_sort_key(self, candidate: _ScoredCandidate) -> tuple[float, float, float, float]:
+        return (
+            float(candidate.terms.scalar_score),
+            float(candidate.terms.packing_gain),
+            -float(candidate.terms.fragmentation),
+            -float(candidate.terms.dt_extra),
+        )
+
+    def _shortlist_for_early_rerank(
+        self,
+        *,
+        candidates: Sequence[_ScoredCandidate],
+        selected: _ScoredCandidate,
+    ) -> list[_ScoredCandidate]:
+        ordered = sorted(
+            list(candidates),
+            key=self._candidate_rerank_sort_key,
+            reverse=True,
+        )
+        top_k = max(1, int(self.config.early_layer_fillability_topk))
+        shortlist = ordered[:top_k]
+        selected_id = self._pick_plan_identity(selected.plan)
+        if all(self._pick_plan_identity(c.plan) != selected_id for c in shortlist):
+            shortlist.append(selected)
+        return shortlist
+
+    def _collect_candidate_footprints(self, candidates: Sequence[_ScoredCandidate]) -> list[tuple[int, int]]:
+        footprints: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for candidate in candidates:
+            placement = getattr(candidate.plan.preview, "placement", None)
+            if placement is None:
+                continue
+            l_mm = int(getattr(placement, "length_mm", 0) or 0)
+            w_mm = int(getattr(placement, "width_mm", 0) or 0)
+            if l_mm <= 0 or w_mm <= 0:
+                continue
+            key = (l_mm, w_mm)
+            if key in seen:
+                continue
+            seen.add(key)
+            footprints.append(key)
+        return footprints
+
+    def _dominant_bad_residual_shape(
+        self,
+        *,
+        free_rect_count: int,
+        largest_ratio: float,
+        unfillable_ratio: float,
+        thin_ratio: float,
+    ) -> str:
+        if free_rect_count <= 0:
+            return "none"
+        if unfillable_ratio >= 0.45 and thin_ratio >= 0.20:
+            return "thin_unfillable_mix"
+        if thin_ratio >= 0.30:
+            return "thin_strips"
+        if unfillable_ratio >= 0.45:
+            return "unfillable_blocks"
+        if free_rect_count >= 6 and largest_ratio <= 0.25:
+            return "fragmented_mosaic"
+        if free_rect_count >= 4:
+            return "fragmented"
+        return "compact"
+
+    def _evaluate_fillability_residual(
+        self,
+        *,
+        free_rects: Sequence[Rect],
+        footprints: Sequence[tuple[int, int]],
+    ) -> _EarlyLayerFillabilityResidual:
+        rects = [rect for rect in list(free_rects) if int(rect.w) > 0 and int(rect.h) > 0]
+        if not rects:
+            return _EarlyLayerFillabilityResidual(
+                fillability_score=1.0,
+                largest_fillable_free_rect_area_mm2=0,
+                unfillable_free_rect_area_mm2=0,
+                thin_strip_area_mm2=0,
+                free_rect_count=0,
+                fragmentation=0.0,
+                dominant_bad_residual_shape="none",
+            )
+
+        total_area = int(sum(int(rect.area) for rect in rects))
+        if total_area <= 0:
+            return _EarlyLayerFillabilityResidual(
+                fillability_score=0.0,
+                largest_fillable_free_rect_area_mm2=0,
+                unfillable_free_rect_area_mm2=0,
+                thin_strip_area_mm2=0,
+                free_rect_count=len(rects),
+                fragmentation=1.0,
+                dominant_bad_residual_shape="none",
+            )
+
+        min_short_side = None
+        for l_mm, w_mm in footprints:
+            short_side = min(int(l_mm), int(w_mm))
+            if short_side <= 0:
+                continue
+            if min_short_side is None:
+                min_short_side = int(short_side)
+            else:
+                min_short_side = min(min_short_side, int(short_side))
+
+        largest_fillable = 0
+        unfillable_area = 0
+        thin_strip_area = 0
+        for rect in rects:
+            area = int(rect.area)
+            fits = any(int(l_mm) <= int(rect.w) and int(w_mm) <= int(rect.h) for l_mm, w_mm in footprints)
+            if fits:
+                largest_fillable = max(largest_fillable, area)
+            else:
+                unfillable_area += area
+            if min_short_side is not None and min(int(rect.w), int(rect.h)) < int(min_short_side):
+                thin_strip_area += area
+
+        frag = float(max(0.0, min(1.0, float(fragmentation(rects)))))
+        largest_ratio = float(largest_fillable) / float(max(1, total_area))
+        unfillable_ratio = float(unfillable_area) / float(max(1, total_area))
+        thin_ratio = float(thin_strip_area) / float(max(1, total_area))
+        fillable_ratio = float(max(0, total_area - unfillable_area)) / float(max(1, total_area))
+        fillability_score = (
+            (0.60 * fillable_ratio)
+            + (0.20 * largest_ratio)
+            + (0.10 * (1.0 - frag))
+            + (0.10 * (1.0 - thin_ratio))
+        )
+        fillability_score = max(0.0, min(1.0, float(fillability_score)))
+
+        return _EarlyLayerFillabilityResidual(
+            fillability_score=float(fillability_score),
+            largest_fillable_free_rect_area_mm2=int(largest_fillable),
+            unfillable_free_rect_area_mm2=int(unfillable_area),
+            thin_strip_area_mm2=int(thin_strip_area),
+            free_rect_count=int(len(rects)),
+            fragmentation=float(frag),
+            dominant_bad_residual_shape=self._dominant_bad_residual_shape(
+                free_rect_count=int(len(rects)),
+                largest_ratio=float(largest_ratio),
+                unfillable_ratio=float(unfillable_ratio),
+                thin_ratio=float(thin_ratio),
+            ),
+        )
+
+    def _simulate_free_rects_after_preview(
+        self,
+        *,
+        pallet: PalletModel,
+        preview: PlacementPreview,
+    ) -> list[Rect] | None:
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+
+        spec = getattr(pallet, "spec", None)
+        if spec is None:
+            return None
+        bin_l = int(getattr(spec, "bin_length_mm", 0) or 0)
+        bin_w = int(getattr(spec, "bin_width_mm", 0) or 0)
+        if bin_l <= 0 or bin_w <= 0:
+            return None
+        offset = int(getattr(spec, "offset_mm", 0) or 0)
+        heuristic = str(getattr(pallet, "heuristic", "baf") or "baf")
+
+        cand = MaxRectsCandidate(
+            x=int(getattr(placement, "x_mm", 0) or 0) - offset,
+            y=int(getattr(placement, "y_mm", 0) or 0) - offset,
+            w=int(getattr(placement, "length_mm", 0) or 0),
+            h=int(getattr(placement, "width_mm", 0) or 0),
+            score=(0,),
+        )
+
+        stacking_mode = str(getattr(pallet, "stacking_mode", "layers") or "layers").strip().lower()
+        if stacking_mode == "heightfield":
+            base_layer = next(
+                (layer for layer in list(getattr(pallet, "layers", []) or []) if int(getattr(layer, "layer_id", 0)) == 0),
+                None,
+            )
+            if base_layer is not None and getattr(base_layer, "bin", None) is not None:
+                projection_bin = base_layer.bin.copy()
+            else:
+                projection_bin = MaxRects2D(bin_l, bin_w, heuristic=heuristic)
+            if int(getattr(placement, "z_mm", 0) or 0) > 0:
+                return list(getattr(projection_bin, "free_rects", []) or [])
+            free_after = projection_bin.simulate_place(cand)
+            if isinstance(free_after, list):
+                return [rect for rect in free_after if int(rect.w) > 0 and int(rect.h) > 0]
+            return [rect for rect in list(getattr(projection_bin, "free_rects", []) or []) if int(rect.w) > 0 and int(rect.h) > 0]
+
+        layer_id = int(getattr(placement, "layer_id", 0) or 0)
+        layers = list(getattr(pallet, "layers", []) or [])
+        if 0 <= layer_id < len(layers) and getattr(layers[layer_id], "bin", None) is not None:
+            layer_bin = layers[layer_id].bin.copy()
+        elif layer_id == len(layers):
+            layer_bin = MaxRects2D(bin_l, bin_w, heuristic=heuristic)
+        else:
+            return None
+        free_after = layer_bin.simulate_place(cand)
+        if isinstance(free_after, list):
+            return [rect for rect in free_after if int(rect.w) > 0 and int(rect.h) > 0]
+        return [rect for rect in list(getattr(layer_bin, "free_rects", []) or []) if int(rect.w) > 0 and int(rect.h) > 0]
+
+    def _maybe_apply_early_layer_fillability_rerank_scored_candidates(
+        self,
+        *,
+        candidates: Sequence[_ScoredCandidate],
+        selected: _ScoredCandidate,
+        pallets: Mapping[int | str, PalletModel],
+        now: float,
+        source: str,
+    ) -> _ScoredCandidate:
+        if not bool(self.config.enable_early_layer_fillability_rerank):
+            return selected
+        selected_pallet = pallets.get(selected.plan.pallet_id)
+        if not isinstance(selected_pallet, PalletModel):
+            return selected
+        if not self._is_early_layer_slot(selected_pallet, selected.plan.preview):
+            return selected
+
+        shortlist = self._shortlist_for_early_rerank(candidates=candidates, selected=selected)
+        selected_pallet_id = selected.plan.pallet_id
+        selected_placement = getattr(selected.plan.preview, "placement", None)
+        selected_layer_id = int(getattr(selected_placement, "layer_id", 0) or 0) if selected_placement is not None else 0
+        selected_z_mm = int(getattr(selected_placement, "z_mm", 0) or 0) if selected_placement is not None else 0
+        shortlist = [
+            candidate
+            for candidate in shortlist
+            if candidate.plan.pallet_id == selected_pallet_id
+            and isinstance(pallets.get(candidate.plan.pallet_id), PalletModel)
+            and self._is_early_layer_slot(pallets[candidate.plan.pallet_id], candidate.plan.preview)
+            and getattr(candidate.plan.preview, "placement", None) is not None
+            and int(getattr(candidate.plan.preview.placement, "layer_id", 0) or 0) == selected_layer_id
+            and int(getattr(candidate.plan.preview.placement, "z_mm", 0) or 0) == selected_z_mm
+        ]
+        if len(shortlist) < 2:
+            return selected
+
+        footprints = self._collect_candidate_footprints(shortlist)
+        if not footprints:
+            return selected
+
+        baseline_order = {
+            self._pick_plan_identity(candidate.plan): idx
+            for idx, candidate in enumerate(shortlist)
+        }
+        evaluated: list[tuple[_ScoredCandidate, _EarlyLayerFillabilityResidual, int]] = []
+        for candidate in shortlist:
+            pallet = pallets.get(candidate.plan.pallet_id)
+            if not isinstance(pallet, PalletModel):
+                continue
+            free_rects_after = self._simulate_free_rects_after_preview(
+                pallet=pallet,
+                preview=candidate.plan.preview,
+            )
+            if free_rects_after is None:
+                continue
+            residual = self._evaluate_fillability_residual(
+                free_rects=free_rects_after,
+                footprints=footprints,
+            )
+            evaluated.append(
+                (
+                    candidate,
+                    residual,
+                    int(baseline_order.get(self._pick_plan_identity(candidate.plan), 1_000_000)),
+                )
+            )
+        if len(evaluated) < 2:
+            return selected
+
+        selected_identity = self._pick_plan_identity(selected.plan)
+        selected_entry = next((item for item in evaluated if self._pick_plan_identity(item[0].plan) == selected_identity), None)
+        if selected_entry is None:
+            return selected
+
+        best_entry = min(
+            evaluated,
+            key=lambda item: (
+                -float(item[1].fillability_score),
+                int(item[1].unfillable_free_rect_area_mm2),
+                int(item[1].thin_strip_area_mm2),
+                float(item[1].fragmentation),
+                int(item[2]),
+            ),
+        )
+
+        self.early_layer_rerank_invocations += 1
+        if str(best_entry[1].dominant_bad_residual_shape) == "thin_unfillable_mix":
+            self.early_layer_rerank_thin_unfillable_mix_count += 1
+
+        changed = self._pick_plan_identity(best_entry[0].plan) != selected_identity
+        fillability_delta = float(best_entry[1].fillability_score - selected_entry[1].fillability_score)
+        if changed:
+            self.early_layer_rerank_changed_choice_count += 1
+            self.early_layer_rerank_fillability_delta_sum += float(fillability_delta)
+
+        if len(self.early_layer_rerank_events) < 200:
+            layer_id = int(getattr(selected_placement, "layer_id", 0) or 0) if selected_placement is not None else 0
+            placed_count = sum(
+                1
+                for placement in list(getattr(selected_pallet, "placements", []) or [])
+                if int(getattr(placement, "layer_id", 0) or 0) == int(layer_id)
+            )
+            self.early_layer_rerank_events.append(
+                {
+                    "source": str(source),
+                    "now": float(now),
+                    "pallet_id": selected.plan.pallet_id,
+                    "layer_id": int(layer_id),
+                    "layer_step_index_before_commit": int(placed_count),
+                    "selected_box_id": selected.plan.box_id,
+                    "chosen_box_id": best_entry[0].plan.box_id,
+                    "changed_choice": bool(changed),
+                    "selected_fillability_score": float(selected_entry[1].fillability_score),
+                    "chosen_fillability_score": float(best_entry[1].fillability_score),
+                    "fillability_delta": float(fillability_delta),
+                    "selected_unfillable_free_rect_area_mm2": int(selected_entry[1].unfillable_free_rect_area_mm2),
+                    "chosen_unfillable_free_rect_area_mm2": int(best_entry[1].unfillable_free_rect_area_mm2),
+                    "selected_thin_strip_area_mm2": int(selected_entry[1].thin_strip_area_mm2),
+                    "chosen_thin_strip_area_mm2": int(best_entry[1].thin_strip_area_mm2),
+                    "selected_dominant_bad_residual_shape": str(selected_entry[1].dominant_bad_residual_shape),
+                    "chosen_dominant_bad_residual_shape": str(best_entry[1].dominant_bad_residual_shape),
+                }
+            )
+
+        return best_entry[0] if changed else selected
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.score_mode == "min_height_then_gain":
