@@ -221,6 +221,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bonus extra para candidatos stand_hw en suelo durante hard floor phase.",
     )
     parser.add_argument(
+        "--enable-early-layer-fillability-rerank",
+        action="store_true",
+        help="Activa rerank temprano por fillability residual en capa activa (experimento).",
+    )
+    parser.add_argument(
+        "--early-layer-fillability-steps",
+        type=int,
+        default=4,
+        help="Numero de placements iniciales por capa donde se aplica el rerank temprano.",
+    )
+    parser.add_argument(
+        "--early-layer-fillability-topk",
+        type=int,
+        default=5,
+        help="Top-K de candidatos factibles del step a reordenar por fillability residual.",
+    )
+    parser.add_argument(
         "--orientation-mode",
         choices=["planar", "planar+stand_hw"],
         default="planar",
@@ -459,6 +476,9 @@ def run_simulation(
     hard_floor_phase_min_base_candidates: int = 1,
     hard_floor_phase_lookahead_items: int = 8,
     hard_floor_phase_stand_mix_bonus: float = 0.0,
+    enable_early_layer_fillability_rerank: bool = False,
+    early_layer_fillability_steps: int = 4,
+    early_layer_fillability_topk: int = 5,
     orientation_mode: str = "planar",
     stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
@@ -658,6 +678,9 @@ def run_simulation(
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            enable_early_layer_fillability_rerank=bool(enable_early_layer_fillability_rerank),
+            early_layer_fillability_steps=max(1, int(early_layer_fillability_steps)),
+            early_layer_fillability_topk=max(1, int(early_layer_fillability_topk)),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -771,6 +794,9 @@ def run_simulation(
             "hard_floor_phase_min_base_candidates": int(max(1, int(hard_floor_phase_min_base_candidates))),
             "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
             "hard_floor_phase_stand_mix_bonus": float(max(0.0, float(hard_floor_phase_stand_mix_bonus))),
+            "enable_early_layer_fillability_rerank": bool(enable_early_layer_fillability_rerank),
+            "early_layer_fillability_steps": int(max(1, int(early_layer_fillability_steps))),
+            "early_layer_fillability_topk": int(max(1, int(early_layer_fillability_topk))),
             "orientation_mode": str(orientation_mode),
             "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
@@ -875,6 +901,9 @@ def main() -> None:
         hard_floor_phase_min_base_candidates=int(args.hard_floor_phase_min_base_candidates),
         hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
         hard_floor_phase_stand_mix_bonus=float(args.hard_floor_phase_stand_mix_bonus),
+        enable_early_layer_fillability_rerank=bool(args.enable_early_layer_fillability_rerank),
+        early_layer_fillability_steps=int(args.early_layer_fillability_steps),
+        early_layer_fillability_topk=int(args.early_layer_fillability_topk),
         orientation_mode=str(args.orientation_mode),
         stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,

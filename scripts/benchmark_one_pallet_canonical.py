@@ -71,7 +71,13 @@ class SeedSummary:
     run_label: str
     seed: int
     processed_boxes: int | None
+    throughput_per_hour: float | None
+    stop_reason: str | None
+    deadlock_samples_count: int | None
+    deadlock_reasons_json: str
     first_stack_step: int | None
+    first_upper_layer_open_step: int | None
+    first_reentry_step: int | None
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
@@ -86,6 +92,11 @@ class SeedSummary:
     layer_fill_homogeneity_score: float | None
     z_band_fill_homogeneity_score: float | None
     active_layers_peak: int | None
+    reentries_total: int | None
+    early_layer_rerank_invocations: int | None
+    early_layer_rerank_changed_choice_count: int | None
+    early_layer_rerank_thin_unfillable_mix_count: int | None
+    early_layer_rerank_events_json: str
     layer_band_mm: int | None
     layer_band_fill_progress_json: str
     active_layers_over_time_json: str
@@ -393,6 +404,23 @@ def _select_first_pallet_monotonicity(
     return {}
 
 
+def _first_reentry_step_from_monotonicity(mono: dict[str, Any]) -> int | None:
+    traces: list[dict[str, Any]] = []
+    for key in ("step_trace_head", "step_trace_relevant"):
+        raw = mono.get(key)
+        if not isinstance(raw, list):
+            continue
+        traces.extend(item for item in raw if isinstance(item, dict))
+    if not traces:
+        return None
+
+    traces.sort(key=lambda item: _safe_int(item.get("step")) or 0)
+    for item in traces:
+        if bool(item.get("is_reentry", False)):
+            return _safe_int(item.get("step"))
+    return None
+
+
 def run_seed(
     *,
     run_label: str,
@@ -420,6 +448,9 @@ def run_seed(
     pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
 
     processed_boxes = _safe_int(metrics.get("processed_boxes")) if isinstance(metrics, dict) else None
+    throughput_per_hour = _safe_float(metrics.get("throughput_per_hour")) if isinstance(metrics, dict) else None
+    stop_reason_raw = metrics.get("stop_reason") if isinstance(metrics, dict) else None
+    stop_reason = str(stop_reason_raw) if stop_reason_raw is not None else None
     stand_hw_used_total = _safe_int(pallet_kpis.get("stand_hw_used_total")) if isinstance(pallet_kpis, dict) else None
     hard_floor_stand_total = (
         _safe_int(pallet_kpis.get("hard_floor_phase_stand_hw_chosen_total"))
@@ -436,6 +467,18 @@ def run_seed(
     mono = _select_first_pallet_monotonicity(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
+    )
+    first_reentry_step = _first_reentry_step_from_monotonicity(mono)
+    first_upper_layer_open_step = first_stack_step
+
+    deadlock_samples = pallet_kpis.get("deadlock_samples", []) if isinstance(pallet_kpis, dict) else []
+    clean_deadlock_samples = [item for item in deadlock_samples if isinstance(item, dict)] if isinstance(deadlock_samples, list) else []
+    deadlock_reasons = sorted(
+        {
+            str(item.get("reason", "UNKNOWN"))
+            for item in clean_deadlock_samples
+            if item.get("reason") is not None
+        }
     )
 
     max_z_series = mono.get("max_z_seen_so_far_by_step", [])
@@ -459,7 +502,13 @@ def run_seed(
         run_label=run_label,
         seed=int(seed),
         processed_boxes=processed_boxes,
+        throughput_per_hour=throughput_per_hour,
+        stop_reason=stop_reason,
+        deadlock_samples_count=len(clean_deadlock_samples),
+        deadlock_reasons_json=json.dumps(deadlock_reasons, ensure_ascii=True),
         first_stack_step=first_stack_step,
+        first_upper_layer_open_step=first_upper_layer_open_step,
+        first_reentry_step=first_reentry_step,
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
@@ -476,6 +525,27 @@ def run_seed(
         layer_fill_homogeneity_score=_safe_float(mono.get("layer_fill_homogeneity_score")),
         z_band_fill_homogeneity_score=_safe_float(mono.get("z_band_fill_homogeneity_score")),
         active_layers_peak=active_layers_peak,
+        reentries_total=_safe_int(mono.get("lower_layer_reentry_count")),
+        early_layer_rerank_invocations=(
+            _safe_int(pallet_kpis.get("early_layer_rerank_invocations"))
+            if isinstance(pallet_kpis, dict)
+            else None
+        ),
+        early_layer_rerank_changed_choice_count=(
+            _safe_int(pallet_kpis.get("early_layer_rerank_changed_choice_count"))
+            if isinstance(pallet_kpis, dict)
+            else None
+        ),
+        early_layer_rerank_thin_unfillable_mix_count=(
+            _safe_int(pallet_kpis.get("early_layer_rerank_thin_unfillable_mix_count"))
+            if isinstance(pallet_kpis, dict)
+            else None
+        ),
+        early_layer_rerank_events_json=(
+            json.dumps(pallet_kpis.get("early_layer_rerank_events", []), ensure_ascii=True)
+            if isinstance(pallet_kpis, dict)
+            else "[]"
+        ),
         layer_band_mm=_safe_int(mono.get("layer_band_mm")),
         layer_band_fill_progress_json=json.dumps(mono.get("layer_band_fill_progress", []), ensure_ascii=True),
         active_layers_over_time_json=json.dumps(
@@ -510,7 +580,10 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "seed_count": len(values_sorted),
             "seeds": [int(v.seed) for v in values_sorted],
             "processed_boxes_mean": _mean([v.processed_boxes for v in values_sorted]),
+            "throughput_per_hour_mean": _mean([v.throughput_per_hour for v in values_sorted]),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
+            "first_upper_layer_open_step_mean": _mean([v.first_upper_layer_open_step for v in values_sorted]),
+            "first_reentry_step_mean": _mean([v.first_reentry_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),
             "hard_floor_phase_stand_hw_chosen_total_mean": _mean(
@@ -527,6 +600,15 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "layer_fill_homogeneity_score_mean": _mean([v.layer_fill_homogeneity_score for v in values_sorted]),
             "z_band_fill_homogeneity_score_mean": _mean([v.z_band_fill_homogeneity_score for v in values_sorted]),
             "active_layers_peak_mean": _mean([v.active_layers_peak for v in values_sorted]),
+            "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
+            "early_layer_rerank_invocations_mean": _mean([v.early_layer_rerank_invocations for v in values_sorted]),
+            "early_layer_rerank_changed_choice_count_mean": _mean(
+                [v.early_layer_rerank_changed_choice_count for v in values_sorted]
+            ),
+            "early_layer_rerank_thin_unfillable_mix_count_mean": _mean(
+                [v.early_layer_rerank_thin_unfillable_mix_count for v in values_sorted]
+            ),
+            "deadlock_samples_count_mean": _mean([v.deadlock_samples_count for v in values_sorted]),
             "processed_boxes_min": min(v.processed_boxes for v in values_sorted if v.processed_boxes is not None)
             if any(v.processed_boxes is not None for v in values_sorted)
             else None,
@@ -579,6 +661,13 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         "run",
         "seed",
         "processed_boxes",
+        "throughput_per_hour",
+        "reentries_total",
+        "first_reentry_step",
+        "first_upper_layer_open_step",
+        "early_layer_rerank_invocations",
+        "early_layer_rerank_changed_choice_count",
+        "deadlock_samples_count",
         "first_stack_step",
         "first_stand_hw_step",
         "stand_hw_used_total",
@@ -593,6 +682,13 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
                     str(row.run_label),
                     str(row.seed),
                     str(row.processed_boxes),
+                    str(row.throughput_per_hour),
+                    str(row.reentries_total),
+                    str(row.first_reentry_step),
+                    str(row.first_upper_layer_open_step),
+                    str(row.early_layer_rerank_invocations),
+                    str(row.early_layer_rerank_changed_choice_count),
+                    str(row.deadlock_samples_count),
                     str(row.first_stack_step),
                     str(row.first_stand_hw_step),
                     str(row.stand_hw_used_total),
