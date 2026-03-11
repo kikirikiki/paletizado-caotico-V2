@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
+from ..packer.maxrects2d import MaxRects2D, MaxRectsCandidate
 from ..packer.pallet_model import PalletModel
 from ..scoring.height_slack import (
     ScoreMode,
@@ -59,6 +60,7 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    enforce_active_layer_closure_reservation: bool = False
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -80,6 +82,11 @@ class SchedulerConfig:
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
+        object.__setattr__(
+            self,
+            "enforce_active_layer_closure_reservation",
+            bool(self.enforce_active_layer_closure_reservation),
+        )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -116,6 +123,7 @@ class PickPlan:
 @dataclass(frozen=True)
 class SchedulerRampState:
     queue: tuple[Box, ...] = ()
+    staging: tuple[Box, ...] = ()
     upstream: tuple[Box, ...] = ()
     capacity: int = 0
 
@@ -262,6 +270,12 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.upper_layer_open_attempts_total = 0
+        self.blocked_upper_layer_open_attempts = 0
+        self.closure_reservation_hits = 0
+        self.closure_reservation_misses = 0
+        self.upper_layer_open_attempts_trace: list[dict[str, Any]] = []
+        self._upper_layer_open_attempts_trace_max = 200
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -503,6 +517,23 @@ class SchedulerV1:
                 self.config.max_candidates,
             )
 
+        closure_reservation_stats = {
+            "attempts": 0,
+            "blocked": 0,
+        }
+        if feasible_candidates and bool(self.config.enforce_active_layer_closure_reservation):
+            visible_boxes_by_pallet_id = self._collect_visible_boxes_by_pallet(
+                sim_state=sim_state,
+                fallback_by_pallet=window_boxes_by_pallet_id,
+            )
+            feasible_candidates, closure_reservation_stats = (
+                self._apply_active_layer_closure_reservation_on_scored_candidates(
+                    candidates=feasible_candidates,
+                    pallets=sim_state.pallets,
+                    visible_boxes_by_pallet_id=visible_boxes_by_pallet_id,
+                )
+            )
+
         batchfill_stats = {
             "batchfill_calls": 0,
             "batchfill_applied": 0,
@@ -524,6 +555,8 @@ class SchedulerV1:
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
             "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
             "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
+            "upper_layer_open_attempts_local": int(closure_reservation_stats["attempts"]),
+            "blocked_upper_layer_open_attempts_local": int(closure_reservation_stats["blocked"]),
         }
 
         best_plan: PickPlan | None = None
@@ -630,6 +663,10 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        visible_boxes_by_pallet_id = self._collect_visible_boxes_by_pallet(
+            sim_state=sim_state,
+            fallback_by_pallet={},
+        )
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -663,6 +700,18 @@ class SchedulerV1:
                         continue
                     nodes_expanded += 1
                     expansions.append(expansion)
+
+                if (
+                    depth == 0
+                    and node.first_plan is None
+                    and expansions
+                    and bool(self.config.enforce_active_layer_closure_reservation)
+                ):
+                    expansions = self._apply_active_layer_closure_reservation_on_beam_expansions(
+                        node=node,
+                        expansions=expansions,
+                        visible_boxes_by_pallet_id=visible_boxes_by_pallet_id,
+                    )
 
                 if expansions:
                     min_h = min(int(e.terms.height_after_mm) for e in expansions)
@@ -1387,6 +1436,466 @@ class SchedulerV1:
             except Exception:
                 continue
         return float(max_priority)
+
+    def _collect_visible_boxes_by_pallet(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        fallback_by_pallet: Mapping[int | str, Sequence[Box]],
+    ) -> dict[int | str, list[Box]]:
+        visible: dict[int | str, list[Box]] = {}
+        seen: dict[int | str, set[int | str]] = {}
+
+        def _push(box: Box) -> None:
+            pallet_id = getattr(box, "destination", None)
+            if pallet_id is None:
+                return
+            key = getattr(box, "box_id", None)
+            if key is None:
+                key = id(box)
+            bucket_seen = seen.setdefault(pallet_id, set())
+            if key in bucket_seen:
+                return
+            bucket_seen.add(key)
+            visible.setdefault(pallet_id, []).append(box)
+
+        if sim_state.ramp_states:
+            for snapshot in sim_state.ramp_states.values():
+                for item in list(getattr(snapshot, "queue", ()) or ()):
+                    _push(item)
+                for item in list(getattr(snapshot, "staging", ()) or ()):
+                    _push(item)
+                for item in list(getattr(snapshot, "upstream", ()) or ()):
+                    _push(item)
+
+        if not visible:
+            for ramp_boxes in sim_state.ramps.values():
+                for item in list(ramp_boxes):
+                    _push(item)
+
+        for pallet_id, boxes in fallback_by_pallet.items():
+            for box in list(boxes or ()):
+                _push(box)
+            visible.setdefault(pallet_id, [])
+        return visible
+
+    @staticmethod
+    def _preview_base_z(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm"))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _active_base_z_for_pallet(pallet: PalletModel) -> int | None:
+        placements = list(getattr(pallet, "placements", []) or [])
+        if not placements:
+            return None
+        mode = str(getattr(pallet, "stacking_mode", "layers") or "layers").strip().lower()
+        if mode == "heightfield":
+            return max(int(getattr(placement, "z_mm", 0) or 0) for placement in placements)
+        layers = list(getattr(pallet, "layers", []) or [])
+        if layers:
+            try:
+                return int(getattr(layers[-1], "z_mm", 0) or 0)
+            except Exception:
+                pass
+        return max(int(getattr(placement, "z_mm", 0) or 0) for placement in placements)
+
+    def _active_surface_free_rects(
+        self,
+        *,
+        pallet: PalletModel,
+        active_base_z: int,
+    ) -> list[dict[str, int]]:
+        layers = list(getattr(pallet, "layers", []) or [])
+        for layer in reversed(layers):
+            try:
+                layer_z = int(getattr(layer, "z_mm", 0) or 0)
+            except Exception:
+                continue
+            if layer_z != int(active_base_z):
+                continue
+            bin_state = getattr(layer, "bin", None)
+            free_rects = list(getattr(bin_state, "free_rects", []) or [])
+            out: list[dict[str, int]] = []
+            for rect in free_rects:
+                try:
+                    w = int(getattr(rect, "w", 0) or 0)
+                    h = int(getattr(rect, "h", 0) or 0)
+                    x = int(getattr(rect, "x", 0) or 0)
+                    y = int(getattr(rect, "y", 0) or 0)
+                except Exception:
+                    continue
+                if w <= 0 or h <= 0:
+                    continue
+                out.append(
+                    {
+                        "x": int(x),
+                        "y": int(y),
+                        "w": int(w),
+                        "h": int(h),
+                        "area": int(w * h),
+                    }
+                )
+            if out:
+                return out
+            return []
+
+        plane = MaxRects2D(
+            int(getattr(pallet.spec, "bin_length_mm", 0) or 0),
+            int(getattr(pallet.spec, "bin_width_mm", 0) or 0),
+            heuristic=str(getattr(pallet, "heuristic", "baf") or "baf"),
+        )
+        offset = int(getattr(pallet.spec, "offset_mm", 0) or 0)
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                z_mm = int(getattr(placement, "z_mm", 0) or 0)
+            except Exception:
+                continue
+            if z_mm != int(active_base_z):
+                continue
+            try:
+                cand = MaxRectsCandidate(
+                    x=int(getattr(placement, "x_mm", 0) or 0) - offset,
+                    y=int(getattr(placement, "y_mm", 0) or 0) - offset,
+                    w=int(getattr(placement, "length_mm", 0) or 0),
+                    h=int(getattr(placement, "width_mm", 0) or 0),
+                    score=(0,),
+                )
+            except Exception:
+                continue
+            try:
+                plane.place(cand)
+            except Exception:
+                continue
+
+        out: list[dict[str, int]] = []
+        for rect in list(getattr(plane, "free_rects", []) or []):
+            try:
+                w = int(getattr(rect, "w", 0) or 0)
+                h = int(getattr(rect, "h", 0) or 0)
+                x = int(getattr(rect, "x", 0) or 0)
+                y = int(getattr(rect, "y", 0) or 0)
+            except Exception:
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            out.append(
+                {
+                    "x": int(x),
+                    "y": int(y),
+                    "w": int(w),
+                    "h": int(h),
+                    "area": int(w * h),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _box_orientation_footprints_for_pallet(
+        *,
+        box: Box,
+        pallet: PalletModel,
+        active_base_z: int,
+    ) -> list[dict[str, Any]]:
+        length_mm = int(getattr(box, "length_mm", 0) or 0)
+        width_mm = int(getattr(box, "width_mm", 0) or 0)
+        height_mm = int(getattr(box, "height_mm", 0) or 0)
+        if length_mm <= 0 or width_mm <= 0 or height_mm <= 0:
+            return []
+
+        max_height_mm = int(getattr(pallet.spec, "max_height_mm", 0) or 0)
+        allow_rotate = bool(getattr(pallet.spec, "allow_rotate", False))
+        mode = str(getattr(pallet, "orientation_mode", "planar") or "planar").strip().lower()
+        dims: list[tuple[int, int, int, str, str]] = [
+            (int(length_mm), int(width_mm), int(height_mm), "planar", "LWH"),
+        ]
+        if allow_rotate and length_mm != width_mm:
+            dims.append((int(width_mm), int(length_mm), int(height_mm), "planar", "WLH"))
+
+        if mode == "planar+stand_hw":
+            current_height = 0
+            try:
+                current_height = int(pallet.current_height_mm())
+            except Exception:
+                current_height = 0
+            gate_mm = int(getattr(pallet, "stand_hw_height_margin_gate_mm", 0) or 0)
+            height_margin_mm = max(0, int(max_height_mm) - int(current_height))
+            if int(height_margin_mm) <= max(0, int(gate_mm)):
+                dims.append((int(height_mm), int(width_mm), int(length_mm), "stand_hw", "HWL"))
+                if allow_rotate and height_mm != width_mm:
+                    dims.append((int(width_mm), int(height_mm), int(length_mm), "stand_hw", "WHL"))
+
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[int, int, int]] = set()
+        for l_mm, w_mm, h_mm, family, name in dims:
+            key = (int(l_mm), int(w_mm), int(h_mm))
+            if key in seen:
+                continue
+            seen.add(key)
+            if int(active_base_z) + int(h_mm) > int(max_height_mm):
+                continue
+            out.append(
+                {
+                    "length_mm": int(l_mm),
+                    "width_mm": int(w_mm),
+                    "height_mm": int(h_mm),
+                    "orientation_family": str(family),
+                    "orientation_name": str(name),
+                }
+            )
+        return out
+
+    def _find_active_layer_closure_match(
+        self,
+        *,
+        pallet: PalletModel,
+        active_base_z: int,
+        visible_boxes: Sequence[Box],
+    ) -> tuple[dict[str, Any] | None, str]:
+        if not visible_boxes:
+            return None, "no_visible_boxes"
+
+        free_rects = self._active_surface_free_rects(
+            pallet=pallet,
+            active_base_z=int(active_base_z),
+        )
+        if not free_rects:
+            return None, "no_active_surface_holes"
+
+        free_rects_sorted = sorted(free_rects, key=lambda rect: int(rect.get("area", 0)), reverse=True)
+        for rect in free_rects_sorted:
+            rect_w = int(rect.get("w", 0) or 0)
+            rect_h = int(rect.get("h", 0) or 0)
+            if rect_w <= 0 or rect_h <= 0:
+                continue
+            for box in list(visible_boxes):
+                footprints = self._box_orientation_footprints_for_pallet(
+                    box=box,
+                    pallet=pallet,
+                    active_base_z=int(active_base_z),
+                )
+                for fp in footprints:
+                    l_mm = int(fp.get("length_mm", 0) or 0)
+                    w_mm = int(fp.get("width_mm", 0) or 0)
+                    if l_mm <= rect_w and w_mm <= rect_h:
+                        return {
+                            "hole": {
+                                "x_mm": int(rect.get("x", 0) or 0),
+                                "y_mm": int(rect.get("y", 0) or 0),
+                                "length_mm": int(rect_w),
+                                "width_mm": int(rect_h),
+                                "area_mm2": int(rect.get("area", rect_w * rect_h) or (rect_w * rect_h)),
+                            },
+                            "box": {
+                                "box_id": getattr(box, "box_id", None),
+                                "length_mm": int(getattr(box, "length_mm", 0) or 0),
+                                "width_mm": int(getattr(box, "width_mm", 0) or 0),
+                                "height_mm": int(getattr(box, "height_mm", 0) or 0),
+                                "orientation_family": str(fp.get("orientation_family", "planar")),
+                                "orientation_name": str(fp.get("orientation_name", "")),
+                                "fit_length_mm": int(l_mm),
+                                "fit_width_mm": int(w_mm),
+                                "fit_height_mm": int(fp.get("height_mm", 0) or 0),
+                            },
+                        }, "closure_potential_visible"
+        return None, "no_compatible_visible_box_for_active_surface"
+
+    def _record_upper_layer_open_attempt(
+        self,
+        *,
+        pallet_id: int | str,
+        pallet: PalletModel,
+        active_base_z: int,
+        blocked_by_closure_reservation: bool,
+        reason: str,
+        diagnostics: dict[str, Any] | None,
+    ) -> None:
+        self.upper_layer_open_attempts_total += 1
+        if blocked_by_closure_reservation:
+            self.blocked_upper_layer_open_attempts += 1
+            self.closure_reservation_hits += 1
+        else:
+            self.closure_reservation_misses += 1
+
+        if len(self.upper_layer_open_attempts_trace) >= int(self._upper_layer_open_attempts_trace_max):
+            return
+
+        step_index = len(list(getattr(pallet, "placements", []) or []))
+        event: dict[str, Any] = {
+            "pallet_id": pallet_id,
+            "step_index": int(step_index),
+            "active_base_z_mm": int(active_base_z),
+            "blocked_by_closure_reservation": bool(blocked_by_closure_reservation),
+            "reason": str(reason),
+        }
+        if diagnostics:
+            event.update(dict(diagnostics))
+        self.upper_layer_open_attempts_trace.append(event)
+
+    def _apply_active_layer_closure_reservation_on_scored_candidates(
+        self,
+        *,
+        candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+        visible_boxes_by_pallet_id: Mapping[int | str, Sequence[Box]],
+    ) -> tuple[list[_ScoredCandidate], dict[str, int]]:
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        pallet_order: list[int | str] = []
+        for candidate in candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        filtered: list[_ScoredCandidate] = []
+        local_attempts = 0
+        local_blocked = 0
+        for pallet_id in pallet_order:
+            group = grouped.get(pallet_id, [])
+            pallet = pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered.extend(group)
+                continue
+
+            active_base_z = self._active_base_z_for_pallet(pallet)
+            if active_base_z is None:
+                filtered.extend(group)
+                continue
+
+            upper_candidates: list[_ScoredCandidate] = []
+            for candidate in group:
+                preview_z = self._preview_base_z(candidate.plan.preview)
+                if preview_z is None:
+                    continue
+                if int(preview_z) > int(active_base_z):
+                    upper_candidates.append(candidate)
+            if not upper_candidates:
+                filtered.extend(group)
+                continue
+
+            local_attempts += 1
+            visible_boxes = list(visible_boxes_by_pallet_id.get(pallet_id, []) or [])
+            if not visible_boxes:
+                visible_boxes = [candidate.box for candidate in group]
+
+            match, reason = self._find_active_layer_closure_match(
+                pallet=pallet,
+                active_base_z=int(active_base_z),
+                visible_boxes=visible_boxes,
+            )
+            blocked = match is not None
+            diagnostics = {"closure_potential_match": match} if match is not None else {}
+            self._record_upper_layer_open_attempt(
+                pallet_id=pallet_id,
+                pallet=pallet,
+                active_base_z=int(active_base_z),
+                blocked_by_closure_reservation=bool(blocked),
+                reason=str(reason),
+                diagnostics=diagnostics,
+            )
+            if blocked:
+                local_blocked += 1
+                for candidate in group:
+                    preview_z = self._preview_base_z(candidate.plan.preview)
+                    if preview_z is None or int(preview_z) <= int(active_base_z):
+                        filtered.append(candidate)
+                continue
+            filtered.extend(group)
+
+        return filtered, {
+            "attempts": int(local_attempts),
+            "blocked": int(local_blocked),
+        }
+
+    def _apply_active_layer_closure_reservation_on_beam_expansions(
+        self,
+        *,
+        node: _BeamNode,
+        expansions: list[_BeamExpansion],
+        visible_boxes_by_pallet_id: Mapping[int | str, Sequence[Box]],
+    ) -> list[_BeamExpansion]:
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        filtered: list[_BeamExpansion] = []
+        seen: set[int | str] = set()
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                filtered.append(expansion)
+                continue
+            if pallet_id in seen:
+                continue
+            seen.add(pallet_id)
+
+            group = grouped.get(pallet_id, [])
+            pallet = node.pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered.extend(group)
+                continue
+
+            active_base_z = self._active_base_z_for_pallet(pallet)
+            if active_base_z is None:
+                filtered.extend(group)
+                continue
+
+            upper_exists = False
+            for item in group:
+                first_plan = item.node.first_plan
+                preview_z = self._preview_base_z(first_plan.preview if first_plan is not None else None)
+                if preview_z is not None and int(preview_z) > int(active_base_z):
+                    upper_exists = True
+                    break
+            if not upper_exists:
+                filtered.extend(group)
+                continue
+
+            visible_boxes = list(visible_boxes_by_pallet_id.get(pallet_id, []) or [])
+            if not visible_boxes:
+                visible_boxes = [item.box for item in group]
+
+            match, reason = self._find_active_layer_closure_match(
+                pallet=pallet,
+                active_base_z=int(active_base_z),
+                visible_boxes=visible_boxes,
+            )
+            blocked = match is not None
+            diagnostics = {"closure_potential_match": match} if match is not None else {}
+            self._record_upper_layer_open_attempt(
+                pallet_id=pallet_id,
+                pallet=pallet,
+                active_base_z=int(active_base_z),
+                blocked_by_closure_reservation=bool(blocked),
+                reason=str(reason),
+                diagnostics=diagnostics,
+            )
+            if not blocked:
+                filtered.extend(group)
+                continue
+
+            for item in group:
+                first_plan = item.node.first_plan
+                preview_z = self._preview_base_z(first_plan.preview if first_plan is not None else None)
+                if preview_z is None or int(preview_z) <= int(active_base_z):
+                    filtered.append(item)
+
+        return filtered
 
     def _hard_floor_phase_enabled(self) -> bool:
         return int(getattr(self.config, "hard_floor_phase_end_step", 0) or 0) > 0
