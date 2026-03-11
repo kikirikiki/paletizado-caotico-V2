@@ -93,10 +93,11 @@ class SeedSummary:
     z_band_fill_homogeneity_score: float | None
     active_layers_peak: int | None
     reentries_total: int | None
-    early_layer_rerank_invocations: int | None
-    early_layer_rerank_changed_choice_count: int | None
-    early_layer_rerank_thin_unfillable_mix_count: int | None
-    early_layer_rerank_events_json: str
+    early_layer_prefix_beam_invocations: int | None
+    early_layer_prefix_beam_changed_choice_count: int | None
+    early_layer_prefix_beam_best_score_delta: float | None
+    early_layer_prefix_beam_thin_unfillable_mix_count: int | None
+    early_layer_prefix_beam_events_json: str
     layer_band_mm: int | None
     layer_band_fill_progress_json: str
     active_layers_over_time_json: str
@@ -526,23 +527,28 @@ def run_seed(
         z_band_fill_homogeneity_score=_safe_float(mono.get("z_band_fill_homogeneity_score")),
         active_layers_peak=active_layers_peak,
         reentries_total=_safe_int(mono.get("lower_layer_reentry_count")),
-        early_layer_rerank_invocations=(
-            _safe_int(pallet_kpis.get("early_layer_rerank_invocations"))
+        early_layer_prefix_beam_invocations=(
+            _safe_int(pallet_kpis.get("early_layer_prefix_beam_invocations"))
             if isinstance(pallet_kpis, dict)
             else None
         ),
-        early_layer_rerank_changed_choice_count=(
-            _safe_int(pallet_kpis.get("early_layer_rerank_changed_choice_count"))
+        early_layer_prefix_beam_changed_choice_count=(
+            _safe_int(pallet_kpis.get("early_layer_prefix_beam_changed_choice_count"))
             if isinstance(pallet_kpis, dict)
             else None
         ),
-        early_layer_rerank_thin_unfillable_mix_count=(
-            _safe_int(pallet_kpis.get("early_layer_rerank_thin_unfillable_mix_count"))
+        early_layer_prefix_beam_best_score_delta=(
+            _safe_float(pallet_kpis.get("early_layer_prefix_beam_best_score_delta"))
             if isinstance(pallet_kpis, dict)
             else None
         ),
-        early_layer_rerank_events_json=(
-            json.dumps(pallet_kpis.get("early_layer_rerank_events", []), ensure_ascii=True)
+        early_layer_prefix_beam_thin_unfillable_mix_count=(
+            _safe_int(pallet_kpis.get("early_layer_prefix_beam_thin_unfillable_mix_count"))
+            if isinstance(pallet_kpis, dict)
+            else None
+        ),
+        early_layer_prefix_beam_events_json=(
+            json.dumps(pallet_kpis.get("early_layer_prefix_beam_events", []), ensure_ascii=True)
             if isinstance(pallet_kpis, dict)
             else "[]"
         ),
@@ -601,12 +607,15 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "z_band_fill_homogeneity_score_mean": _mean([v.z_band_fill_homogeneity_score for v in values_sorted]),
             "active_layers_peak_mean": _mean([v.active_layers_peak for v in values_sorted]),
             "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
-            "early_layer_rerank_invocations_mean": _mean([v.early_layer_rerank_invocations for v in values_sorted]),
-            "early_layer_rerank_changed_choice_count_mean": _mean(
-                [v.early_layer_rerank_changed_choice_count for v in values_sorted]
+            "early_layer_prefix_beam_invocations_mean": _mean([v.early_layer_prefix_beam_invocations for v in values_sorted]),
+            "early_layer_prefix_beam_changed_choice_count_mean": _mean(
+                [v.early_layer_prefix_beam_changed_choice_count for v in values_sorted]
             ),
-            "early_layer_rerank_thin_unfillable_mix_count_mean": _mean(
-                [v.early_layer_rerank_thin_unfillable_mix_count for v in values_sorted]
+            "early_layer_prefix_beam_best_score_delta_mean": _mean(
+                [v.early_layer_prefix_beam_best_score_delta for v in values_sorted]
+            ),
+            "early_layer_prefix_beam_thin_unfillable_mix_count_mean": _mean(
+                [v.early_layer_prefix_beam_thin_unfillable_mix_count for v in values_sorted]
             ),
             "deadlock_samples_count_mean": _mean([v.deadlock_samples_count for v in values_sorted]),
             "processed_boxes_min": min(v.processed_boxes for v in values_sorted if v.processed_boxes is not None)
@@ -665,8 +674,9 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         "reentries_total",
         "first_reentry_step",
         "first_upper_layer_open_step",
-        "early_layer_rerank_invocations",
-        "early_layer_rerank_changed_choice_count",
+        "early_layer_prefix_beam_invocations",
+        "early_layer_prefix_beam_changed_choice_count",
+        "early_layer_prefix_beam_best_score_delta",
         "deadlock_samples_count",
         "first_stack_step",
         "first_stand_hw_step",
@@ -686,8 +696,9 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
                     str(row.reentries_total),
                     str(row.first_reentry_step),
                     str(row.first_upper_layer_open_step),
-                    str(row.early_layer_rerank_invocations),
-                    str(row.early_layer_rerank_changed_choice_count),
+                    str(row.early_layer_prefix_beam_invocations),
+                    str(row.early_layer_prefix_beam_changed_choice_count),
+                    str(row.early_layer_prefix_beam_best_score_delta),
                     str(row.deadlock_samples_count),
                     str(row.first_stack_step),
                     str(row.first_stand_hw_step),

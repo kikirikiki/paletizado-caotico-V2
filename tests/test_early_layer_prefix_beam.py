@@ -27,7 +27,7 @@ def _sim_state(*, pallet: PalletModel, boxes: list[Box]) -> SchedulerSimState:
     )
 
 
-def test_early_layer_fillability_rerank_changes_choice_when_residual_is_better() -> None:
+def test_early_layer_prefix_beam_changes_choice_when_residual_is_better() -> None:
     spec = PalletSpec(length_mm=100, width_mm=100, max_height_mm=500, overhang_mm=0)
     pallet = PalletModel(spec=spec, heuristic="baf", stacking_mode="layers")
     boxes = [_box(1, 70, 70), _box(2, 50, 50)]
@@ -36,51 +36,54 @@ def test_early_layer_fillability_rerank_changes_choice_when_residual_is_better()
         SchedulerConfig(
             lookahead_k=2,
             micro_plan_enabled=False,
-            enable_early_layer_fillability_rerank=False,
+            enable_early_layer_prefix_beam=False,
         )
     )
     baseline_plan = baseline.choose_action(_sim_state(pallet=pallet, boxes=boxes))
     assert baseline_plan is not None
     assert int(baseline_plan.box_id) == 1
 
-    rerank = SchedulerV1(
+    prefix_beam = SchedulerV1(
         SchedulerConfig(
             lookahead_k=2,
             micro_plan_enabled=False,
-            enable_early_layer_fillability_rerank=True,
-            early_layer_fillability_steps=4,
-            early_layer_fillability_topk=2,
+            enable_early_layer_prefix_beam=True,
+            early_layer_prefix_depth=3,
+            early_layer_prefix_steps=4,
+            early_layer_prefix_width=2,
         )
     )
-    rerank_plan = rerank.choose_action(_sim_state(pallet=pallet, boxes=boxes))
-    assert rerank_plan is not None
-    assert int(rerank_plan.box_id) == 2
-    assert int(rerank.early_layer_rerank_invocations) == 1
-    assert int(rerank.early_layer_rerank_changed_choice_count) == 1
+    prefix_plan = prefix_beam.choose_action(_sim_state(pallet=pallet, boxes=boxes))
+    assert prefix_plan is not None
+    assert int(prefix_plan.box_id) == 2
+    assert int(prefix_beam.early_layer_prefix_beam_invocations) == 1
+    assert int(prefix_beam.early_layer_prefix_beam_changed_choice_count) == 1
+    assert float(prefix_beam.early_layer_prefix_beam_best_score_delta_sum) > 0.0
 
 
-def test_early_layer_fillability_rerank_keeps_choice_when_no_better_option() -> None:
+def test_early_layer_prefix_beam_keeps_choice_when_no_better_option() -> None:
     spec = PalletSpec(length_mm=100, width_mm=100, max_height_mm=500, overhang_mm=0)
     pallet = PalletModel(spec=spec, heuristic="baf", stacking_mode="layers")
     boxes = [_box(1, 70, 70), _box(2, 70, 70)]
 
-    rerank = SchedulerV1(
+    prefix_beam = SchedulerV1(
         SchedulerConfig(
             lookahead_k=2,
             micro_plan_enabled=False,
-            enable_early_layer_fillability_rerank=True,
-            early_layer_fillability_steps=4,
-            early_layer_fillability_topk=2,
+            enable_early_layer_prefix_beam=True,
+            early_layer_prefix_depth=3,
+            early_layer_prefix_steps=4,
+            early_layer_prefix_width=2,
         )
     )
-    plan = rerank.choose_action(_sim_state(pallet=pallet, boxes=boxes))
+    plan = prefix_beam.choose_action(_sim_state(pallet=pallet, boxes=boxes))
     assert plan is not None
     assert int(plan.box_id) == 1
-    assert int(rerank.early_layer_rerank_invocations) == 1
-    assert int(rerank.early_layer_rerank_changed_choice_count) == 0
+    assert int(prefix_beam.early_layer_prefix_beam_invocations) == 1
+    assert int(prefix_beam.early_layer_prefix_beam_changed_choice_count) == 0
 
 
-def test_early_layer_fillability_rerank_not_applied_outside_early_window() -> None:
+def test_early_layer_prefix_beam_not_applied_outside_early_window() -> None:
     spec = PalletSpec(length_mm=100, width_mm=100, max_height_mm=500, overhang_mm=0)
     pallet = PalletModel(spec=spec, heuristic="baf", stacking_mode="layers")
     for idx in range(4):
@@ -89,16 +92,17 @@ def test_early_layer_fillability_rerank_not_applied_outside_early_window() -> No
         assert preview.feasible
         pallet.commit_place(preview)
 
-    rerank = SchedulerV1(
+    prefix_beam = SchedulerV1(
         SchedulerConfig(
             lookahead_k=2,
             micro_plan_enabled=False,
-            enable_early_layer_fillability_rerank=True,
-            early_layer_fillability_steps=4,
-            early_layer_fillability_topk=2,
+            enable_early_layer_prefix_beam=True,
+            early_layer_prefix_depth=3,
+            early_layer_prefix_steps=4,
+            early_layer_prefix_width=2,
         )
     )
-    plan = rerank.choose_action(_sim_state(pallet=pallet, boxes=[_box(1, 70, 70), _box(2, 50, 50)]))
+    plan = prefix_beam.choose_action(_sim_state(pallet=pallet, boxes=[_box(1, 70, 70), _box(2, 50, 50)]))
     assert plan is not None
-    assert int(rerank.early_layer_rerank_invocations) == 0
-    assert int(rerank.early_layer_rerank_changed_choice_count) == 0
+    assert int(prefix_beam.early_layer_prefix_beam_invocations) == 0
+    assert int(prefix_beam.early_layer_prefix_beam_changed_choice_count) == 0
