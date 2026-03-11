@@ -110,9 +110,18 @@ def test_run_benchmark_generates_summary_with_expected_structure(
         payload = {
             "metrics": {
                 "processed_boxes": seed + lookahead_k,
+                "throughput_per_hour": 321.0,
+                "stop_reason": None,
                 "pallet_kpis": {
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
+                    "early_layer_rerank_invocations": 2,
+                    "early_layer_rerank_changed_choice_count": 1,
+                    "early_layer_rerank_thin_unfillable_mix_count": 1,
+                    "early_layer_rerank_events": [
+                        {"step": 0, "changed_choice": True, "fillability_delta": 0.21}
+                    ],
+                    "deadlock_samples": [],
                     "layer_monotonicity_first_pallet_by_dest": {
                         "1": {
                             "first_stack_step": 3,
@@ -186,8 +195,15 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert len(variant_rows) == 2
 
     assert all(r["first_stack_step"] == 2 for r in rows)
+    assert all(r["first_upper_layer_open_step"] == 2 for r in rows)
+    assert all(r["first_reentry_step"] == 3 for r in rows)
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
+    assert all(abs(float(r["throughput_per_hour"]) - 321.0) < 1e-9 for r in rows)
+    assert all(r["early_layer_rerank_invocations"] == 2 for r in rows)
+    assert all(r["early_layer_rerank_changed_choice_count"] == 1 for r in rows)
+    assert all(r["early_layer_rerank_thin_unfillable_mix_count"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
@@ -209,6 +225,14 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
+    assert "throughput_per_hour" in csv_row
+    assert "first_reentry_step" in csv_row
+    assert "first_upper_layer_open_step" in csv_row
+    assert "reentries_total" in csv_row
+    assert "early_layer_rerank_invocations" in csv_row
+    assert "early_layer_rerank_changed_choice_count" in csv_row
+    assert "early_layer_rerank_thin_unfillable_mix_count" in csv_row
+    assert "deadlock_samples_count" in csv_row
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
