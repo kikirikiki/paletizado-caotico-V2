@@ -186,6 +186,76 @@ def test_top_access_late_stand_hw_tight_throat_is_severe_marginal() -> None:
     assert int(metrics["first_severe_marginal_step"]) == 3
 
 
+def test_top_access_explainability_lists_relevant_lateral_blockers() -> None:
+    seq = [
+        _placement(x_mm=100, y_mm=180, z_mm=260, length_mm=100, width_mm=160, height_mm=90),
+        _placement(x_mm=300, y_mm=180, z_mm=260, length_mm=100, width_mm=160, height_mm=90),
+        _placement(
+            x_mm=200,
+            y_mm=200,
+            z_mm=200,
+            length_mm=100,
+            width_mm=100,
+            height_mm=80,
+            orientation_family="stand_hw",
+        ),
+    ]
+    metrics = compute_top_access_diagnostics(
+        seq,
+        bin_length_mm=700,
+        bin_width_mm=700,
+        insertion_margin_mm=40,
+        local_blockers_limit=4,
+    )
+    row = metrics["per_placement"][2]
+    assert row["accessibility_class"] == "marginal"
+    assert row["limiting_axis"] == "left"
+    assert int(row["limiting_clearance_mm"]) == 0
+    assert row["throat_source_reason"] == "entry_throat_left_limited"
+    assert int(row["nearest_blocker_step"]) == 0
+    assert row["nearest_blocker_orientation"] == "planar"
+    blockers = row["local_blockers"]
+    assert isinstance(blockers, list)
+    assert len(blockers) >= 2
+    assert {int(item["step_index"]) for item in blockers if item.get("step_index") is not None} >= {0, 1}
+    axes = {str(item.get("limiting_axis")) for item in blockers}
+    assert "left" in axes or "right" in axes
+
+
+def test_top_access_explainability_nearest_blocker_bottom_axis_reproducible() -> None:
+    seq = [
+        _placement(x_mm=210, y_mm=120, z_mm=180, length_mm=80, width_mm=70, height_mm=80),
+        _placement(
+            x_mm=200,
+            y_mm=200,
+            z_mm=100,
+            length_mm=100,
+            width_mm=100,
+            height_mm=80,
+            orientation_family="stand_hw",
+        ),
+    ]
+    metrics = compute_top_access_diagnostics(
+        seq,
+        bin_length_mm=700,
+        bin_width_mm=700,
+        insertion_margin_mm=40,
+        local_blockers_limit=3,
+    )
+    row = metrics["per_placement"][1]
+    assert row["limiting_axis"] == "bottom"
+    assert int(row["limiting_clearance_mm"]) == 10
+    assert int(row["nearest_blocker_step"]) == 0
+    assert row["nearest_blocker_orientation"] == "planar"
+    assert row["throat_source_reason"] == "entry_throat_bottom_limited"
+    blockers = row["local_blockers"]
+    assert len(blockers) >= 1
+    first = blockers[0]
+    assert int(first["step_index"]) == 0
+    assert first["limiting_axis"] == "bottom"
+    assert int(first["clearance_to_target_mm"]) == 10
+
+
 def test_top_access_helper_does_not_mutate_input() -> None:
     seq = [
         _placement(x_mm=100, y_mm=100, z_mm=100, length_mm=200, width_mm=200, height_mm=100),
@@ -221,4 +291,11 @@ def test_aggregate_pallet_kpis_exposes_top_access_payload() -> None:
     assert isinstance(first, dict)
     assert "per_placement" in first
     assert int(first.get("blocked_count", 0)) >= 1
+    critical = first.get("critical_placements", [])
+    assert isinstance(critical, list)
+    if critical:
+        row = critical[0]
+        assert "limiting_axis" in row
+        assert "nearest_blocker_step" in row
+        assert "local_blockers" in row
     assert "top_access_first_pallet" in kpis
