@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections import deque
 import copy
 from dataclasses import dataclass, field, replace
 import inspect
 import logging
 import time
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
@@ -17,6 +18,13 @@ from ..scoring.height_slack import (
     rank_for_expansion_with_height_slack,
 )
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
+
+if TYPE_CHECKING:
+    from ..integration.early_layer_pattern_planner import (
+        EarlyLayerPatternPlanner,
+        LayerOpeningPlan,
+        PlannedLayerPlacement,
+    )
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
@@ -59,6 +67,10 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    use_early_layer_pattern_planner: bool = False
+    layer_pattern_prefix_depth: int = 3
+    layer_pattern_beam_width: int = 4
+    layer_pattern_candidate_cap: int = 8
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -80,6 +92,21 @@ class SchedulerConfig:
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
+        object.__setattr__(
+            self,
+            "layer_pattern_prefix_depth",
+            max(1, int(self.layer_pattern_prefix_depth)),
+        )
+        object.__setattr__(
+            self,
+            "layer_pattern_beam_width",
+            max(1, int(self.layer_pattern_beam_width)),
+        )
+        object.__setattr__(
+            self,
+            "layer_pattern_candidate_cap",
+            max(1, int(self.layer_pattern_candidate_cap)),
+        )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -262,6 +289,19 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.pending_layer_plan: deque[PlannedLayerPlacement] = deque()
+        self._pending_layer_plan_pallet_id: int | str | None = None
+        self._pending_layer_plan_layer_id: int | None = None
+        self._pending_layer_plan_planned_len = 0
+        self._pending_layer_plan_executed = 0
+        self.planner_invocations = 0
+        self.planner_abstains = 0
+        self.planned_prefix_len_sum = 0
+        self.planned_prefix_len_count = 0
+        self.planned_prefix_executed_sum = 0
+        self.planned_prefix_executed_count = 0
+        self._early_layer_pattern_planner: EarlyLayerPatternPlanner | None = None
+        self._early_layer_pattern_signature: tuple[int, int, int] | None = None
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -277,6 +317,26 @@ class SchedulerV1:
         deadline = None
         if self.config.time_budget_ms and self.config.time_budget_ms > 0:
             deadline = time.perf_counter() + (float(self.config.time_budget_ms) / 1000.0)
+
+        planned_action = self._try_layer_opening_plan(sim_state)
+        if planned_action is not None:
+            self._record_selected_spatial_tower_penalty(planned_action)
+            self._update_spatial_state_from_selected_plan(planned_action)
+            selected_height = self._resolve_height_after_mm(planned_action.preview)
+            self._record_height_decision(
+                selected_height=selected_height,
+                min_feasible_height=selected_height,
+            )
+            self.last_eval_stats = {
+                "items_evaluated": 0,
+                "items_feasible": 0,
+                "cutoff": False,
+                "cutoff_reason": "",
+                "mode": "early_layer_pattern_planner",
+                "planner_invocations": int(self.planner_invocations),
+                "planner_abstains": int(self.planner_abstains),
+            }
+            return planned_action
 
         micro_enabled = bool(self.config.micro_plan_enabled)
         micro_stats: dict[str, Any] = {}
@@ -331,6 +391,183 @@ class SchedulerV1:
             self._record_selected_spatial_tower_penalty(plan)
             self._update_spatial_state_from_selected_plan(plan)
         return plan
+
+    def _ensure_early_layer_pattern_planner(self) -> EarlyLayerPatternPlanner | None:
+        if not bool(getattr(self.config, "use_early_layer_pattern_planner", False)):
+            self._early_layer_pattern_planner = None
+            self._early_layer_pattern_signature = None
+            return None
+
+        signature = (
+            int(getattr(self.config, "layer_pattern_prefix_depth", 3) or 3),
+            int(getattr(self.config, "layer_pattern_beam_width", 4) or 4),
+            int(getattr(self.config, "layer_pattern_candidate_cap", 8) or 8),
+        )
+        if self._early_layer_pattern_planner is None or self._early_layer_pattern_signature != signature:
+            from ..integration.early_layer_pattern_planner import EarlyLayerPatternPlanner
+
+            self._early_layer_pattern_planner = EarlyLayerPatternPlanner(
+                prefix_depth=int(signature[0]),
+                beam_width=int(signature[1]),
+                candidate_cap=int(signature[2]),
+            )
+            self._early_layer_pattern_signature = signature
+        return self._early_layer_pattern_planner
+
+    @staticmethod
+    def _box_id_matches(lhs: int | str | None, rhs: int | str | None) -> bool:
+        if lhs == rhs:
+            return True
+        return str(lhs) == str(rhs)
+
+    def _finalize_pending_layer_plan_metrics(self, *, reset_plan: bool) -> None:
+        if self._pending_layer_plan_planned_len > 0:
+            self.planned_prefix_executed_sum += int(self._pending_layer_plan_executed)
+            self.planned_prefix_executed_count += 1
+        if reset_plan:
+            self.pending_layer_plan.clear()
+            self._pending_layer_plan_pallet_id = None
+            self._pending_layer_plan_layer_id = None
+            self._pending_layer_plan_planned_len = 0
+            self._pending_layer_plan_executed = 0
+
+    def _set_pending_layer_plan(self, plan: LayerOpeningPlan) -> None:
+        self._finalize_pending_layer_plan_metrics(reset_plan=True)
+        self.pending_layer_plan = deque(plan.placements)
+        self._pending_layer_plan_pallet_id = plan.pallet_id
+        self._pending_layer_plan_layer_id = int(plan.layer_id)
+        self._pending_layer_plan_planned_len = int(len(plan.placements))
+        self._pending_layer_plan_executed = 0
+        self.planned_prefix_len_sum += int(len(plan.placements))
+        self.planned_prefix_len_count += 1
+
+    def _consume_pending_layer_plan(self, sim_state: SchedulerSimState) -> PickPlan | None:
+        if not self.pending_layer_plan:
+            return None
+        planned = self.pending_layer_plan[0]
+        pallet = sim_state.pallets.get(planned.pallet_id)
+        if pallet is None or planned.pallet_id in sim_state.pallet_blocked:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+
+        ramp_items = list(sim_state.ramps.get(int(planned.ramp_id), []) or [])
+        selected_idx = -1
+        selected_box: Box | None = None
+        for idx, box in enumerate(ramp_items):
+            if getattr(box, "destination", None) != planned.pallet_id:
+                continue
+            if self._box_id_matches(getattr(box, "box_id", None), planned.box_id):
+                selected_idx = int(idx)
+                selected_box = box
+                break
+
+        if selected_box is None:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+
+        preview = self._preview_place(pallet, selected_box)
+        if not preview.feasible:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+        preview_layer_id = self._preview_layer_id(preview)
+        preview_z_mm = self._preview_z_mm(preview)
+        if (
+            preview_layer_id is None
+            or preview_z_mm is None
+            or int(preview_layer_id) != int(planned.layer_id)
+            or int(preview_z_mm) != int(planned.z_mm)
+        ):
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+
+        terms = self._score_candidate(
+            now=float(sim_state.now),
+            box=selected_box,
+            idx=int(selected_idx),
+            preview=preview,
+            max_priority=self._max_priority(ramp_items),
+            height_after_mm=self._resolve_height_after_mm(preview, pallet),
+        )
+        self.pending_layer_plan.popleft()
+        self._pending_layer_plan_executed += 1
+        if not self.pending_layer_plan:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+
+        return PickPlan(
+            ramp_id=int(planned.ramp_id),
+            buffer_index=int(selected_idx),
+            box_id=selected_box.box_id,
+            pallet_id=planned.pallet_id,
+            preview=preview,
+            score=float(terms.scalar_score),
+            dt_extra=float(terms.dt_extra),
+        )
+
+    def _has_layer_opening_transition(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        pallet_id: int | str,
+        pallet: PalletModel,
+    ) -> bool:
+        top_z_mm = 0
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                top_z_mm = max(int(top_z_mm), int(getattr(placement, "z_mm", 0) or 0))
+            except Exception:
+                continue
+        has_active = False
+        has_opening = False
+
+        for ramp_id in sorted(sim_state.ramps):
+            for box in list(sim_state.ramps.get(ramp_id, []) or []):
+                if getattr(box, "destination", None) != pallet_id:
+                    continue
+                preview = self._preview_place(pallet, box)
+                if not preview.feasible:
+                    continue
+                z_mm = self._preview_z_mm(preview)
+                if z_mm is None:
+                    continue
+                if int(z_mm) == int(top_z_mm):
+                    has_active = True
+                if int(z_mm) > int(top_z_mm):
+                    has_opening = True
+                if has_active and has_opening:
+                    break
+            if has_active and has_opening:
+                break
+        return bool(has_opening and not has_active)
+
+    def _try_layer_opening_plan(self, sim_state: SchedulerSimState) -> PickPlan | None:
+        planner = self._ensure_early_layer_pattern_planner()
+        if planner is None:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+
+        pending = self._consume_pending_layer_plan(sim_state)
+        if pending is not None:
+            return pending
+
+        for pallet_id, pallet in sorted(sim_state.pallets.items(), key=lambda item: str(item[0])):
+            if pallet_id in sim_state.pallet_blocked:
+                continue
+            if not self._has_layer_opening_transition(sim_state=sim_state, pallet_id=pallet_id, pallet=pallet):
+                continue
+            self.planner_invocations += 1
+            plan = planner.plan_opening(
+                pallet_id=pallet_id,
+                pallet=pallet,
+                ramp_queues=sim_state.ramps,
+                preview_place_fn=self._preview_place,
+            )
+            if plan is None or not plan.placements:
+                self.planner_abstains += 1
+                continue
+            self._set_pending_layer_plan(plan)
+            break
+
+        return self._consume_pending_layer_plan(sim_state)
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
         elapsed = max(0.0, float(elapsed_ms))
@@ -1023,6 +1260,18 @@ class SchedulerV1:
             return None
         try:
             return int(getattr(placement, "layer_id"))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _preview_z_mm(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm"))
         except (TypeError, ValueError):
             return None
 
