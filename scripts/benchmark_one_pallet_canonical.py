@@ -45,7 +45,12 @@ PARAM_ALIASES = {
 
 RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
 RUN_SIMULATION_PARAM_KEYS = set(RUN_SIMULATION_SIGNATURE.parameters.keys())
-REQUIRED_PARAM_KEYS = set(RUN_SIMULATION_PARAM_KEYS - RUN_SIM_EXCLUDED_PROFILE_KEYS)
+PROFILE_ALLOWED_PARAM_KEYS = set(RUN_SIMULATION_PARAM_KEYS - RUN_SIM_EXCLUDED_PROFILE_KEYS)
+REQUIRED_PARAM_KEYS = {
+    name
+    for name, param in RUN_SIMULATION_SIGNATURE.parameters.items()
+    if name not in RUN_SIM_EXCLUDED_PROFILE_KEYS and param.default is inspect._empty
+}
 
 
 def _validate_harness_contract() -> None:
@@ -56,7 +61,7 @@ def _validate_harness_contract() -> None:
             f"{missing_excluded}"
         )
 
-    invalid_alias_targets = sorted({dst for dst in PARAM_ALIASES.values() if dst not in REQUIRED_PARAM_KEYS})
+    invalid_alias_targets = sorted({dst for dst in PARAM_ALIASES.values() if dst not in PROFILE_ALLOWED_PARAM_KEYS})
     if invalid_alias_targets:
         raise RuntimeError(
             "PARAM_ALIASES desalineado con run_simulation; destino(s) inexistente(s): "
@@ -208,7 +213,7 @@ def load_profile(path: str | Path) -> dict[str, Any]:
             f"{missing_params}"
         )
 
-    unknown_params = sorted(set(params.keys()) - REQUIRED_PARAM_KEYS)
+    unknown_params = sorted(set(params.keys()) - PROFILE_ALLOWED_PARAM_KEYS)
     if unknown_params:
         raise ValueError(
             "Perfil invalido: parametros desconocidos/no usados por run_simulation: "
@@ -261,7 +266,7 @@ def load_variant_overrides(path: str | Path | None) -> tuple[str | None, dict[st
 def apply_param_overrides(base_params: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
     out = deepcopy(base_params)
     for key, value in overrides.items():
-        if key not in REQUIRED_PARAM_KEYS:
+        if key not in PROFILE_ALLOWED_PARAM_KEYS:
             raise ValueError(
                 "Override invalido: parametro desconocido/no usado por run_simulation "
                 f"'{key}'"
@@ -707,7 +712,7 @@ def run_benchmark(
     variant_params = apply_param_overrides(baseline_params, merged_variant_overrides)
 
     baseline_missing_params = sorted(REQUIRED_PARAM_KEYS - set(baseline_params.keys()))
-    baseline_unknown_params = sorted(set(baseline_params.keys()) - REQUIRED_PARAM_KEYS)
+    baseline_unknown_params = sorted(set(baseline_params.keys()) - PROFILE_ALLOWED_PARAM_KEYS)
     if baseline_missing_params:
         raise ValueError(
             "Perfil baseline invalido: faltan parametros requeridos para run_simulation: "
@@ -818,6 +823,7 @@ def run_benchmark(
         },
         "param_contract": {
             "run_simulation_param_keys": sorted(RUN_SIMULATION_PARAM_KEYS),
+            "profile_allowed_param_keys": sorted(PROFILE_ALLOWED_PARAM_KEYS),
             "profile_required_param_keys": sorted(REQUIRED_PARAM_KEYS),
             "profile_param_keys": sorted(profile["params"].keys()),
             "missing_required_in_profile": baseline_missing_params,
