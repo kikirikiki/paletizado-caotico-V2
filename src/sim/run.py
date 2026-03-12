@@ -102,6 +102,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Modo de estabilidad",
     )
     parser.add_argument("--min-support", type=float, default=0.75, help="Ratio mínimo de soporte")
+    parser.add_argument(
+        "--stability-min-support-ratio",
+        type=float,
+        default=None,
+        help="Override experimental del ratio minimo de soporte (None=usa --min-support).",
+    )
+    parser.add_argument(
+        "--stability-require-corner-support",
+        dest="stability_require_corner_support",
+        action="store_true",
+        help="Fuerza requisito de soporte de corners/COM cuando el modo lo soporta.",
+    )
+    parser.add_argument(
+        "--no-stability-require-corner-support",
+        dest="stability_require_corner_support",
+        action="store_false",
+        help="Relaja el requisito de soporte de corners/COM manteniendo el chequeo de ratio.",
+    )
+    parser.set_defaults(stability_require_corner_support=None)
     parser.add_argument("--stability-eps-mm", type=float, default=1.0, help="Epsilon de estabilidad (mm)")
     parser.add_argument("--settle-snap-grid", action="store_true", help="Snap de settle a grid")
     parser.add_argument(
@@ -248,6 +267,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Activa planner corto de apertura de capa (prefix beam por capa).",
     )
     parser.add_argument(
+        "--use-layer-template-planner",
+        action="store_true",
+        help="Activa layer template planner monotónico (compat: también activa active-layer commit).",
+    )
+    parser.add_argument(
         "--layer-pattern-prefix-depth",
         type=int,
         default=3,
@@ -264,6 +288,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="Candidatos maximos por expansion del planner de apertura de capa.",
+    )
+    parser.add_argument(
+        "--layer-template-candidate-cap",
+        type=int,
+        default=8,
+        help="Candidatos maximos por expansion del layer template planner.",
+    )
+    parser.add_argument(
+        "--layer-template-plan-cap",
+        type=int,
+        default=6,
+        help="Longitud maxima del plan de capa para layer template planner.",
     )
     parser.add_argument(
         "--batchfill-layer-starter",
@@ -452,6 +488,8 @@ def run_simulation(
     starvation_weight: float = 0.0,
     stability_mode: str = "ratio+corners",
     min_support: float = 0.75,
+    stability_min_support_ratio: float | None = None,
+    stability_require_corner_support: bool | None = None,
     stability_eps_mm: float = 1.0,
     settle_snap_grid: bool = False,
     settle_max_iter: int = 0,
@@ -490,9 +528,12 @@ def run_simulation(
     micro_width: int = 8,
     micro_topk: int = 15,
     use_early_layer_pattern_planner: bool = False,
+    use_layer_template_planner: bool = False,
     layer_pattern_prefix_depth: int = 3,
     layer_pattern_beam_width: int = 4,
     layer_pattern_candidate_cap: int = 8,
+    layer_template_candidate_cap: int = 8,
+    layer_template_plan_cap: int = 6,
     batchfill_layer_starter: bool = False,
     batchfill_starters_max: int = 6,
     batchfill_budget_ms: int = 150,
@@ -649,9 +690,12 @@ def run_simulation(
             micro_plan_width=int(micro_width),
             micro_plan_topk_per_step=int(micro_topk),
             use_early_layer_pattern_planner=bool(use_early_layer_pattern_planner),
+            use_layer_template_planner=bool(use_layer_template_planner),
             layer_pattern_prefix_depth=max(1, int(layer_pattern_prefix_depth)),
             layer_pattern_beam_width=max(1, int(layer_pattern_beam_width)),
             layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
+            layer_template_candidate_cap=max(1, int(layer_template_candidate_cap)),
+            layer_template_plan_cap=max(1, int(layer_template_plan_cap)),
             batchfill_layer_starter=bool(batchfill_layer_starter),
             batchfill_starters_max=int(batchfill_starters_max),
             batchfill_budget_ms=int(batchfill_budget_ms),
@@ -661,6 +705,8 @@ def run_simulation(
             priority_weight=priority_weight,
             stability_mode=stability_mode,
             min_support_ratio=min_support,
+            stability_min_support_ratio=stability_min_support_ratio,
+            stability_require_corner_support=stability_require_corner_support,
             stability_eps_mm=stability_eps_mm,
             settle_snap_grid=settle_snap_grid,
             settle_max_iter=settle_max_iter,
@@ -772,6 +818,8 @@ def run_simulation(
             "starvation_weight": starvation_weight,
             "stability_mode": stability_mode,
             "min_support": min_support,
+            "stability_min_support_ratio": stability_min_support_ratio,
+            "stability_require_corner_support": stability_require_corner_support,
             "stability_eps_mm": stability_eps_mm,
             "settle_snap_grid": settle_snap_grid,
             "settle_max_iter": settle_max_iter,
@@ -810,9 +858,12 @@ def run_simulation(
             "micro_width": int(micro_width),
             "micro_topk": int(micro_topk),
             "use_early_layer_pattern_planner": bool(use_early_layer_pattern_planner),
+            "use_layer_template_planner": bool(use_layer_template_planner),
             "layer_pattern_prefix_depth": int(max(1, int(layer_pattern_prefix_depth))),
             "layer_pattern_beam_width": int(max(1, int(layer_pattern_beam_width))),
             "layer_pattern_candidate_cap": int(max(1, int(layer_pattern_candidate_cap))),
+            "layer_template_candidate_cap": int(max(1, int(layer_template_candidate_cap))),
+            "layer_template_plan_cap": int(max(1, int(layer_template_plan_cap))),
             "batchfill_layer_starter": bool(batchfill_layer_starter),
             "batchfill_starters_max": int(batchfill_starters_max),
             "batchfill_budget_ms": int(batchfill_budget_ms),
@@ -880,6 +931,8 @@ def main() -> None:
         starvation_weight=args.starvation_weight,
         stability_mode=args.stability_mode,
         min_support=args.min_support,
+        stability_min_support_ratio=args.stability_min_support_ratio,
+        stability_require_corner_support=args.stability_require_corner_support,
         stability_eps_mm=args.stability_eps_mm,
         settle_snap_grid=bool(args.settle_snap_grid),
         settle_max_iter=int(args.settle_max_iter),
@@ -918,9 +971,12 @@ def main() -> None:
         micro_width=int(args.micro_width),
         micro_topk=int(args.micro_topk),
         use_early_layer_pattern_planner=bool(args.use_early_layer_pattern_planner),
+        use_layer_template_planner=bool(args.use_layer_template_planner),
         layer_pattern_prefix_depth=int(args.layer_pattern_prefix_depth),
         layer_pattern_beam_width=int(args.layer_pattern_beam_width),
         layer_pattern_candidate_cap=int(args.layer_pattern_candidate_cap),
+        layer_template_candidate_cap=int(args.layer_template_candidate_cap),
+        layer_template_plan_cap=int(args.layer_template_plan_cap),
         batchfill_layer_starter=bool(args.batchfill_layer_starter),
         batchfill_starters_max=int(args.batchfill_starters_max),
         batchfill_budget_ms=int(args.batchfill_budget_ms),

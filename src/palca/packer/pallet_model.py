@@ -45,6 +45,11 @@ class PalletStats:
     stand_hw_gate_blocks_total: int = 0
     stand_hw_gate_allows_total: int = 0
     stand_hw_rejected_support_total: int = 0
+    committed_support_ratio_checks: int = 0
+    support_ratio_min_observed: float | None = None
+    placements_low_support_total: int = 0
+    placements_with_corner_relaxed_total: int = 0
+    placements_without_corner_support_total: int = 0
 
     def record_settle(self, settle_mm: float) -> None:
         self.settle_adjustments_count += 1
@@ -83,6 +88,7 @@ ORIENTATION_MODE_PLANAR = "planar"
 ORIENTATION_MODE_PLANAR_STAND_HW = "planar+stand_hw"
 ALLOWED_ORIENTATION_MODES = (ORIENTATION_MODE_PLANAR, ORIENTATION_MODE_PLANAR_STAND_HW)
 DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM = 400
+LOW_SUPPORT_ALARM_THRESHOLD_RATIO = 0.85
 STACKING_MODE_LAYERS = "layers"
 STACKING_MODE_HEIGHTFIELD = "heightfield"
 ALLOWED_STACKING_MODES = (STACKING_MODE_LAYERS, STACKING_MODE_HEIGHTFIELD)
@@ -528,10 +534,26 @@ class PalletModel:
             raise ValueError("Cannot commit infeasible placement")
 
         placement = preview.placement
-        if preview.debug and "settle_mm" in preview.debug:
-            settle_mm = preview.debug.get("settle_mm")
+        preview_debug = preview.debug if isinstance(preview.debug, dict) else {}
+        if "settle_mm" in preview_debug:
+            settle_mm = preview_debug.get("settle_mm")
             if isinstance(settle_mm, (int, float)) and settle_mm > 0:
                 self.stats.record_settle(float(settle_mm))
+        support_ratio = preview_debug.get("support_ratio")
+        if isinstance(support_ratio, (int, float)):
+            ratio_value = float(support_ratio)
+            self.stats.committed_support_ratio_checks += 1
+            if self.stats.support_ratio_min_observed is None:
+                self.stats.support_ratio_min_observed = ratio_value
+            else:
+                self.stats.support_ratio_min_observed = min(float(self.stats.support_ratio_min_observed), ratio_value)
+            if ratio_value + 1e-9 < float(LOW_SUPPORT_ALARM_THRESHOLD_RATIO):
+                self.stats.placements_low_support_total += 1
+
+        if preview_debug.get("corner_support_required") is False and "com_supported_relaxed" in preview_debug:
+            self.stats.placements_with_corner_relaxed_total += 1
+            if preview_debug.get("com_supported_relaxed") is False:
+                self.stats.placements_without_corner_support_total += 1
         if self.stacking_mode == STACKING_MODE_HEIGHTFIELD:
             layer = self._ensure_heightfield_base_layer()
             cand = MaxRectsCandidate(
