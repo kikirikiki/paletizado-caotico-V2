@@ -509,6 +509,8 @@ class PolicyPackerScheduler:
                     "layer_id": int(getattr(placement, "layer_id", 0) or 0),
                     "orientation_family": getattr(placement, "orientation_family", None),
                     "orientation_name": getattr(placement, "orientation_name", None),
+                    "stacking_mode": str(self.config.stacking_mode),
+                    "scheduler_score_mode": str(getattr(self.config.scheduler, "score_mode", "gain_frag")),
                 }
                 if time is not None:
                     entry["timestamp"] = float(time)
@@ -524,6 +526,29 @@ class PolicyPackerScheduler:
                 priority = getattr(placement, "priority", None)
                 if priority is not None:
                     entry["priority"] = float(priority)
+
+                preview_debug = getattr(plan.preview, "debug", None)
+                if isinstance(preview_debug, dict):
+                    selected_debug: dict[str, object] = {}
+                    for key in (
+                        "z_band_enabled",
+                        "z_band_mm",
+                        "z_band_min_z",
+                        "z_band_candidates_before",
+                        "z_band_candidates_after",
+                        "candidate_limit_hit",
+                        "timeout_hit",
+                        "tower_penalty",
+                        "coverage_bonus",
+                        "dominant_free_rect_delta",
+                        "support_ratio",
+                        "com_supported",
+                        "rejected_by_controls",
+                    ):
+                        if key in preview_debug:
+                            selected_debug[str(key)] = preview_debug[key]
+                    if selected_debug:
+                        entry["selection_debug"] = selected_debug
 
                 seq.append(entry)
         except Exception:

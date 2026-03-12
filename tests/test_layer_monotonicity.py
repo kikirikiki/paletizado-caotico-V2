@@ -50,3 +50,52 @@ def test_layer_monotonicity_monotonic_basic() -> None:
     assert abs(float(m["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(m["first_stack_step"]) == 2
     assert int(m["monotonic_violations_count"]) == 0
+    assert int(m["reentries_total"]) == 0
+    assert int(m["max_layer_drop"]) == 0
+    assert int(m["reentries_drop_ge_2_count"]) == 0
+
+
+def test_layer_drop_semantics_l_minus_1() -> None:
+    seq = [
+        _placement(step=0, z=0, layer=0),
+        _placement(step=1, z=100, layer=1),
+        _placement(step=2, z=200, layer=2),
+        _placement(step=3, z=100, layer=1),
+    ]
+    m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100, layer_drop_audit=True)
+
+    assert int(m["reentries_total"]) == 1
+    assert int(m["max_layer_drop"]) == 1
+    assert int(m["reentries_drop_ge_2_count"]) == 0
+    examples = m.get("layer_drop_examples", [])
+    assert isinstance(examples, list) and examples
+    assert int(examples[0]["layer_drop"]) == 1
+
+
+def test_layer_drop_semantics_l_minus_2() -> None:
+    seq = [
+        _placement(step=0, z=0, layer=0),
+        _placement(step=1, z=100, layer=1),
+        _placement(step=2, z=200, layer=2),
+        _placement(step=3, z=0, layer=0),
+    ]
+    m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100, layer_drop_audit=True)
+
+    assert int(m["reentries_total"]) == 1
+    assert int(m["max_layer_drop"]) == 2
+    assert int(m["reentries_drop_ge_2_count"]) == 1
+    histogram = m.get("layer_drop_histogram", {})
+    assert isinstance(histogram, dict)
+    assert int(histogram.get("2", 0)) == 1
+
+
+def test_layer_drop_audit_off_backward_compatibility() -> None:
+    seq = [
+        _placement(step=0, z=0, layer=0),
+        _placement(step=1, z=100, layer=1),
+        _placement(step=2, z=0, layer=0),
+    ]
+    m = compute_layer_monotonicity_metrics(seq, layer_band_mm=100, layer_drop_audit=False)
+
+    assert int(m["lower_layer_reentry_count"]) == 1
+    assert "layer_drop_step_trace" not in m
