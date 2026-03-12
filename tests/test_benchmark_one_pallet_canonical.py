@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from palca.integration.prefix_oracle_audit import audit_prefix_oracle_for_seed
 from scripts import benchmark_one_pallet_canonical as bench
 
 
@@ -290,3 +291,187 @@ def test_run_benchmark_variant_can_enable_human_like_layer_opener(
     assert bool(baseline_kwargs.get("human_like_layer_opener", False)) is False
     assert bool(variant_kwargs.get("human_like_layer_opener", False)) is True
     assert bool(summary["runs"]["opener"]["overrides"]["human_like_layer_opener"]) is True
+
+
+def _synthetic_oracle_placements() -> list[dict[str, object]]:
+    return [
+        {
+            "step_index": 0,
+            "box_id": "b0",
+            "x_mm": 0,
+            "y_mm": 0,
+            "z_mm": 0,
+            "layer_id": 0,
+            "length_mm": 300,
+            "width_mm": 200,
+            "height_mm": 150,
+            "orientation_name": "planar_lw",
+            "orientation_family": "planar",
+        },
+        {
+            "step_index": 1,
+            "box_id": "b1",
+            "x_mm": 300,
+            "y_mm": 0,
+            "z_mm": 0,
+            "layer_id": 0,
+            "length_mm": 300,
+            "width_mm": 200,
+            "height_mm": 150,
+            "orientation_name": "planar_lw",
+            "orientation_family": "planar",
+        },
+        {
+            "step_index": 2,
+            "box_id": "b2",
+            "x_mm": 0,
+            "y_mm": 200,
+            "z_mm": 150,
+            "layer_id": 1,
+            "length_mm": 200,
+            "width_mm": 200,
+            "height_mm": 150,
+            "orientation_name": "planar_lw",
+            "orientation_family": "planar",
+        },
+        {
+            "step_index": 3,
+            "box_id": "b3",
+            "x_mm": 200,
+            "y_mm": 200,
+            "z_mm": 150,
+            "layer_id": 1,
+            "length_mm": 200,
+            "width_mm": 200,
+            "height_mm": 150,
+            "orientation_name": "planar_lw",
+            "orientation_family": "planar",
+        },
+        {
+            "step_index": 4,
+            "box_id": "b4",
+            "x_mm": 0,
+            "y_mm": 400,
+            "z_mm": 0,
+            "layer_id": 0,
+            "length_mm": 300,
+            "width_mm": 200,
+            "height_mm": 150,
+            "orientation_name": "planar_lw",
+            "orientation_family": "planar",
+        },
+        {
+            "step_index": 5,
+            "box_id": "b5",
+            "x_mm": 300,
+            "y_mm": 400,
+            "z_mm": 150,
+            "layer_id": 1,
+            "length_mm": 200,
+            "width_mm": 200,
+            "height_mm": 150,
+            "orientation_name": "planar_lw",
+            "orientation_family": "planar",
+        },
+    ]
+
+
+def test_run_benchmark_prefix_oracle_audit_wiring_and_off_backward_compat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    placements = _synthetic_oracle_placements()
+
+    def fake_run_simulation(**kwargs):
+        out_path = Path(str(kwargs["out_path"]))
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+        payload = {"metrics": {"processed_boxes": 24, "pallet_kpis": {"stand_hw_used_total": 0}}}
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps({"pallets": {"1": placements}}), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+
+    off_summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_off",
+        seeds_override=[50021],
+    )
+    assert off_summary["prefix_oracle_audit_enabled"] is False
+    assert off_summary["prefix_oracle_audit"] is None
+    assert off_summary["files"]["prefix_oracle_summary_json"] is None
+
+    on_summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_on",
+        seeds_override=[50021],
+        prefix_oracle_audit=True,
+        prefix_len=2,
+        candidate_cap=4,
+        oracle_rollout_depth=4,
+        max_openings_per_seed=2,
+    )
+    assert on_summary["prefix_oracle_audit_enabled"] is True
+    audit_payload = on_summary["prefix_oracle_audit"]
+    assert isinstance(audit_payload, dict)
+    assert audit_payload["audit_name"] == "prefix_oracle"
+    assert audit_payload["config"]["prefix_len"] == 2
+    assert audit_payload["config"]["candidate_cap"] == 4
+    assert audit_payload["config"]["oracle_rollout_depth"] == 4
+    assert audit_payload["config"]["max_openings_per_seed"] == 2
+    assert audit_payload["aggregate"]["audited_openings"] >= 1
+
+    assert Path(str(on_summary["files"]["prefix_oracle_summary_json"])).exists()
+    assert Path(str(on_summary["files"]["prefix_oracle_openings_csv"])).exists()
+    assert Path(str(on_summary["files"]["prefix_oracle_alternatives_csv"])).exists()
+
+
+def test_prefix_oracle_audit_ranking_is_reproducible() -> None:
+    profile = bench.load_profile("configs/benchmarks/one_pallet_canonical.json")
+    params = dict(profile["params"])
+    placements = _synthetic_oracle_placements()
+
+    audit_a = audit_prefix_oracle_for_seed(
+        seed=50021,
+        run_label="baseline",
+        placements=placements,
+        params=params,
+        prefix_len=2,
+        candidate_cap=4,
+        oracle_rollout_depth=3,
+        max_openings_per_seed=2,
+    )
+    audit_b = audit_prefix_oracle_for_seed(
+        seed=50021,
+        run_label="baseline",
+        placements=placements,
+        params=params,
+        prefix_len=2,
+        candidate_cap=4,
+        oracle_rollout_depth=3,
+        max_openings_per_seed=2,
+    )
+
+    seq_a = [
+        (
+            int(row["opening_index"]),
+            int(row["rank"]),
+            int(row["first_token"]),
+            tuple(int(x) for x in row.get("prefix_tokens", [])),
+        )
+        for row in audit_a["alternative_rows"]
+    ]
+    seq_b = [
+        (
+            int(row["opening_index"]),
+            int(row["rank"]),
+            int(row["first_token"]),
+            tuple(int(x) for x in row.get("prefix_tokens", [])),
+        )
+        for row in audit_b["alternative_rows"]
+    ]
+    assert seq_a == seq_b
+    assert len(audit_a["opening_rows"]) >= 1
+    assert any(bool(row.get("is_baseline", False)) for row in audit_a["alternative_rows"])

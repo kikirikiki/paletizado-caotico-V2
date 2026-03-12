@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from palca.integration.layer_monotonicity import compute_layer_monotonicity_metrics
+from palca.integration.prefix_oracle_audit import audit_prefix_oracle_for_seed
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -718,6 +719,171 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         )
 
 
+def _run_prefix_oracle_audit(
+    *,
+    rows_sorted: list[SeedSummary],
+    run_output_dir: Path,
+    run_effective_params: dict[str, dict[str, Any]],
+    prefix_len: int,
+    candidate_cap: int,
+    oracle_rollout_depth: int,
+    max_openings_per_seed: int,
+) -> dict[str, Any]:
+    seed_rows: list[dict[str, Any]] = []
+    opening_rows: list[dict[str, Any]] = []
+    alternative_rows: list[dict[str, Any]] = []
+
+    for row in rows_sorted:
+        params = run_effective_params.get(str(row.run_label), {})
+        forced_destination = _safe_int(params.get("force_destination"))
+        placements = _extract_placement_sequence(
+            Path(row.placements_json),
+            forced_destination=forced_destination,
+        )
+
+        audited = audit_prefix_oracle_for_seed(
+            seed=int(row.seed),
+            run_label=str(row.run_label),
+            placements=placements,
+            params=params,
+            prefix_len=int(max(1, prefix_len)),
+            candidate_cap=int(max(1, candidate_cap)),
+            oracle_rollout_depth=int(max(0, oracle_rollout_depth)),
+            max_openings_per_seed=int(max(0, max_openings_per_seed)),
+            layer_band_mm=int(max(1, _safe_int(params.get("layer_band_mm")) or 100)),
+        )
+        seed_rows.append(dict(audited.get("seed_summary", {})))
+        opening_rows.extend([dict(item) for item in audited.get("opening_rows", []) if isinstance(item, dict)])
+        alternative_rows.extend([dict(item) for item in audited.get("alternative_rows", []) if isinstance(item, dict)])
+
+    audited_openings = len(opening_rows)
+    matches = sum(1 for row in opening_rows if bool(row.get("baseline_matches_best", False)))
+    gaps = audited_openings - matches
+
+    def _mean_num(rows: list[dict[str, Any]], key: str) -> float:
+        vals = [float(_safe_float(row.get(key)) or 0.0) for row in rows]
+        if not vals:
+            return 0.0
+        return float(sum(vals) / float(len(vals)))
+
+    bad_rows = [row for row in opening_rows if not bool(row.get("baseline_matches_best", False))]
+    good_rows = [row for row in opening_rows if bool(row.get("baseline_matches_best", False))]
+
+    bad_shape_counts: dict[str, int] = {}
+    good_shape_counts: dict[str, int] = {}
+    for row in bad_rows:
+        shape = str(row.get("opening_baseline_dominant_bad_residual_shape", "none") or "none")
+        bad_shape_counts[shape] = int(bad_shape_counts.get(shape, 0) + 1)
+    for row in good_rows:
+        shape = str(row.get("opening_baseline_dominant_bad_residual_shape", "none") or "none")
+        good_shape_counts[shape] = int(good_shape_counts.get(shape, 0) + 1)
+
+    bad_shape_top = sorted(bad_shape_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[:5]
+    good_shape_top = sorted(good_shape_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[:5]
+    top_bad_shape = bad_shape_top[0][0] if bad_shape_top else "none"
+    top_bad_shape_bad_ratio = (
+        float(bad_shape_counts.get(top_bad_shape, 0)) / float(max(1, len(bad_rows)))
+        if bad_rows
+        else 0.0
+    )
+    top_bad_shape_good_ratio = (
+        float(good_shape_counts.get(top_bad_shape, 0)) / float(max(1, len(good_rows)))
+        if good_rows
+        else 0.0
+    )
+
+    mean_gap_deep_drop = _mean_num(opening_rows, "gap_deep_drop_burden_baseline_minus_best")
+    mean_gap_reentries = _mean_num(opening_rows, "gap_reentries_drop_ge_2_baseline_minus_best")
+    mean_gap_processed = _mean_num(opening_rows, "gap_processed_boxes_best_minus_baseline")
+    mean_bad_candidate_count = _mean_num(bad_rows, "opening_feasible_candidate_count")
+    mean_good_candidate_count = _mean_num(good_rows, "opening_feasible_candidate_count")
+    mean_bad_poison = _mean_num(bad_rows, "opening_baseline_poison_risk_score")
+    mean_good_poison = _mean_num(good_rows, "opening_baseline_poison_risk_score")
+
+    signal_gap = bool(gaps > 0 and (mean_gap_deep_drop >= 0.5 or mean_gap_reentries >= 0.25 or mean_gap_processed > 0.0))
+    signal_feature = bool(
+        bad_rows
+        and top_bad_shape != "none"
+        and top_bad_shape_bad_ratio >= 0.50
+        and (not good_rows or top_bad_shape_bad_ratio >= (top_bad_shape_good_ratio + 0.20))
+    )
+    distillable_policy_signal = bool(signal_gap and signal_feature)
+    option_b_likely = bool(gaps > 0 and not distillable_policy_signal)
+
+    aggregate = {
+        "audited_openings": int(audited_openings),
+        "baseline_matches_best_count": int(matches),
+        "baseline_matches_best_rate": float(matches / max(1, audited_openings)),
+        "gap_real_count": int(gaps),
+        "mean_gap_deep_drop_burden_baseline_minus_best": float(mean_gap_deep_drop),
+        "mean_gap_reentries_drop_ge_2_baseline_minus_best": float(mean_gap_reentries),
+        "mean_gap_processed_boxes_best_minus_baseline": float(mean_gap_processed),
+        "features_bad_vs_good": {
+            "mean_bad_opening_feasible_candidate_count": float(mean_bad_candidate_count),
+            "mean_good_opening_feasible_candidate_count": float(mean_good_candidate_count),
+            "mean_bad_baseline_poison_risk": float(mean_bad_poison),
+            "mean_good_baseline_poison_risk": float(mean_good_poison),
+            "bad_opening_dominant_shapes_top": [[str(name), int(count)] for name, count in bad_shape_top],
+            "good_opening_dominant_shapes_top": [[str(name), int(count)] for name, count in good_shape_top],
+            "top_bad_shape": str(top_bad_shape),
+            "top_bad_shape_bad_ratio": float(top_bad_shape_bad_ratio),
+            "top_bad_shape_good_ratio": float(top_bad_shape_good_ratio),
+        },
+        "distillable_policy_signal": bool(distillable_policy_signal),
+        "option_b_likely": bool(option_b_likely),
+        "interpretation": (
+            "signal_distillable_option_a"
+            if distillable_policy_signal
+            else ("signal_exists_but_points_to_option_b" if option_b_likely else "no_actionable_signal")
+        ),
+    }
+
+    prefix_json = run_output_dir / "prefix_oracle_audit_summary.json"
+    prefix_openings_csv = run_output_dir / "prefix_oracle_openings.csv"
+    prefix_alternatives_csv = run_output_dir / "prefix_oracle_alternatives.csv"
+
+    payload = {
+        "audit_name": "prefix_oracle",
+        "config": {
+            "prefix_len": int(max(1, prefix_len)),
+            "candidate_cap": int(max(1, candidate_cap)),
+            "oracle_rollout_depth": int(max(0, oracle_rollout_depth)),
+            "max_openings_per_seed": int(max(0, max_openings_per_seed)),
+        },
+        "seed_summaries": seed_rows,
+        "opening_rows_count": len(opening_rows),
+        "alternative_rows_count": len(alternative_rows),
+        "aggregate": aggregate,
+        "files": {
+            "summary_json": str(prefix_json),
+            "openings_csv": str(prefix_openings_csv),
+            "alternatives_csv": str(prefix_alternatives_csv),
+        },
+    }
+
+    prefix_json.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    opening_fieldnames = list(opening_rows[0].keys()) if opening_rows else ["seed", "run_label", "opening_index"]
+    with prefix_openings_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=opening_fieldnames)
+        writer.writeheader()
+        for item in opening_rows:
+            writer.writerow(item)
+
+    alternative_fieldnames = (
+        list(alternative_rows[0].keys())
+        if alternative_rows
+        else ["seed", "run_label", "opening_index", "candidate_id", "rank"]
+    )
+    with prefix_alternatives_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=alternative_fieldnames)
+        writer.writeheader()
+        for item in alternative_rows:
+            writer.writerow(item)
+
+    return payload
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -727,6 +893,11 @@ def run_benchmark(
     seeds_override: list[int] | None = None,
     variant_name: str = "variant",
     layer_drop_audit: bool = False,
+    prefix_oracle_audit: bool = False,
+    prefix_len: int = 3,
+    candidate_cap: int = 8,
+    oracle_rollout_depth: int = 8,
+    max_openings_per_seed: int = 3,
 ) -> dict[str, Any]:
     profile = load_profile(profile_path)
 
@@ -818,6 +989,23 @@ def run_benchmark(
     aggregates = _aggregate_rows(rows_sorted)
     discriminative = _discriminative_status(rows_sorted)
     baseline_flat = bool(discriminative.get("baseline", {}).get("is_flat_processed_boxes"))
+    run_effective_params: dict[str, dict[str, Any]] = {
+        "baseline": deepcopy(baseline_params),
+    }
+    if variant_requested:
+        run_effective_params[str(variant_name)] = deepcopy(variant_params)
+
+    prefix_oracle_payload: dict[str, Any] | None = None
+    if prefix_oracle_audit:
+        prefix_oracle_payload = _run_prefix_oracle_audit(
+            rows_sorted=rows_sorted,
+            run_output_dir=run_output_dir,
+            run_effective_params=run_effective_params,
+            prefix_len=int(max(1, prefix_len)),
+            candidate_cap=int(max(1, candidate_cap)),
+            oracle_rollout_depth=int(max(0, oracle_rollout_depth)),
+            max_openings_per_seed=int(max(0, max_openings_per_seed)),
+        )
 
     timestamp_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     fingerprint = {
@@ -838,6 +1026,7 @@ def run_benchmark(
         "profile_name": profile["profile_name"],
         "profile_description": profile.get("description", ""),
         "layer_drop_audit_enabled": bool(layer_drop_audit),
+        "prefix_oracle_audit_enabled": bool(prefix_oracle_audit),
         "fingerprint": fingerprint,
         "runs": {
             "baseline": {
@@ -866,6 +1055,7 @@ def run_benchmark(
         },
         "aggregates": aggregates,
         "discriminative": discriminative,
+        "prefix_oracle_audit": prefix_oracle_payload,
         "rows": [asdict(r) for r in rows_sorted],
         "files": {
             "summary_csv": str(csv_path),
@@ -873,6 +1063,21 @@ def run_benchmark(
             "layer_drop_audits": [
                 row.layer_drop_audit_json for row in rows_sorted if row.layer_drop_audit_json
             ],
+            "prefix_oracle_summary_json": (
+                prefix_oracle_payload["files"]["summary_json"]
+                if isinstance(prefix_oracle_payload, dict)
+                else None
+            ),
+            "prefix_oracle_openings_csv": (
+                prefix_oracle_payload["files"]["openings_csv"]
+                if isinstance(prefix_oracle_payload, dict)
+                else None
+            ),
+            "prefix_oracle_alternatives_csv": (
+                prefix_oracle_payload["files"]["alternatives_csv"]
+                if isinstance(prefix_oracle_payload, dict)
+                else None
+            ),
         },
     }
 
@@ -887,6 +1092,10 @@ def run_benchmark(
     print(f"[benchmark] outdir={run_output_dir}")
     print(f"[benchmark] summary_csv={csv_path}")
     print(f"[benchmark] summary_json={summary_json_path}")
+    if isinstance(prefix_oracle_payload, dict):
+        print(f"[benchmark] prefix_oracle_summary_json={prefix_oracle_payload['files']['summary_json']}")
+        print(f"[benchmark] prefix_oracle_openings_csv={prefix_oracle_payload['files']['openings_csv']}")
+        print(f"[benchmark] prefix_oracle_alternatives_csv={prefix_oracle_payload['files']['alternatives_csv']}")
     if baseline_flat:
         print(
             "[benchmark][warning] baseline flat across seeds in processed_boxes; "
@@ -936,6 +1145,35 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit per-seed JSON audit with layer-drop step trace and semantic summary.",
     )
+    parser.add_argument(
+        "--prefix-oracle-audit",
+        action="store_true",
+        help="Enable offline prefix oracle audit focused on early layer openings.",
+    )
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=3,
+        help="Prefix length to audit per opening (default: 3).",
+    )
+    parser.add_argument(
+        "--candidate-cap",
+        type=int,
+        default=8,
+        help="Max alternatives per opening in prefix-oracle audit (default: 8).",
+    )
+    parser.add_argument(
+        "--oracle-rollout-depth",
+        type=int,
+        default=8,
+        help="Greedy rollout depth after audited prefix (default: 8).",
+    )
+    parser.add_argument(
+        "--max-openings-per-seed",
+        type=int,
+        default=3,
+        help="Max audited openings per seed (default: 3).",
+    )
     return parser
 
 
@@ -949,6 +1187,11 @@ def main(argv: list[str] | None = None) -> int:
         seeds_override=(list(args.seeds) if args.seeds else None),
         variant_name=str(args.variant_name),
         layer_drop_audit=bool(args.layer_drop_audit),
+        prefix_oracle_audit=bool(args.prefix_oracle_audit),
+        prefix_len=int(args.prefix_len),
+        candidate_cap=int(args.candidate_cap),
+        oracle_rollout_depth=int(args.oracle_rollout_depth),
+        max_openings_per_seed=int(args.max_openings_per_seed),
     )
     return 0
 
