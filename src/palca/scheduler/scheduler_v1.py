@@ -20,9 +20,9 @@ from ..scoring.height_slack import (
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
 if TYPE_CHECKING:
-    from ..integration.early_layer_pattern_planner import (
-        EarlyLayerPatternPlanner,
-        LayerOpeningPlan,
+    from ..integration.layer_skeleton_planner import (
+        LayerSkeletonPlan,
+        LayerSkeletonPlanner,
         PlannedLayerPlacement,
     )
 
@@ -71,6 +71,10 @@ class SchedulerConfig:
     layer_pattern_prefix_depth: int = 3
     layer_pattern_beam_width: int = 4
     layer_pattern_candidate_cap: int = 8
+    use_layer_skeleton_planner: bool = False
+    layer_skeleton_beam_width: int = 4
+    layer_skeleton_candidate_cap: int = 8
+    layer_skeleton_cap: int = 6
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -106,6 +110,21 @@ class SchedulerConfig:
             self,
             "layer_pattern_candidate_cap",
             max(1, int(self.layer_pattern_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "layer_skeleton_beam_width",
+            max(1, int(self.layer_skeleton_beam_width)),
+        )
+        object.__setattr__(
+            self,
+            "layer_skeleton_candidate_cap",
+            max(1, int(self.layer_skeleton_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "layer_skeleton_cap",
+            max(1, int(self.layer_skeleton_cap)),
         )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
@@ -300,6 +319,12 @@ class SchedulerV1:
         self.planned_prefix_len_count = 0
         self.planned_prefix_executed_sum = 0
         self.planned_prefix_executed_count = 0
+        self.committed_layer_plan_len_sum = 0
+        self.committed_layer_plan_len_count = 0
+        self.skeleton_breaks_total = 0
+        self.skeleton_rebuilds_total = 0
+        self.skeleton_area_fill_sum = 0.0
+        self.skeleton_area_fill_count = 0
         self.active_committed_layer_index: int | None = None
         self._active_committed_layer_z_mm: int | None = None
         self._active_committed_pallet_id: int | str | None = None
@@ -308,8 +333,8 @@ class SchedulerV1:
         self.active_layer_commit_replans_total = 0
         self.active_layer_commit_fallback_same_layer_total = 0
         self.active_layer_commit_closures_total = 0
-        self._early_layer_pattern_planner: EarlyLayerPatternPlanner | None = None
-        self._early_layer_pattern_signature: tuple[int, int, int] | None = None
+        self._layer_skeleton_planner: LayerSkeletonPlanner | None = None
+        self._layer_skeleton_signature: tuple[int, int, int] | None = None
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -340,7 +365,7 @@ class SchedulerV1:
                 "items_feasible": 0,
                 "cutoff": False,
                 "cutoff_reason": "",
-                "mode": "early_layer_pattern_planner",
+                "mode": "layer_skeleton_planner",
                 "planner_invocations": int(self.planner_invocations),
                 "planner_abstains": int(self.planner_abstains),
             }
@@ -404,27 +429,37 @@ class SchedulerV1:
             self._update_spatial_state_from_selected_plan(plan)
         return plan
 
-    def _ensure_early_layer_pattern_planner(self) -> EarlyLayerPatternPlanner | None:
-        if not bool(getattr(self.config, "use_early_layer_pattern_planner", False)):
-            self._early_layer_pattern_planner = None
-            self._early_layer_pattern_signature = None
+    def _layer_skeleton_planner_enabled(self) -> bool:
+        return bool(
+            getattr(self.config, "use_layer_skeleton_planner", False)
+            or getattr(self.config, "use_early_layer_pattern_planner", False)
+        )
+
+    def _ensure_layer_skeleton_planner(self) -> LayerSkeletonPlanner | None:
+        if not self._layer_skeleton_planner_enabled():
+            self._layer_skeleton_planner = None
+            self._layer_skeleton_signature = None
             return None
 
         signature = (
-            int(getattr(self.config, "layer_pattern_prefix_depth", 3) or 3),
-            int(getattr(self.config, "layer_pattern_beam_width", 4) or 4),
-            int(getattr(self.config, "layer_pattern_candidate_cap", 8) or 8),
+            int(getattr(self.config, "layer_skeleton_candidate_cap", getattr(self.config, "layer_pattern_candidate_cap", 8)) or 8),
+            int(getattr(self.config, "layer_skeleton_cap", getattr(self.config, "layer_pattern_prefix_depth", 3)) or 3),
+            int(getattr(self.config, "layer_skeleton_beam_width", getattr(self.config, "layer_pattern_beam_width", 4)) or 4),
         )
-        if self._early_layer_pattern_planner is None or self._early_layer_pattern_signature != signature:
-            from ..integration.early_layer_pattern_planner import EarlyLayerPatternPlanner
+        if self._layer_skeleton_planner is None or self._layer_skeleton_signature != signature:
+            from ..integration.layer_skeleton_planner import LayerSkeletonPlanner
 
-            self._early_layer_pattern_planner = EarlyLayerPatternPlanner(
-                prefix_depth=int(signature[0]),
-                beam_width=int(signature[1]),
-                candidate_cap=int(signature[2]),
+            self._layer_skeleton_planner = LayerSkeletonPlanner(
+                candidate_cap=int(signature[0]),
+                skeleton_cap=int(signature[1]),
+                beam_width=int(signature[2]),
             )
-            self._early_layer_pattern_signature = signature
-        return self._early_layer_pattern_planner
+            self._layer_skeleton_signature = signature
+        return self._layer_skeleton_planner
+
+    # Compat: tests legacy still monkeypatch this method.
+    def _ensure_early_layer_pattern_planner(self) -> LayerSkeletonPlanner | None:
+        return self._ensure_layer_skeleton_planner()
 
     @staticmethod
     def _box_id_matches(lhs: int | str | None, rhs: int | str | None) -> bool:
@@ -433,7 +468,7 @@ class SchedulerV1:
         return str(lhs) == str(rhs)
 
     def _active_layer_commit_enabled(self) -> bool:
-        return bool(getattr(self.config, "use_early_layer_pattern_planner", False))
+        return self._layer_skeleton_planner_enabled()
 
     def _reset_active_layer_commit_state(self) -> None:
         self.active_committed_layer_index = None
@@ -538,7 +573,12 @@ class SchedulerV1:
             self._pending_layer_plan_planned_len = 0
             self._pending_layer_plan_executed = 0
 
-    def _set_pending_layer_plan(self, plan: LayerOpeningPlan) -> None:
+    def _drop_pending_layer_plan(self, *, count_break: bool) -> None:
+        if count_break and self.pending_layer_plan:
+            self.skeleton_breaks_total += 1
+        self._finalize_pending_layer_plan_metrics(reset_plan=True)
+
+    def _set_pending_layer_plan(self, plan: LayerSkeletonPlan) -> None:
         self._finalize_pending_layer_plan_metrics(reset_plan=True)
         self.pending_layer_plan = deque(plan.placements)
         self._pending_layer_plan_pallet_id = plan.pallet_id
@@ -547,6 +587,11 @@ class SchedulerV1:
         self._pending_layer_plan_executed = 0
         self.planned_prefix_len_sum += int(len(plan.placements))
         self.planned_prefix_len_count += 1
+        self.committed_layer_plan_len_sum += int(len(plan.placements))
+        self.committed_layer_plan_len_count += 1
+        area_fill = float(getattr(plan, "area_fill_ratio", 0.0) or 0.0)
+        self.skeleton_area_fill_sum += area_fill
+        self.skeleton_area_fill_count += 1
 
     def _consume_pending_layer_plan(self, sim_state: SchedulerSimState) -> PickPlan | None:
         if not self.pending_layer_plan:
@@ -557,11 +602,11 @@ class SchedulerV1:
                 planned.pallet_id != self._active_committed_pallet_id
                 or int(planned.layer_id) != int(self.active_committed_layer_index)
             ):
-                self._finalize_pending_layer_plan_metrics(reset_plan=True)
+                self._drop_pending_layer_plan(count_break=True)
                 return None
         pallet = sim_state.pallets.get(planned.pallet_id)
         if pallet is None or planned.pallet_id in sim_state.pallet_blocked:
-            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            self._drop_pending_layer_plan(count_break=True)
             return None
 
         ramp_items = list(sim_state.ramps.get(int(planned.ramp_id), []) or [])
@@ -576,12 +621,12 @@ class SchedulerV1:
                 break
 
         if selected_box is None:
-            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            self._drop_pending_layer_plan(count_break=True)
             return None
 
         preview = self._preview_place(pallet, selected_box)
         if not preview.feasible:
-            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            self._drop_pending_layer_plan(count_break=True)
             return None
         preview_layer_id = self._preview_layer_id(preview)
         preview_z_mm = self._preview_z_mm(preview)
@@ -589,14 +634,14 @@ class SchedulerV1:
             preview_layer_id is None
             or preview_z_mm is None
             or int(preview_layer_id) != int(planned.layer_id)
-            or int(preview_z_mm) != int(planned.z_mm)
+            or int(preview_z_mm) < int(planned.z_mm)
         ):
-            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            self._drop_pending_layer_plan(count_break=True)
             return None
         if self._active_layer_commit_enabled() and self.active_committed_layer_index is not None:
             active_z_mm = self._active_committed_layer_z_mm
             if active_z_mm is not None and int(preview_z_mm) < int(active_z_mm):
-                self._finalize_pending_layer_plan_metrics(reset_plan=True)
+                self._drop_pending_layer_plan(count_break=True)
                 return None
 
         terms = self._score_candidate(
@@ -651,6 +696,8 @@ class SchedulerV1:
                 preview = self._preview_place(pallet, box)
                 if not preview.feasible:
                     continue
+                if not self._active_layer_commit_allows_preview(pallet_id=pallet_id, preview=preview):
+                    continue
                 z_mm = self._preview_z_mm(preview)
                 if z_mm is None:
                     continue
@@ -698,15 +745,20 @@ class SchedulerV1:
             else:
                 self.planner_invocations += 1
                 self.active_layer_commit_replans_total += 1
+                self.skeleton_rebuilds_total += 1
                 plan = planner.plan_for_layer(
                     pallet_id=active_pallet_id,
                     pallet=active_pallet,
                     ramp_queues=sim_state.ramps,
                     target_layer_id=int(active_layer_id),
-                    target_z_mm=None,
+                    target_z_mm=(
+                        int(self._active_committed_layer_z_mm)
+                        if self._active_committed_layer_z_mm is not None
+                        else None
+                    ),
                     preview_place_fn=self._preview_place,
                 )
-                if plan is None or not plan.placements:
+                if plan is None or not plan.placements or self._is_non_terminal_trivial_skeleton(plan):
                     self.planner_abstains += 1
                 else:
                     self._set_pending_layer_plan(plan)
@@ -744,7 +796,7 @@ class SchedulerV1:
         self,
         *,
         sim_state: SchedulerSimState,
-        planner: EarlyLayerPatternPlanner,
+        planner: LayerSkeletonPlanner,
     ) -> PickPlan | None:
         for pallet_id, pallet in sorted(sim_state.pallets.items(), key=lambda item: str(item[0])):
             if pallet_id in sim_state.pallet_blocked:
@@ -761,7 +813,7 @@ class SchedulerV1:
                 ramp_queues=sim_state.ramps,
                 preview_place_fn=self._preview_place,
             )
-            if plan is None or not plan.placements:
+            if plan is None or not plan.placements or self._is_non_terminal_trivial_skeleton(plan):
                 self.planner_abstains += 1
                 continue
             if self._active_layer_commit_enabled() and self._active_layer_commit_started:
@@ -780,6 +832,14 @@ class SchedulerV1:
             if pending is not None:
                 return pending
         return None
+
+    @staticmethod
+    def _is_non_terminal_trivial_skeleton(plan: LayerSkeletonPlan) -> bool:
+        if plan is None:
+            return True
+        if len(tuple(plan.placements)) >= 2:
+            return False
+        return not bool(getattr(plan, "is_terminal", False))
 
     def _try_same_layer_fallback_greedy(
         self,

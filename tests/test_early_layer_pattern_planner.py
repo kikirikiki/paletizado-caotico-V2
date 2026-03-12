@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from palca.domain.box import Box
 from palca.domain.pallet_spec import PalletSpec
 from palca.domain.placement import Placement, PlacementPreview
-from palca.integration.early_layer_pattern_planner import LayerOpeningPlan, PlannedLayerPlacement
+from palca.integration.layer_skeleton_planner import LayerSkeletonPlan, PlannedLayerPlacement
 from palca.packer.pallet_model import PalletModel
 from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, SchedulerV1
 
@@ -66,16 +66,43 @@ def _pallet_with_full_base_layer() -> PalletModel:
 
 @dataclass
 class _PlannerStub:
-    plan_opening_result: LayerOpeningPlan | None = None
-    plan_for_layer_result: LayerOpeningPlan | None = None
+    plan_opening_result: LayerSkeletonPlan | None = None
+    plan_for_layer_result: LayerSkeletonPlan | None = None
     plan_for_layer_calls: int = 0
 
-    def plan_opening(self, **_kwargs) -> LayerOpeningPlan | None:
+    def plan_opening(self, **_kwargs) -> LayerSkeletonPlan | None:
         return self.plan_opening_result
 
-    def plan_for_layer(self, **_kwargs) -> LayerOpeningPlan | None:
+    def plan_for_layer(self, **_kwargs) -> LayerSkeletonPlan | None:
         self.plan_for_layer_calls += 1
         return self.plan_for_layer_result
+
+
+def _skeleton_plan(
+    *,
+    pallet_id: int | str,
+    layer_id: int,
+    z_mm: int,
+    placements: tuple[PlannedLayerPlacement, ...],
+    is_terminal: bool = False,
+    packed_area_same_layer: int = 100,
+    largest_free_rect_area: int = 100,
+    fragmentation_penalty: int = 0,
+    min_support_ratio: float = 1.0,
+    area_fill_ratio: float = 0.5,
+) -> LayerSkeletonPlan:
+    return LayerSkeletonPlan(
+        pallet_id=pallet_id,
+        layer_id=layer_id,
+        z_mm=z_mm,
+        placements=placements,
+        is_terminal=is_terminal,
+        packed_area_same_layer=packed_area_same_layer,
+        largest_free_rect_area=largest_free_rect_area,
+        fragmentation_penalty=fragmentation_penalty,
+        min_support_ratio=min_support_ratio,
+        area_fill_ratio=area_fill_ratio,
+    )
 
 
 def test_baseline_intact_when_early_layer_planner_flag_is_off() -> None:
@@ -151,7 +178,7 @@ def test_pending_layer_plan_is_consumed_fifo() -> None:
         )
     )
     scheduler._set_pending_layer_plan(
-        LayerOpeningPlan(
+        _skeleton_plan(
             pallet_id=1,
             layer_id=1,
             z_mm=10,
@@ -192,11 +219,12 @@ def test_pending_plan_rejects_backstep_to_previous_layer(monkeypatch) -> None:
         )
     )
     scheduler._set_pending_layer_plan(
-        LayerOpeningPlan(
+        _skeleton_plan(
             pallet_id=1,
             layer_id=1,
             z_mm=10,
             placements=(PlannedLayerPlacement(ramp_id=1, box_id=1, pallet_id=1, layer_id=1, z_mm=10),),
+            is_terminal=True,
         )
     )
     pending_box_id = 1
@@ -265,19 +293,21 @@ def test_pending_exhaustion_replans_same_active_layer(monkeypatch) -> None:
     )
     scheduler._activate_committed_layer(pallet_id=1, layer_id=1, z_mm=10)
     scheduler._set_pending_layer_plan(
-        LayerOpeningPlan(
+        _skeleton_plan(
             pallet_id=1,
             layer_id=1,
             z_mm=10,
             placements=(PlannedLayerPlacement(ramp_id=1, box_id=1, pallet_id=1, layer_id=1, z_mm=10),),
+            is_terminal=True,
         )
     )
     planner = _PlannerStub(
-        plan_for_layer_result=LayerOpeningPlan(
+        plan_for_layer_result=_skeleton_plan(
             pallet_id=1,
             layer_id=1,
             z_mm=10,
             placements=(PlannedLayerPlacement(ramp_id=1, box_id=2, pallet_id=1, layer_id=1, z_mm=10),),
+            is_terminal=True,
         )
     )
     monkeypatch.setattr(scheduler, "_ensure_early_layer_pattern_planner", lambda: planner)
@@ -294,6 +324,63 @@ def test_pending_exhaustion_replans_same_active_layer(monkeypatch) -> None:
     assert int(second.box_id) == 2
     assert int(planner.plan_for_layer_calls) == 1
     assert int(scheduler.active_layer_commit_replans_total) == 1
+    assert int(scheduler.skeleton_rebuilds_total) == 1
+
+
+def test_non_terminal_singleton_skeleton_is_abstain(monkeypatch) -> None:
+    pallet = _pallet_with_full_base_layer()
+    lower_layer_box = _box(box_id=41, l=5, w=10)
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=1,
+            micro_plan_enabled=False,
+            use_early_layer_pattern_planner=True,
+            layer_pattern_prefix_depth=3,
+            layer_pattern_beam_width=4,
+            layer_pattern_candidate_cap=8,
+        )
+    )
+    scheduler._activate_committed_layer(pallet_id=1, layer_id=1, z_mm=10)
+    planner = _PlannerStub(
+        plan_for_layer_result=_skeleton_plan(
+            pallet_id=1,
+            layer_id=1,
+            z_mm=10,
+            placements=(PlannedLayerPlacement(ramp_id=1, box_id=99, pallet_id=1, layer_id=1, z_mm=10),),
+            is_terminal=False,
+        )
+    )
+    monkeypatch.setattr(scheduler, "_ensure_early_layer_pattern_planner", lambda: planner)
+
+    def fake_preview(_pallet_arg: PalletModel, box: Box) -> PlacementPreview:
+        placement = Placement(
+            x_mm=0,
+            y_mm=0,
+            z_mm=0,
+            rot90=False,
+            layer_id=0,
+            length_mm=int(box.length_mm),
+            width_mm=int(box.width_mm),
+            height_mm=int(box.height_mm),
+            box_id=box.box_id,
+        )
+        return PlacementPreview(
+            feasible=True,
+            placement=placement,
+            packing_gain=5.0,
+            fragmentation=0.0,
+            height_after_mm=10,
+            infeasible_reason=None,
+            score_adjustment=0.0,
+            debug=None,
+        )
+
+    monkeypatch.setattr(scheduler, "_preview_place", fake_preview)
+    state = SchedulerSimState(now=0.0, ramps={1: [lower_layer_box]}, pallets={1: pallet}, pallet_blocked=set())
+    plan = scheduler.choose_action(state)
+    assert plan is None
+    assert int(scheduler.planner_abstains) == 1
+    assert int(scheduler.active_layer_commit_closures_total) == 1
 
 
 def test_same_layer_fallback_greedy_is_used_when_planner_abstains(monkeypatch) -> None:
