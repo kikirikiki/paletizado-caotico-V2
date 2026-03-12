@@ -40,6 +40,11 @@ PARAM_ALIASES = {
     "overhang": "overhang_mm",
     "time_budget": "time_budget_ms",
     "height_slack": "height_slack_mm",
+    "use_active_layer_commit": "use_early_layer_pattern_planner",
+    "use_layer_skeleton_planner": "use_early_layer_pattern_planner",
+    "layer_skeleton_beam_width": "layer_pattern_beam_width",
+    "layer_skeleton_candidate_cap": "layer_pattern_candidate_cap",
+    "layer_skeleton_cap": "layer_pattern_prefix_depth",
 }
 
 RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
@@ -71,11 +76,24 @@ class SeedSummary:
     run_label: str
     seed: int
     processed_boxes: int | None
+    planner_invocations: int | None
+    planner_abstains: int | None
+    planned_prefix_len_mean: float | None
+    committed_layer_plan_len_mean: float | None
+    planned_prefix_executed_mean: float | None
+    active_layer_commit_replans_total: int | None
+    active_layer_commit_fallback_same_layer_total: int | None
+    active_layer_commit_closures_total: int | None
+    skeleton_breaks_total: int | None
+    skeleton_rebuilds_total: int | None
+    skeleton_area_fill_mean: float | None
     first_stack_step: int | None
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
     max_z_seen_last_mm: int | None
+    reentries_total: int | None
+    deadlock_count: int | None
     lower_layer_reentry_count: int | None
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
@@ -426,6 +444,37 @@ def run_seed(
         if isinstance(pallet_kpis, dict)
         else None
     )
+    planner_invocations = _safe_int(pallet_kpis.get("planner_invocations")) if isinstance(pallet_kpis, dict) else None
+    planner_abstains = _safe_int(pallet_kpis.get("planner_abstains")) if isinstance(pallet_kpis, dict) else None
+    planned_prefix_len_mean = (
+        _safe_float(pallet_kpis.get("planned_prefix_len_mean")) if isinstance(pallet_kpis, dict) else None
+    )
+    committed_layer_plan_len_mean = (
+        _safe_float(pallet_kpis.get("committed_layer_plan_len_mean")) if isinstance(pallet_kpis, dict) else None
+    )
+    if committed_layer_plan_len_mean is None:
+        committed_layer_plan_len_mean = planned_prefix_len_mean
+    planned_prefix_executed_mean = (
+        _safe_float(pallet_kpis.get("planned_prefix_executed_mean")) if isinstance(pallet_kpis, dict) else None
+    )
+    active_layer_commit_replans_total = (
+        _safe_int(pallet_kpis.get("active_layer_commit_replans_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    active_layer_commit_fallback_same_layer_total = (
+        _safe_int(pallet_kpis.get("active_layer_commit_fallback_same_layer_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    active_layer_commit_closures_total = (
+        _safe_int(pallet_kpis.get("active_layer_commit_closures_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    skeleton_breaks_total = _safe_int(pallet_kpis.get("skeleton_breaks_total")) if isinstance(pallet_kpis, dict) else None
+    skeleton_rebuilds_total = (
+        _safe_int(pallet_kpis.get("skeleton_rebuilds_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    skeleton_area_fill_mean = (
+        _safe_float(pallet_kpis.get("skeleton_area_fill_mean")) if isinstance(pallet_kpis, dict) else None
+    )
 
     forced_destination = _safe_int(params.get("force_destination"))
     first_stack_step, first_stand_hw_step = _first_steps_from_placements(
@@ -454,16 +503,39 @@ def run_seed(
         if isinstance(step_trace_relevant, list)
         else []
     )
+    reentries_total = _safe_int(mono.get("lower_layer_reentry_count"))
+    if reentries_total is None and isinstance(pallet_kpis, dict):
+        reentries_total = _safe_int(pallet_kpis.get("reentries_total"))
+    deadlock_count = _safe_int(pallet_kpis.get("deadlock_count")) if isinstance(pallet_kpis, dict) else None
+    if deadlock_count is None:
+        deadlock_samples = pallet_kpis.get("deadlock_samples", []) if isinstance(pallet_kpis, dict) else []
+        if isinstance(deadlock_samples, list):
+            deadlock_count = int(len(deadlock_samples))
+    if deadlock_count is None and isinstance(metrics, dict):
+        deadlock_count = 1 if str(metrics.get("stop_reason", "")).upper() == "DEADLOCK" else 0
 
     return SeedSummary(
         run_label=run_label,
         seed=int(seed),
         processed_boxes=processed_boxes,
+        planner_invocations=planner_invocations,
+        planner_abstains=planner_abstains,
+        planned_prefix_len_mean=planned_prefix_len_mean,
+        committed_layer_plan_len_mean=committed_layer_plan_len_mean,
+        planned_prefix_executed_mean=planned_prefix_executed_mean,
+        active_layer_commit_replans_total=active_layer_commit_replans_total,
+        active_layer_commit_fallback_same_layer_total=active_layer_commit_fallback_same_layer_total,
+        active_layer_commit_closures_total=active_layer_commit_closures_total,
+        skeleton_breaks_total=skeleton_breaks_total,
+        skeleton_rebuilds_total=skeleton_rebuilds_total,
+        skeleton_area_fill_mean=skeleton_area_fill_mean,
         first_stack_step=first_stack_step,
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
         max_z_seen_last_mm=max_z_seen_last_mm,
+        reentries_total=reentries_total,
+        deadlock_count=deadlock_count,
         lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
         lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
         lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
@@ -491,7 +563,7 @@ def run_seed(
     )
 
 
-def _mean(values: list[int | None]) -> float | None:
+def _mean(values: list[int | float | None]) -> float | None:
     nums = [float(v) for v in values if v is not None]
     if not nums:
         return None
@@ -510,12 +582,31 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "seed_count": len(values_sorted),
             "seeds": [int(v.seed) for v in values_sorted],
             "processed_boxes_mean": _mean([v.processed_boxes for v in values_sorted]),
+            "planner_invocations_mean": _mean([v.planner_invocations for v in values_sorted]),
+            "planner_abstains_mean": _mean([v.planner_abstains for v in values_sorted]),
+            "planned_prefix_len_mean": _mean([v.planned_prefix_len_mean for v in values_sorted]),
+            "committed_layer_plan_len_mean": _mean([v.committed_layer_plan_len_mean for v in values_sorted]),
+            "planned_prefix_executed_mean": _mean([v.planned_prefix_executed_mean for v in values_sorted]),
+            "active_layer_commit_replans_total_mean": _mean(
+                [v.active_layer_commit_replans_total for v in values_sorted]
+            ),
+            "active_layer_commit_fallback_same_layer_total_mean": _mean(
+                [v.active_layer_commit_fallback_same_layer_total for v in values_sorted]
+            ),
+            "active_layer_commit_closures_total_mean": _mean(
+                [v.active_layer_commit_closures_total for v in values_sorted]
+            ),
+            "skeleton_breaks_total_mean": _mean([v.skeleton_breaks_total for v in values_sorted]),
+            "skeleton_rebuilds_total_mean": _mean([v.skeleton_rebuilds_total for v in values_sorted]),
+            "skeleton_area_fill_mean": _mean([v.skeleton_area_fill_mean for v in values_sorted]),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),
             "hard_floor_phase_stand_hw_chosen_total_mean": _mean(
                 [v.hard_floor_phase_stand_hw_chosen_total for v in values_sorted]
             ),
+            "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
+            "deadlock_count_mean": _mean([v.deadlock_count for v in values_sorted]),
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
