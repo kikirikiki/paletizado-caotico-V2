@@ -266,6 +266,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Top-K de candidatos usados por el fill greedy interno de BatchFill",
     )
     parser.add_argument(
+        "--human-like-layer-opener",
+        action="store_true",
+        help="Activa opener temprano de capa orientado a fillability y anti thin_unfillable_mix.",
+    )
+    parser.add_argument(
+        "--human-like-layer-opener-prefix-len",
+        type=int,
+        default=2,
+        help="Numero de placements iniciales de una capa donde aplica el opener.",
+    )
+    parser.add_argument(
+        "--human-like-layer-opener-candidate-cap",
+        type=int,
+        default=6,
+        help="Max candidatos evaluados por el opener en cada decision.",
+    )
+    parser.add_argument(
+        "--human-like-layer-opener-poison-penalty-weight",
+        type=float,
+        default=0.4,
+        help="Peso de penalizacion para riesgo thin_unfillable_mix.",
+    )
+    parser.add_argument(
+        "--human-like-layer-opener-closure-weight",
+        type=float,
+        default=1.0,
+        help="Peso de premio por cierre/fillability de capa en opener.",
+    )
+    parser.add_argument(
+        "--human-like-layer-opener-fragmentation-weight",
+        type=float,
+        default=0.4,
+        help="Peso de penalizacion por fragmentacion temprana en opener.",
+    )
+    parser.add_argument(
         "--online-controller",
         action="store_true",
         help="Habilita controller online de modos NORMAL/PUSH/RESCUE sobre palca",
@@ -470,6 +505,12 @@ def run_simulation(
     batchfill_starters_max: int = 6,
     batchfill_budget_ms: int = 150,
     batchfill_greedy_topk: int = 12,
+    human_like_layer_opener: bool = False,
+    human_like_layer_opener_prefix_len: int = 2,
+    human_like_layer_opener_candidate_cap: int = 6,
+    human_like_layer_opener_poison_penalty_weight: float = 0.4,
+    human_like_layer_opener_closure_weight: float = 1.0,
+    human_like_layer_opener_fragmentation_weight: float = 0.4,
     online_controller: bool = False,
     controller_debug: bool = False,
     weight_col: str | None = None,
@@ -625,6 +666,18 @@ def run_simulation(
             batchfill_starters_max=int(batchfill_starters_max),
             batchfill_budget_ms=int(batchfill_budget_ms),
             batchfill_greedy_topk=int(batchfill_greedy_topk),
+            human_like_layer_opener=bool(human_like_layer_opener),
+            human_like_layer_opener_prefix_len=max(1, int(human_like_layer_opener_prefix_len)),
+            human_like_layer_opener_candidate_cap=max(1, int(human_like_layer_opener_candidate_cap)),
+            human_like_layer_opener_poison_penalty_weight=max(
+                0.0,
+                float(human_like_layer_opener_poison_penalty_weight),
+            ),
+            human_like_layer_opener_closure_weight=max(0.0, float(human_like_layer_opener_closure_weight)),
+            human_like_layer_opener_fragmentation_weight=max(
+                0.0,
+                float(human_like_layer_opener_fragmentation_weight),
+            ),
             online_controller=bool(online_controller),
             controller_debug=bool(controller_debug),
             priority_weight=priority_weight,
@@ -782,6 +835,16 @@ def run_simulation(
             "batchfill_starters_max": int(batchfill_starters_max),
             "batchfill_budget_ms": int(batchfill_budget_ms),
             "batchfill_greedy_topk": int(batchfill_greedy_topk),
+            "human_like_layer_opener": bool(human_like_layer_opener),
+            "human_like_layer_opener_prefix_len": int(max(1, int(human_like_layer_opener_prefix_len))),
+            "human_like_layer_opener_candidate_cap": int(max(1, int(human_like_layer_opener_candidate_cap))),
+            "human_like_layer_opener_poison_penalty_weight": float(
+                max(0.0, float(human_like_layer_opener_poison_penalty_weight))
+            ),
+            "human_like_layer_opener_closure_weight": float(max(0.0, float(human_like_layer_opener_closure_weight))),
+            "human_like_layer_opener_fragmentation_weight": float(
+                max(0.0, float(human_like_layer_opener_fragmentation_weight))
+            ),
             "online_controller": bool(online_controller),
             "controller_debug": bool(controller_debug),
             "weight_col": weight_col,
@@ -886,6 +949,12 @@ def main() -> None:
         batchfill_starters_max=int(args.batchfill_starters_max),
         batchfill_budget_ms=int(args.batchfill_budget_ms),
         batchfill_greedy_topk=int(args.batchfill_greedy_topk),
+        human_like_layer_opener=bool(args.human_like_layer_opener),
+        human_like_layer_opener_prefix_len=int(args.human_like_layer_opener_prefix_len),
+        human_like_layer_opener_candidate_cap=int(args.human_like_layer_opener_candidate_cap),
+        human_like_layer_opener_poison_penalty_weight=float(args.human_like_layer_opener_poison_penalty_weight),
+        human_like_layer_opener_closure_weight=float(args.human_like_layer_opener_closure_weight),
+        human_like_layer_opener_fragmentation_weight=float(args.human_like_layer_opener_fragmentation_weight),
         online_controller=bool(args.online_controller),
         controller_debug=bool(args.controller_debug),
         weight_col=args.weight_col,
