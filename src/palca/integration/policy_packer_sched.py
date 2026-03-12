@@ -73,6 +73,12 @@ class PolicyConfig:
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
+    human_like_layer_opener: bool = False
+    human_like_layer_opener_prefix_len: int = 2
+    human_like_layer_opener_candidate_cap: int = 6
+    human_like_layer_opener_poison_penalty_weight: float = 0.4
+    human_like_layer_opener_closure_weight: float = 1.0
+    human_like_layer_opener_fragmentation_weight: float = 0.4
     online_controller: bool = False
     controller_debug: bool = False
 
@@ -201,6 +207,12 @@ class PolicyPackerScheduler:
         batchfill_starters_max: int = 6,
         batchfill_budget_ms: int = 150,
         batchfill_greedy_topk: int = 12,
+        human_like_layer_opener: bool = False,
+        human_like_layer_opener_prefix_len: int = 2,
+        human_like_layer_opener_candidate_cap: int = 6,
+        human_like_layer_opener_poison_penalty_weight: float = 0.4,
+        human_like_layer_opener_closure_weight: float = 1.0,
+        human_like_layer_opener_fragmentation_weight: float = 0.4,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -240,6 +252,12 @@ class PolicyPackerScheduler:
             batchfill_starters_max=batchfill_starters_max,
             batchfill_budget_ms=batchfill_budget_ms,
             batchfill_greedy_topk=batchfill_greedy_topk,
+            human_like_layer_opener_enabled=human_like_layer_opener,
+            human_like_layer_opener_prefix_len=human_like_layer_opener_prefix_len,
+            human_like_layer_opener_candidate_cap=human_like_layer_opener_candidate_cap,
+            human_like_layer_opener_poison_penalty_weight=human_like_layer_opener_poison_penalty_weight,
+            human_like_layer_opener_closure_weight=human_like_layer_opener_closure_weight,
+            human_like_layer_opener_fragmentation_weight=human_like_layer_opener_fragmentation_weight,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -288,6 +306,12 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            human_like_layer_opener=bool(human_like_layer_opener),
+            human_like_layer_opener_prefix_len=max(1, int(human_like_layer_opener_prefix_len)),
+            human_like_layer_opener_candidate_cap=max(1, int(human_like_layer_opener_candidate_cap)),
+            human_like_layer_opener_poison_penalty_weight=max(0.0, float(human_like_layer_opener_poison_penalty_weight)),
+            human_like_layer_opener_closure_weight=max(0.0, float(human_like_layer_opener_closure_weight)),
+            human_like_layer_opener_fragmentation_weight=max(0.0, float(human_like_layer_opener_fragmentation_weight)),
             online_controller=online_controller,
             controller_debug=controller_debug,
         )
@@ -509,6 +533,8 @@ class PolicyPackerScheduler:
                     "layer_id": int(getattr(placement, "layer_id", 0) or 0),
                     "orientation_family": getattr(placement, "orientation_family", None),
                     "orientation_name": getattr(placement, "orientation_name", None),
+                    "stacking_mode": str(self.config.stacking_mode),
+                    "scheduler_score_mode": str(getattr(self.config.scheduler, "score_mode", "gain_frag")),
                 }
                 if time is not None:
                     entry["timestamp"] = float(time)
@@ -524,6 +550,29 @@ class PolicyPackerScheduler:
                 priority = getattr(placement, "priority", None)
                 if priority is not None:
                     entry["priority"] = float(priority)
+
+                preview_debug = getattr(plan.preview, "debug", None)
+                if isinstance(preview_debug, dict):
+                    selected_debug: dict[str, object] = {}
+                    for key in (
+                        "z_band_enabled",
+                        "z_band_mm",
+                        "z_band_min_z",
+                        "z_band_candidates_before",
+                        "z_band_candidates_after",
+                        "candidate_limit_hit",
+                        "timeout_hit",
+                        "tower_penalty",
+                        "coverage_bonus",
+                        "dominant_free_rect_delta",
+                        "support_ratio",
+                        "com_supported",
+                        "rejected_by_controls",
+                    ):
+                        if key in preview_debug:
+                            selected_debug[str(key)] = preview_debug[key]
+                    if selected_debug:
+                        entry["selection_debug"] = selected_debug
 
                 seq.append(entry)
         except Exception:
@@ -685,6 +734,53 @@ class PolicyPackerScheduler:
         kpis["batchfill_selected_layer_boxes_mean"] = float(
             float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
         )
+        human_like_layer_opener_enabled = bool(
+            getattr(self._scheduler.config, "human_like_layer_opener_enabled", False)
+        )
+        human_like_layer_opener_prefix_len = int(
+            getattr(self._scheduler.config, "human_like_layer_opener_prefix_len", 3) or 3
+        )
+        human_like_layer_opener_candidate_cap = int(
+            getattr(self._scheduler.config, "human_like_layer_opener_candidate_cap", 6) or 6
+        )
+        human_like_layer_opener_poison_penalty_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_poison_penalty_weight", 1.0) or 1.0
+        )
+        human_like_layer_opener_closure_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_closure_weight", 1.0) or 1.0
+        )
+        human_like_layer_opener_fragmentation_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_fragmentation_weight", 1.0) or 1.0
+        )
+        human_like_layer_opener_calls = int(getattr(self._scheduler, "human_like_layer_opener_calls", 0) or 0)
+        human_like_layer_opener_applied = int(getattr(self._scheduler, "human_like_layer_opener_applied", 0) or 0)
+        human_like_layer_opener_new_layer_applied = int(
+            getattr(self._scheduler, "human_like_layer_opener_new_layer_applied", 0) or 0
+        )
+        human_like_layer_opener_active_prefix_applied = int(
+            getattr(self._scheduler, "human_like_layer_opener_active_prefix_applied", 0) or 0
+        )
+        human_like_layer_opener_selected_count = int(
+            getattr(self._scheduler, "human_like_layer_opener_selected_count", 0) or 0
+        )
+        human_like_layer_opener_selected_score_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_score_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_thin_risk_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_thin_unfillable_mix_risk_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_layer_closure_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_layer_closure_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_fillability_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_fillability_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_fragmentation_penalty_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_fragmentation_penalty_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_prefix_placements_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_prefix_placements_sum", 0.0) or 0.0
+        )
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)
@@ -773,6 +869,39 @@ class PolicyPackerScheduler:
         )
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
+        )
+
+        kpis["human_like_layer_opener_enabled"] = bool(human_like_layer_opener_enabled)
+        kpis["human_like_layer_opener_prefix_len"] = int(human_like_layer_opener_prefix_len)
+        kpis["human_like_layer_opener_candidate_cap"] = int(human_like_layer_opener_candidate_cap)
+        kpis["human_like_layer_opener_poison_penalty_weight"] = float(human_like_layer_opener_poison_penalty_weight)
+        kpis["human_like_layer_opener_closure_weight"] = float(human_like_layer_opener_closure_weight)
+        kpis["human_like_layer_opener_fragmentation_weight"] = float(
+            human_like_layer_opener_fragmentation_weight
+        )
+        kpis["human_like_layer_opener_calls"] = int(human_like_layer_opener_calls)
+        kpis["human_like_layer_opener_applied"] = int(human_like_layer_opener_applied)
+        kpis["human_like_layer_opener_new_layer_applied"] = int(human_like_layer_opener_new_layer_applied)
+        kpis["human_like_layer_opener_active_prefix_applied"] = int(human_like_layer_opener_active_prefix_applied)
+        kpis["human_like_layer_opener_selected_score_mean"] = float(
+            human_like_layer_opener_selected_score_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_thin_unfillable_mix_risk_mean"] = float(
+            human_like_layer_opener_selected_thin_risk_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_layer_closure_score_mean"] = float(
+            human_like_layer_opener_selected_layer_closure_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_fillability_score_mean"] = float(
+            human_like_layer_opener_selected_fillability_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_fragmentation_penalty_mean"] = float(
+            human_like_layer_opener_selected_fragmentation_penalty_sum
+            / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_prefix_placements_mean"] = float(
+            human_like_layer_opener_selected_prefix_placements_sum
+            / max(1, human_like_layer_opener_selected_count)
         )
 
         kpis["score_mode"] = score_mode
