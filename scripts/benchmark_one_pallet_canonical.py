@@ -18,6 +18,12 @@ from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("configs/benchmarks/one_pallet_canonical.json")
+STABILITY_SENSITIVITY_VARIANT_NAMES = (
+    "control",
+    "support75",
+    "no_corners",
+    "support75_no_corners",
+)
 
 RUN_SIM_EXCLUDED_PROFILE_KEYS = {
     "excel_path",
@@ -40,10 +46,7 @@ PARAM_ALIASES = {
     "overhang": "overhang_mm",
     "time_budget": "time_budget_ms",
     "height_slack": "height_slack_mm",
-    "use_active_layer_commit": "use_early_layer_pattern_planner",
-    "use_layer_template_planner": "use_early_layer_pattern_planner",
-    "layer_template_candidate_cap": "layer_pattern_candidate_cap",
-    "layer_template_plan_cap": "layer_pattern_prefix_depth",
+    "use_active_layer_commit": "use_layer_template_planner",
 }
 
 RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
@@ -95,6 +98,10 @@ class SeedSummary:
     max_z_seen_last_mm: int | None
     reentries_total: int | None
     deadlock_count: int | None
+    placements_low_support_total: int | None
+    placements_with_corner_relaxed_total: int | None
+    placements_without_corner_support_total: int | None
+    support_ratio_min_observed: float | None
     lower_layer_reentry_count: int | None
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
@@ -555,6 +562,22 @@ def run_seed(
             deadlock_count = int(len(deadlock_samples))
     if deadlock_count is None and isinstance(metrics, dict):
         deadlock_count = 1 if str(metrics.get("stop_reason", "")).upper() == "DEADLOCK" else 0
+    placements_low_support_total = (
+        _safe_int(pallet_kpis.get("placements_low_support_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    placements_with_corner_relaxed_total = (
+        _safe_int(pallet_kpis.get("placements_with_corner_relaxed_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    placements_without_corner_support_total = (
+        _safe_int(pallet_kpis.get("placements_without_corner_support_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    support_ratio_min_observed = (
+        _safe_float(pallet_kpis.get("support_ratio_min_observed")) if isinstance(pallet_kpis, dict) else None
+    )
 
     return SeedSummary(
         run_label=run_label,
@@ -580,6 +603,10 @@ def run_seed(
         max_z_seen_last_mm=max_z_seen_last_mm,
         reentries_total=reentries_total,
         deadlock_count=deadlock_count,
+        placements_low_support_total=placements_low_support_total,
+        placements_with_corner_relaxed_total=placements_with_corner_relaxed_total,
+        placements_without_corner_support_total=placements_without_corner_support_total,
+        support_ratio_min_observed=support_ratio_min_observed,
         lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
         lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
         lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
@@ -655,6 +682,14 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             ),
             "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
             "deadlock_count_mean": _mean([v.deadlock_count for v in values_sorted]),
+            "placements_low_support_total_mean": _mean([v.placements_low_support_total for v in values_sorted]),
+            "placements_with_corner_relaxed_total_mean": _mean(
+                [v.placements_with_corner_relaxed_total for v in values_sorted]
+            ),
+            "placements_without_corner_support_total_mean": _mean(
+                [v.placements_without_corner_support_total for v in values_sorted]
+            ),
+            "support_ratio_min_observed_mean": _mean([v.support_ratio_min_observed for v in values_sorted]),
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
@@ -739,6 +774,265 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
                 ]
             )
         )
+
+
+def _write_rows_csv(rows_sorted: list[SeedSummary], csv_path: Path) -> None:
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(asdict(rows_sorted[0]).keys()))
+        writer.writeheader()
+        for row in rows_sorted:
+            writer.writerow(asdict(row))
+
+
+def _normalize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in overrides.items():
+        out[_normalize_param_key(str(key))] = value
+    return out
+
+
+def _print_stability_sensitivity_table(rows: list[dict[str, Any]]) -> None:
+    headers = [
+        "variant_name",
+        "processed_boxes_mean",
+        "delta_vs_control",
+        "deadlock_count_mean",
+        "monotonic_stack_rate_mean",
+        "reentries_total_mean",
+    ]
+    print(" | ".join(headers))
+    print("-" * 120)
+    for row in rows:
+        print(
+            " | ".join(
+                [
+                    str(row.get("variant_name")),
+                    str(row.get("processed_boxes_mean")),
+                    str(row.get("delta_vs_control")),
+                    str(row.get("deadlock_count_mean")),
+                    str(row.get("monotonic_stack_rate_mean")),
+                    str(row.get("reentries_total_mean")),
+                ]
+            )
+        )
+
+
+def run_stability_sensitivity_2x2(
+    *,
+    profile_path: str | Path,
+    outdir: str | Path | None = None,
+    seeds_override: list[int] | None = None,
+) -> dict[str, Any]:
+    profile = load_profile(profile_path)
+    baseline_excel = str(profile["excel"])
+    baseline_params = deepcopy(profile["params"])
+    seeds = [int(s) for s in (seeds_override if seeds_override else profile["seeds"])]
+
+    baseline_missing_params = sorted(REQUIRED_PARAM_KEYS - set(baseline_params.keys()))
+    baseline_unknown_params = sorted(set(baseline_params.keys()) - REQUIRED_PARAM_KEYS)
+    if baseline_missing_params:
+        raise ValueError(
+            "Perfil baseline invalido: faltan parametros requeridos para run_simulation: "
+            f"{baseline_missing_params}"
+        )
+    if baseline_unknown_params:
+        raise ValueError(
+            "Perfil baseline invalido: contiene parametros no usados por run_simulation: "
+            f"{baseline_unknown_params}"
+        )
+
+    current_support = _safe_float(baseline_params.get("stability_min_support_ratio"))
+    if current_support is None:
+        current_support = _safe_float(baseline_params.get("min_support"))
+    if current_support is None:
+        current_support = 0.75
+
+    base_overrides_raw: dict[str, Any] = {
+        "use_active_layer_commit": True,
+        "use_layer_template_planner": True,
+    }
+    variant_specific_overrides: dict[str, dict[str, Any]] = {
+        "control": {
+            "stability_min_support_ratio": float(current_support),
+            "stability_require_corner_support": True,
+        },
+        "support75": {
+            "stability_min_support_ratio": 0.75,
+            "stability_require_corner_support": True,
+        },
+        "no_corners": {
+            "stability_min_support_ratio": float(current_support),
+            "stability_require_corner_support": False,
+        },
+        "support75_no_corners": {
+            "stability_min_support_ratio": 0.75,
+            "stability_require_corner_support": False,
+        },
+    }
+
+    control_overrides = _normalize_overrides(
+        {**base_overrides_raw, **variant_specific_overrides["control"]}
+    )
+    control_params = apply_param_overrides(baseline_params, control_overrides)
+    control_hash = _stable_hash(
+        {
+            "excel": baseline_excel,
+            "params": control_params,
+            "seeds": seeds,
+        }
+    )
+
+    if outdir:
+        run_output_dir = Path(outdir).expanduser().resolve()
+    else:
+        run_output_dir = (
+            Path("out")
+            / "benchmarks"
+            / str(profile["profile_name"])
+            / f"stability_sensitivity_2x2_{str(control_hash)[:8]}"
+        ).resolve()
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+
+    variant_payloads: dict[str, dict[str, Any]] = {}
+    variant_aggregates: dict[str, dict[str, Any]] = {}
+    for variant_name in STABILITY_SENSITIVITY_VARIANT_NAMES:
+        merged_raw = dict(base_overrides_raw)
+        merged_raw.update(variant_specific_overrides[variant_name])
+        normalized_overrides = _normalize_overrides(merged_raw)
+        effective_params = apply_param_overrides(baseline_params, normalized_overrides)
+        effective_hash = _stable_hash(
+            {
+                "excel": baseline_excel,
+                "params": effective_params,
+                "seeds": seeds,
+            }
+        )
+
+        rows: list[SeedSummary] = []
+        for seed in seeds:
+            rows.append(
+                run_seed(
+                    run_label=str(variant_name),
+                    seed=int(seed),
+                    excel_path=baseline_excel,
+                    params=effective_params,
+                    effective_config_hash=str(effective_hash),
+                    run_dir=run_output_dir / str(variant_name),
+                )
+            )
+        rows_sorted = sorted(rows, key=lambda r: r.seed)
+        aggregates = _aggregate_rows(rows_sorted)
+        discriminative = _discriminative_status(rows_sorted)
+
+        variant_csv_path = run_output_dir / str(variant_name) / "summary.csv"
+        variant_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_rows_csv(rows_sorted, variant_csv_path)
+
+        variant_json_path = run_output_dir / str(variant_name) / "summary.json"
+        variant_payload = {
+            "schema_version": 1,
+            "profile_name": profile["profile_name"],
+            "profile_description": profile.get("description", ""),
+            "variant_name": str(variant_name),
+            "seeds": [int(s) for s in seeds],
+            "run": {
+                "excel": baseline_excel,
+                "effective_config_hash": str(effective_hash),
+                "overrides": normalized_overrides,
+                "effective_params": effective_params,
+            },
+            "aggregate": dict(aggregates.get(str(variant_name), {})),
+            "discriminative": dict(discriminative.get(str(variant_name), {})),
+            "rows": [asdict(r) for r in rows_sorted],
+            "files": {
+                "summary_csv": str(variant_csv_path),
+                "summary_json": str(variant_json_path),
+            },
+        }
+        variant_json_path.write_text(json.dumps(variant_payload, indent=2, ensure_ascii=True), encoding="utf-8")
+        variant_payloads[str(variant_name)] = variant_payload
+        variant_aggregates[str(variant_name)] = dict(aggregates.get(str(variant_name), {}))
+
+    control_processed_mean = _safe_float(
+        variant_aggregates.get("control", {}).get("processed_boxes_mean")
+    )
+    comparison_rows: list[dict[str, Any]] = []
+    for variant_name in STABILITY_SENSITIVITY_VARIANT_NAMES:
+        aggregate = variant_aggregates.get(str(variant_name), {})
+        processed_mean = _safe_float(aggregate.get("processed_boxes_mean"))
+        delta_vs_control = None
+        if control_processed_mean is not None and processed_mean is not None:
+            delta_vs_control = float(processed_mean) - float(control_processed_mean)
+        comparison_rows.append(
+            {
+                "variant_name": str(variant_name),
+                "processed_boxes_mean": processed_mean,
+                "delta_vs_control": delta_vs_control,
+                "deadlock_count_mean": _safe_float(aggregate.get("deadlock_count_mean")),
+                "monotonic_stack_rate_mean": _safe_float(aggregate.get("monotonic_stack_rate_mean")),
+                "reentries_total_mean": _safe_float(aggregate.get("reentries_total_mean")),
+                "layer_closure_score_mean": _safe_float(aggregate.get("layer_closure_score_mean")),
+                "committed_layer_plan_len_mean": _safe_float(aggregate.get("committed_layer_plan_len_mean")),
+                "template_selected_total_mean": _safe_float(aggregate.get("template_selected_total_mean")),
+                "template_abstains_total_mean": _safe_float(aggregate.get("template_abstains_total_mean")),
+                "template_rebuilds_total_mean": _safe_float(aggregate.get("template_rebuilds_total_mean")),
+                "placements_low_support_total_mean": _safe_float(
+                    aggregate.get("placements_low_support_total_mean")
+                ),
+                "placements_with_corner_relaxed_total_mean": _safe_float(
+                    aggregate.get("placements_with_corner_relaxed_total_mean")
+                ),
+                "placements_without_corner_support_total_mean": _safe_float(
+                    aggregate.get("placements_without_corner_support_total_mean")
+                ),
+                "support_ratio_min_observed_mean": _safe_float(
+                    aggregate.get("support_ratio_min_observed_mean")
+                ),
+            }
+        )
+
+    comparison_csv_path = run_output_dir / "summary_2x2_comparison.csv"
+    with comparison_csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(comparison_rows[0].keys()))
+        writer.writeheader()
+        for row in comparison_rows:
+            writer.writerow(row)
+
+    timestamp_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    summary_payload = {
+        "schema_version": 1,
+        "profile_name": profile["profile_name"],
+        "profile_description": profile.get("description", ""),
+        "fingerprint": {
+            "git_branch": _git(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+            "git_commit_sha": _git(["git", "rev-parse", "HEAD"]),
+            "profile_path": str(Path(profile["profile_path"])),
+            "seeds": [int(s) for s in seeds],
+            "timestamp_utc": timestamp_utc,
+            "python_version": sys.version.split()[0],
+            "effective_config_hashes": {
+                variant_name: variant_payloads[variant_name]["run"]["effective_config_hash"]
+                for variant_name in STABILITY_SENSITIVITY_VARIANT_NAMES
+            },
+        },
+        "variants": variant_payloads,
+        "comparison": comparison_rows,
+        "files": {
+            "summary_json": str(run_output_dir / "summary_2x2.json"),
+            "comparison_csv": str(comparison_csv_path),
+        },
+    }
+
+    summary_json_path = run_output_dir / "summary_2x2.json"
+    summary_json_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    _print_stability_sensitivity_table(comparison_rows)
+    print(f"[benchmark-2x2] profile={profile['profile_name']} seeds={seeds}")
+    print(f"[benchmark-2x2] outdir={run_output_dir}")
+    print(f"[benchmark-2x2] summary_json={summary_json_path}")
+    print(f"[benchmark-2x2] comparison_csv={comparison_csv_path}")
+
+    return summary_payload
 
 
 def run_benchmark(
@@ -830,11 +1124,7 @@ def run_benchmark(
     rows_sorted = sorted(rows, key=lambda r: (r.run_label, r.seed))
 
     csv_path = run_output_dir / "summary.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(asdict(rows_sorted[0]).keys()))
-        writer.writeheader()
-        for row in rows_sorted:
-            writer.writerow(asdict(row))
+    _write_rows_csv(rows_sorted, csv_path)
 
     aggregates = _aggregate_rows(rows_sorted)
     discriminative = _discriminative_status(rows_sorted)
@@ -947,19 +1237,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional seed override list. Defaults to profile seeds.",
     )
+    parser.add_argument(
+        "--stability-sensitivity-2x2",
+        action="store_true",
+        help="Ejecuta experimento 2x2: control/support75/no_corners/support75_no_corners.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    run_benchmark(
-        profile_path=args.profile,
-        outdir=args.outdir,
-        variant_config_path=args.variant_config,
-        set_overrides=list(args.set or []),
-        seeds_override=(list(args.seeds) if args.seeds else None),
-        variant_name=str(args.variant_name),
-    )
+    if bool(args.stability_sensitivity_2x2):
+        run_stability_sensitivity_2x2(
+            profile_path=args.profile,
+            outdir=args.outdir,
+            seeds_override=(list(args.seeds) if args.seeds else None),
+        )
+    else:
+        run_benchmark(
+            profile_path=args.profile,
+            outdir=args.outdir,
+            variant_config_path=args.variant_config,
+            set_overrides=list(args.set or []),
+            seeds_override=(list(args.seeds) if args.seeds else None),
+            variant_name=str(args.variant_name),
+        )
     return 0
 
 

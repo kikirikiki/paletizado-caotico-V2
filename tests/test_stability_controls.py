@@ -207,3 +207,92 @@ def test_stand_hw_uses_stricter_support_threshold() -> None:
     pallet.placements = [_support_box(0, 0, length_mm=20, width_mm=18, height=10, box_id=3)]
     result_planar = control.evaluate(pallet=pallet, box=box, placement=planar_candidate)
     assert result_planar.feasible
+
+
+def test_corner_support_default_is_backwards_compatible() -> None:
+    cfg = StabilityConfig(mode="ratio+corners", min_support_ratio=0.85, eps_mm=0.01)
+    assert cfg.enable_corners() is True
+
+    relaxed_cfg = StabilityConfig(
+        mode="ratio+corners",
+        min_support_ratio=0.85,
+        require_corner_support=False,
+        eps_mm=0.01,
+    )
+    assert relaxed_cfg.enable_corners() is False
+
+
+def test_support75_relaxes_support_threshold() -> None:
+    spec = PalletSpec(length_mm=10, width_mm=10, max_height_mm=50)
+    pallet = PalletModel(spec=spec)
+    box = Box(box_id=111, length_mm=10, width_mm=10, height_mm=5, timestamp=0.0)
+    candidate = Placement(
+        x_mm=0,
+        y_mm=0,
+        z_mm=5,
+        rot90=False,
+        layer_id=1,
+        length_mm=10,
+        width_mm=10,
+        height_mm=5,
+        box_id=box.box_id,
+        weight_kg=1.0,
+    )
+    # 80% support area.
+    pallet.placements = [_support_box(0, 0, length_mm=10, width_mm=8, height=5, box_id=1)]
+
+    strict_control = StabilityPlacementControl(
+        StabilityConfig(mode="ratio", min_support_ratio=0.85, eps_mm=0.01)
+    )
+    relaxed_control = StabilityPlacementControl(
+        StabilityConfig(mode="ratio", min_support_ratio=0.75, eps_mm=0.01)
+    )
+
+    strict_result = strict_control.evaluate(pallet=pallet, box=box, placement=candidate)
+    relaxed_result = relaxed_control.evaluate(pallet=pallet, box=box, placement=candidate)
+    assert strict_result.feasible is False
+    assert strict_result.reason == "SUPPORT_RATIO"
+    assert relaxed_result.feasible is True
+
+
+def test_no_corners_disables_corner_requirement_effectively() -> None:
+    spec = PalletSpec(length_mm=10, width_mm=10, max_height_mm=50)
+    pallet = PalletModel(spec=spec)
+    box = Box(box_id=112, length_mm=10, width_mm=10, height_mm=5, timestamp=0.0)
+    candidate = Placement(
+        x_mm=0,
+        y_mm=0,
+        z_mm=5,
+        rot90=False,
+        layer_id=1,
+        length_mm=10,
+        width_mm=10,
+        height_mm=5,
+        box_id=box.box_id,
+        weight_kg=1.0,
+    )
+    # Ratio passes, COM unsupported.
+    pallet.placements = [
+        _support_box(0, 0, length_mm=10, width_mm=4, height=5, box_id=1),
+        _support_box(0, 6, length_mm=10, width_mm=4, height=5, box_id=2),
+    ]
+
+    strict_control = StabilityPlacementControl(
+        StabilityConfig(mode="ratio+corners", min_support_ratio=0.75, eps_mm=0.01)
+    )
+    relaxed_control = StabilityPlacementControl(
+        StabilityConfig(
+            mode="ratio+corners",
+            min_support_ratio=0.75,
+            require_corner_support=False,
+            eps_mm=0.01,
+        )
+    )
+
+    strict_result = strict_control.evaluate(pallet=pallet, box=box, placement=candidate)
+    relaxed_result = relaxed_control.evaluate(pallet=pallet, box=box, placement=candidate)
+    assert strict_result.feasible is False
+    assert strict_result.reason == "CORNER_SUPPORT"
+    assert relaxed_result.feasible is True
+    assert relaxed_result.debug.get("corner_support_required") is False
+    assert relaxed_result.debug.get("com_supported_relaxed") is False

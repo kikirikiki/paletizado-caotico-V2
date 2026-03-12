@@ -34,6 +34,8 @@ class PolicyConfig:
     default_box_height_mm: int = 200
     stability_mode: str = "ratio+corners"
     min_support_ratio: float = 0.75
+    stability_min_support_ratio: float | None = None
+    stability_require_corner_support: bool | None = None
     stability_eps_mm: float = 1.0
     settle_snap_grid: bool = False
     grid_mm: int | None = None
@@ -166,6 +168,8 @@ class PolicyPackerScheduler:
         priority_weight: float = 1.0,
         stability_mode: str = "ratio+corners",
         min_support_ratio: float = 0.75,
+        stability_min_support_ratio: float | None = None,
+        stability_require_corner_support: bool | None = None,
         stability_eps_mm: float = 1.0,
         settle_snap_grid: bool = False,
         grid_mm: int | None = None,
@@ -263,6 +267,10 @@ class PolicyPackerScheduler:
             batchfill_budget_ms=batchfill_budget_ms,
             batchfill_greedy_topk=batchfill_greedy_topk,
         )
+        effective_min_support_ratio = float(min_support_ratio)
+        if stability_min_support_ratio is not None:
+            effective_min_support_ratio = float(stability_min_support_ratio)
+
         config = PolicyConfig(
             pallet_spec=pallet_spec,
             heuristic=heuristic,
@@ -270,7 +278,15 @@ class PolicyPackerScheduler:
             z_band_mm=(None if z_band_mm is None else max(0, int(z_band_mm))),
             scheduler=scheduler,
             stability_mode=stability_mode,
-            min_support_ratio=min_support_ratio,
+            min_support_ratio=effective_min_support_ratio,
+            stability_min_support_ratio=(
+                float(stability_min_support_ratio) if stability_min_support_ratio is not None else None
+            ),
+            stability_require_corner_support=(
+                bool(stability_require_corner_support)
+                if stability_require_corner_support is not None
+                else None
+            ),
             stability_eps_mm=stability_eps_mm,
             settle_snap_grid=settle_snap_grid,
             grid_mm=grid_mm,
@@ -1251,6 +1267,7 @@ class PolicyPackerScheduler:
             stability=StabilityConfig(
                 mode=self.config.stability_mode,
                 min_support_ratio=self.config.min_support_ratio,
+                require_corner_support=self.config.stability_require_corner_support,
                 eps_mm=self.config.stability_eps_mm,
                 settle_snap_grid=self.config.settle_snap_grid,
                 grid_mm=self.config.grid_mm,

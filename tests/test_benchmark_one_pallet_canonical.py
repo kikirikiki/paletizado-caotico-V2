@@ -19,6 +19,9 @@ def test_load_profile_canonical_has_required_shape() -> None:
     assert int(profile["params"]["layer_pattern_prefix_depth"]) == 3
     assert int(profile["params"]["layer_pattern_beam_width"]) == 4
     assert int(profile["params"]["layer_pattern_candidate_cap"]) == 8
+    assert float(profile["params"]["stability_min_support_ratio"]) == float(profile["params"]["min_support"])
+    assert bool(profile["params"]["stability_require_corner_support"]) is True
+    assert bool(profile["params"]["use_layer_template_planner"]) is False
     assert set(profile["params"].keys()) == set(bench.REQUIRED_PARAM_KEYS)
 
 
@@ -71,9 +74,9 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
     assert merged["lookahead_k"] == 10
     assert merged["micro_width"] == 60
     assert merged["score_mode"] == "gain_frag"
-    assert bool(merged["use_early_layer_pattern_planner"]) is True
-    assert int(merged["layer_pattern_candidate_cap"]) == 9
-    assert int(merged["layer_pattern_prefix_depth"]) == 6
+    assert bool(merged["use_layer_template_planner"]) is True
+    assert int(merged["layer_template_candidate_cap"]) == 9
+    assert int(merged["layer_template_plan_cap"]) == 6
 
 
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
@@ -358,3 +361,118 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
     assert abs(float(row["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(row["reentries_total"]) == 0
     assert int(row["deadlock_count"]) == 0
+
+
+def test_run_stability_sensitivity_2x2_executes_expected_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_simulation(**kwargs):
+        support = float(kwargs["stability_min_support_ratio"])
+        corners = kwargs["stability_require_corner_support"]
+        out_path = Path(str(kwargs["out_path"]))
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+        run_label = out_path.parent.name
+
+        processed_by_variant = {
+            "control": 14,
+            "support75": 15,
+            "no_corners": 14,
+            "support75_no_corners": 16,
+        }
+        payload = {
+            "metrics": {
+                "processed_boxes": processed_by_variant[run_label],
+                "pallet_kpis": {
+                    "planner_invocations": 3,
+                    "planner_abstains": 0,
+                    "planned_prefix_len_mean": 3.0,
+                    "planned_prefix_executed_mean": 3.0,
+                    "active_layer_commit_replans_total": 6,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 3,
+                    "template_selected_total": 4,
+                    "template_abstains_total": 0,
+                    "template_rebuilds_total": 3,
+                    "committed_layer_plan_len_mean": 3.2,
+                    "template_area_fill_mean": 0.5,
+                    "template_type_histogram": {"Rows-Y": 4},
+                    "deadlock_count": 0,
+                    "placements_low_support_total": 2 if support <= 0.75 else 0,
+                    "placements_with_corner_relaxed_total": 3 if corners is False else 0,
+                    "placements_without_corner_support_total": 1 if corners is False else 0,
+                    "support_ratio_min_observed": 0.76 if support <= 0.75 else 0.86,
+                    "layer_monotonicity_first_pallet_by_dest": {
+                        "1": {
+                            "lower_layer_reentry_count": 0,
+                            "lower_layer_reentry_total_drop_mm": 0,
+                            "lower_layer_reentry_max_drop_mm": 0,
+                            "lower_layer_reentry_mean_drop_mm": 0.0,
+                            "monotonic_stack_rate": 1.0,
+                            "placements_below_current_top_band_after_opening_next_band": 0,
+                            "layer_closure_score": 1.0,
+                            "layer_fill_homogeneity_score": 1.0,
+                            "z_band_fill_homogeneity_score": 1.0,
+                            "layer_band_mm": 100,
+                            "layer_band_fill_progress": [],
+                            "active_layers_over_time": [1, 2, 2],
+                            "z_band_fill_share": {},
+                            "layer_fill_share": {},
+                            "step_trace_relevant": [],
+                            "max_z_seen_so_far_by_step": [0, 100],
+                        }
+                    },
+                },
+            }
+        }
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps({"pallets": {"1": []}}), encoding="utf-8")
+        calls.append(
+            {
+                "run_label": run_label,
+                "support": support,
+                "corners": corners,
+                "use_layer_template_planner": bool(kwargs["use_layer_template_planner"]),
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+    summary = bench.run_stability_sensitivity_2x2(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_out_2x2",
+        seeds_override=[50021],
+    )
+
+    assert len(calls) == 4
+    by_label = {str(call["run_label"]): call for call in calls}
+    assert set(by_label.keys()) == set(bench.STABILITY_SENSITIVITY_VARIANT_NAMES)
+    assert by_label["control"]["support"] == pytest.approx(0.85)
+    assert by_label["control"]["corners"] is True
+    assert by_label["support75"]["support"] == pytest.approx(0.75)
+    assert by_label["support75"]["corners"] is True
+    assert by_label["no_corners"]["support"] == pytest.approx(0.85)
+    assert by_label["no_corners"]["corners"] is False
+    assert by_label["support75_no_corners"]["support"] == pytest.approx(0.75)
+    assert by_label["support75_no_corners"]["corners"] is False
+    assert all(bool(call["use_layer_template_planner"]) is True for call in calls)
+
+    assert set(summary["variants"].keys()) == set(bench.STABILITY_SENSITIVITY_VARIANT_NAMES)
+    assert Path(summary["files"]["summary_json"]).exists()
+    assert Path(summary["files"]["comparison_csv"]).exists()
+    for variant_name in bench.STABILITY_SENSITIVITY_VARIANT_NAMES:
+        variant_files = summary["variants"][variant_name]["files"]
+        assert Path(variant_files["summary_csv"]).exists()
+        assert Path(variant_files["summary_json"]).exists()
+
+    comparison = {row["variant_name"]: row for row in summary["comparison"]}
+    assert comparison["support75"]["delta_vs_control"] == pytest.approx(1.0)
+    assert comparison["support75_no_corners"]["processed_boxes_mean"] == pytest.approx(16.0)
+    assert comparison["support75_no_corners"]["monotonic_stack_rate_mean"] == pytest.approx(1.0)
+    assert comparison["support75_no_corners"]["deadlock_count_mean"] == pytest.approx(0.0)
+    assert comparison["support75_no_corners"]["reentries_total_mean"] == pytest.approx(0.0)

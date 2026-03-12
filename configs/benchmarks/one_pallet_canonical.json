@@ -30,6 +30,8 @@
     "starvation_weight": 0.0,
     "stability_mode": "ratio+corners+settle",
     "min_support": 0.85,
+    "stability_min_support_ratio": 0.85,
+    "stability_require_corner_support": true,
     "stability_eps_mm": 1.0,
     "settle_snap_grid": false,
     "settle_max_iter": 0,
@@ -68,9 +70,12 @@
     "micro_width": 36,
     "micro_topk": 15,
     "use_early_layer_pattern_planner": false,
+    "use_layer_template_planner": false,
     "layer_pattern_prefix_depth": 3,
     "layer_pattern_beam_width": 4,
     "layer_pattern_candidate_cap": 8,
+    "layer_template_candidate_cap": 8,
+    "layer_template_plan_cap": 6,
     "batchfill_layer_starter": false,
     "batchfill_starters_max": 6,
     "batchfill_budget_ms": 150,
@@ -85,5 +90,30 @@
     "force_destination": 1,
     "continuous_pallets": false,
     "max_pallets": 1
+  },
+  "stability_sensitivity_2x2": {
+    "variants": ["control", "support75", "no_corners", "support75_no_corners"],
+    "base_overrides": {
+      "use_active_layer_commit": true,
+      "use_layer_template_planner": true
+    },
+    "matrix": {
+      "control": {
+        "stability_min_support_ratio": 0.85,
+        "stability_require_corner_support": true
+      },
+      "support75": {
+        "stability_min_support_ratio": 0.75,
+        "stability_require_corner_support": true
+      },
+      "no_corners": {
+        "stability_min_support_ratio": 0.85,
+        "stability_require_corner_support": false
+      },
+      "support75_no_corners": {
+        "stability_min_support_ratio": 0.75,
+        "stability_require_corner_support": false
+      }
+    }
   }
 }

@@ -97,6 +97,11 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     stand_hw_gate_blocks_total = 0
     stand_hw_gate_allows_total = 0
     stand_hw_rejected_support_total = 0
+    committed_support_ratio_checks_total = 0
+    support_ratio_min_observed_values: list[float] = []
+    placements_low_support_total = 0
+    placements_with_corner_relaxed_total = 0
+    placements_without_corner_support_total = 0
     layer_monotonicity_first_pallet_by_dest: dict[int, dict[str, object]] = {}
 
     for dest, pallets in pallets_by_dest.items():
@@ -144,6 +149,19 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             stand_hw_gate_blocks_total += int(getattr(pallet.stats, "stand_hw_gate_blocks_total", 0))
             stand_hw_gate_allows_total += int(getattr(pallet.stats, "stand_hw_gate_allows_total", 0))
             stand_hw_rejected_support_total += int(getattr(pallet.stats, "stand_hw_rejected_support_total", 0))
+            committed_support_ratio_checks_total += int(
+                getattr(pallet.stats, "committed_support_ratio_checks", 0)
+            )
+            support_ratio_min = getattr(pallet.stats, "support_ratio_min_observed", None)
+            if isinstance(support_ratio_min, (int, float)):
+                support_ratio_min_observed_values.append(float(support_ratio_min))
+            placements_low_support_total += int(getattr(pallet.stats, "placements_low_support_total", 0))
+            placements_with_corner_relaxed_total += int(
+                getattr(pallet.stats, "placements_with_corner_relaxed_total", 0)
+            )
+            placements_without_corner_support_total += int(
+                getattr(pallet.stats, "placements_without_corner_support_total", 0)
+            )
 
             metrics = pallet.balance_metrics()
             for i, val in enumerate(metrics.quadrant_weights):
@@ -215,6 +233,15 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         "stand_hw_gate_blocks_total": int(stand_hw_gate_blocks_total),
         "stand_hw_gate_allows_total": int(stand_hw_gate_allows_total),
         "stand_hw_rejected_support_total": int(stand_hw_rejected_support_total),
+        "committed_support_ratio_checks_total": int(committed_support_ratio_checks_total),
+        "support_ratio_min_observed": (
+            float(min(support_ratio_min_observed_values))
+            if support_ratio_min_observed_values
+            else None
+        ),
+        "placements_low_support_total": int(placements_low_support_total),
+        "placements_with_corner_relaxed_total": int(placements_with_corner_relaxed_total),
+        "placements_without_corner_support_total": int(placements_without_corner_support_total),
         "layer_monotonicity_first_pallet_by_dest": {
             int(dest): dict(values) for dest, values in layer_monotonicity_first_pallet_by_dest.items()
         },
