@@ -301,6 +301,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Peso de penalizacion por fragmentacion temprana en opener.",
     )
     parser.add_argument(
+        "--human-like-reentry-contract",
+        action="store_true",
+        help="Activa contrato de justificacion para reentradas profundas (L-2+).",
+    )
+    parser.add_argument(
+        "--human-like-reentry-contract-require-opener",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Si se activa, el contrato solo corre cuando el opener tambien esta activo.",
+    )
+    parser.add_argument(
+        "--human-like-reentry-contract-max-shallow-drop",
+        type=int,
+        default=1,
+        help="Drop maximo considerado shallow para comparar contra reentrada profunda.",
+    )
+    parser.add_argument(
+        "--human-like-reentry-contract-deep-advantage-margin",
+        type=float,
+        default=0.25,
+        help="Margen minimo de ventaja para permitir L-2+ cuando hay alternativas shallow.",
+    )
+    parser.add_argument(
+        "--human-like-reentry-contract-shallow-candidate-cap",
+        type=int,
+        default=6,
+        help="Max candidatos shallow evaluados por decision en el contrato.",
+    )
+    parser.add_argument(
+        "--human-like-reentry-contract-l1-correction-budget-per-layer",
+        type=int,
+        default=2,
+        help="Presupuesto por capa para correcciones en L-1.",
+    )
+    parser.add_argument(
+        "--human-like-reentry-contract-allow-deep-only-if-no-shallow",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Si se activa, L-2+ solo se permite cuando no hay candidato shallow factible.",
+    )
+    parser.add_argument(
         "--online-controller",
         action="store_true",
         help="Habilita controller online de modos NORMAL/PUSH/RESCUE sobre palca",
@@ -511,6 +552,13 @@ def run_simulation(
     human_like_layer_opener_poison_penalty_weight: float = 0.4,
     human_like_layer_opener_closure_weight: float = 1.0,
     human_like_layer_opener_fragmentation_weight: float = 0.4,
+    human_like_reentry_contract: bool = False,
+    human_like_reentry_contract_require_opener: bool = True,
+    human_like_reentry_contract_max_shallow_drop: int = 1,
+    human_like_reentry_contract_deep_advantage_margin: float = 0.25,
+    human_like_reentry_contract_shallow_candidate_cap: int = 6,
+    human_like_reentry_contract_l1_correction_budget_per_layer: int = 2,
+    human_like_reentry_contract_allow_deep_only_if_no_shallow: bool = False,
     online_controller: bool = False,
     controller_debug: bool = False,
     weight_col: str | None = None,
@@ -677,6 +725,24 @@ def run_simulation(
             human_like_layer_opener_fragmentation_weight=max(
                 0.0,
                 float(human_like_layer_opener_fragmentation_weight),
+            ),
+            human_like_reentry_contract=bool(human_like_reentry_contract),
+            human_like_reentry_contract_require_opener=bool(human_like_reentry_contract_require_opener),
+            human_like_reentry_contract_max_shallow_drop=max(0, int(human_like_reentry_contract_max_shallow_drop)),
+            human_like_reentry_contract_deep_reentry_advantage_margin=max(
+                0.0,
+                float(human_like_reentry_contract_deep_advantage_margin),
+            ),
+            human_like_reentry_contract_shallow_candidate_cap=max(
+                1,
+                int(human_like_reentry_contract_shallow_candidate_cap),
+            ),
+            human_like_reentry_contract_l1_correction_budget_per_layer=max(
+                0,
+                int(human_like_reentry_contract_l1_correction_budget_per_layer),
+            ),
+            human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow=bool(
+                human_like_reentry_contract_allow_deep_only_if_no_shallow
             ),
             online_controller=bool(online_controller),
             controller_debug=bool(controller_debug),
@@ -845,6 +911,23 @@ def run_simulation(
             "human_like_layer_opener_fragmentation_weight": float(
                 max(0.0, float(human_like_layer_opener_fragmentation_weight))
             ),
+            "human_like_reentry_contract": bool(human_like_reentry_contract),
+            "human_like_reentry_contract_require_opener": bool(human_like_reentry_contract_require_opener),
+            "human_like_reentry_contract_max_shallow_drop": int(
+                max(0, int(human_like_reentry_contract_max_shallow_drop))
+            ),
+            "human_like_reentry_contract_deep_advantage_margin": float(
+                max(0.0, float(human_like_reentry_contract_deep_advantage_margin))
+            ),
+            "human_like_reentry_contract_shallow_candidate_cap": int(
+                max(1, int(human_like_reentry_contract_shallow_candidate_cap))
+            ),
+            "human_like_reentry_contract_l1_correction_budget_per_layer": int(
+                max(0, int(human_like_reentry_contract_l1_correction_budget_per_layer))
+            ),
+            "human_like_reentry_contract_allow_deep_only_if_no_shallow": bool(
+                human_like_reentry_contract_allow_deep_only_if_no_shallow
+            ),
             "online_controller": bool(online_controller),
             "controller_debug": bool(controller_debug),
             "weight_col": weight_col,
@@ -955,6 +1038,17 @@ def main() -> None:
         human_like_layer_opener_poison_penalty_weight=float(args.human_like_layer_opener_poison_penalty_weight),
         human_like_layer_opener_closure_weight=float(args.human_like_layer_opener_closure_weight),
         human_like_layer_opener_fragmentation_weight=float(args.human_like_layer_opener_fragmentation_weight),
+        human_like_reentry_contract=bool(args.human_like_reentry_contract),
+        human_like_reentry_contract_require_opener=bool(args.human_like_reentry_contract_require_opener),
+        human_like_reentry_contract_max_shallow_drop=int(args.human_like_reentry_contract_max_shallow_drop),
+        human_like_reentry_contract_deep_advantage_margin=float(args.human_like_reentry_contract_deep_advantage_margin),
+        human_like_reentry_contract_shallow_candidate_cap=int(args.human_like_reentry_contract_shallow_candidate_cap),
+        human_like_reentry_contract_l1_correction_budget_per_layer=int(
+            args.human_like_reentry_contract_l1_correction_budget_per_layer
+        ),
+        human_like_reentry_contract_allow_deep_only_if_no_shallow=bool(
+            args.human_like_reentry_contract_allow_deep_only_if_no_shallow
+        ),
         online_controller=bool(args.online_controller),
         controller_debug=bool(args.controller_debug),
         weight_col=args.weight_col,

@@ -80,3 +80,40 @@ def test_human_like_layer_opener_flag_off_preserves_baseline_choice() -> None:
     assert int(baseline_plan.box_id) == 1
     assert int(off_plan.box_id) == int(baseline_plan.box_id)
     assert int(with_flag_off.human_like_layer_opener_applied) == 0
+
+
+def test_opener_on_and_reentry_contract_off_preserves_a1_choice() -> None:
+    opener_only = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            micro_plan_enabled=False,
+            human_like_layer_opener_enabled=True,
+            human_like_layer_opener_prefix_len=2,
+            human_like_layer_opener_candidate_cap=3,
+            human_like_layer_opener_poison_penalty_weight=1.0,
+            human_like_layer_opener_closure_weight=1.0,
+            human_like_layer_opener_fragmentation_weight=1.0,
+        )
+    )
+    opener_with_contract_off = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            micro_plan_enabled=False,
+            human_like_layer_opener_enabled=True,
+            human_like_layer_opener_prefix_len=2,
+            human_like_layer_opener_candidate_cap=3,
+            human_like_layer_opener_poison_penalty_weight=1.0,
+            human_like_layer_opener_closure_weight=1.0,
+            human_like_layer_opener_fragmentation_weight=1.0,
+            human_like_reentry_contract_enabled=False,
+        )
+    )
+
+    a1_plan = opener_only.choose_action(_build_layer_opening_state())
+    contract_off_plan = opener_with_contract_off.choose_action(_build_layer_opening_state())
+
+    assert a1_plan is not None
+    assert contract_off_plan is not None
+    assert int(contract_off_plan.box_id) == int(a1_plan.box_id)
+    assert int(opener_with_contract_off.human_like_layer_opener_applied) == 1
+    assert int(opener_with_contract_off.deep_reentry_attempts) == 0

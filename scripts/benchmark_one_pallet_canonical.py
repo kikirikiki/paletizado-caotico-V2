@@ -89,6 +89,8 @@ class SeedSummary:
     reentries_total: int | None
     max_layer_drop: int | None
     reentries_drop_ge_2_count: int | None
+    deep_drop_burden: int | None
+    deadlock_count: int | None
     monotonic_stack_rate: float | None
     placements_below_current_top_band_after_opening_next_band: int | None
     layer_closure_score: float | None
@@ -136,6 +138,22 @@ def _safe_get(d: dict[str, Any], keys: list[str], default: Any = None) -> Any:
         if cur is None:
             return default
     return cur
+
+
+def _derive_deep_drop_burden(metrics_source: dict[str, Any]) -> int:
+    direct = _safe_int(metrics_source.get("deep_drop_burden"))
+    if direct is not None:
+        return int(max(0, direct))
+    trace = metrics_source.get("layer_drop_step_trace")
+    if isinstance(trace, list):
+        return int(
+            sum(
+                int(_safe_int(item.get("layer_drop")) or 0)
+                for item in trace
+                if isinstance(item, dict) and int(_safe_int(item.get("layer_drop")) or 0) >= 2
+            )
+        )
+    return 0
 
 
 def _normalize_param_key(raw_key: str) -> str:
@@ -457,6 +475,9 @@ def run_seed(
         layer_drop_audit=bool(layer_drop_audit),
     )
     metrics_source = recomputed_mono if seq else mono
+    deep_drop_burden = _derive_deep_drop_burden(metrics_source if isinstance(metrics_source, dict) else {})
+    stop_reason = str(metrics.get("stop_reason", "")).upper() if isinstance(metrics, dict) else ""
+    deadlock_count = 1 if stop_reason == "DEADLOCK" else 0
 
     max_z_series = metrics_source.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -495,6 +516,7 @@ def run_seed(
                 "reentries_total": _safe_int(metrics_source.get("reentries_total")) or 0,
                 "max_layer_drop": _safe_int(metrics_source.get("max_layer_drop")) or 0,
                 "reentries_drop_ge_2_count": _safe_int(metrics_source.get("reentries_drop_ge_2_count")) or 0,
+                "deep_drop_burden": int(deep_drop_burden),
                 "monotonic_stack_rate": _safe_float(metrics_source.get("monotonic_stack_rate")) or 0.0,
                 "layer_drop_histogram": layer_drop_histogram if isinstance(layer_drop_histogram, dict) else {},
             },
@@ -531,6 +553,8 @@ def run_seed(
         reentries_total=_safe_int(metrics_source.get("reentries_total")),
         max_layer_drop=_safe_int(metrics_source.get("max_layer_drop")),
         reentries_drop_ge_2_count=_safe_int(metrics_source.get("reentries_drop_ge_2_count")),
+        deep_drop_burden=int(deep_drop_burden),
+        deadlock_count=int(deadlock_count),
         monotonic_stack_rate=_safe_float(metrics_source.get("monotonic_stack_rate")),
         placements_below_current_top_band_after_opening_next_band=_safe_int(
             metrics_source.get("placements_below_current_top_band_after_opening_next_band")
@@ -601,6 +625,8 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             if any(v.max_layer_drop is not None for v in values_sorted)
             else None,
             "reentries_drop_ge_2_count_sum": _sum([v.reentries_drop_ge_2_count for v in values_sorted]),
+            "deep_drop_burden_sum": _sum([v.deep_drop_burden for v in values_sorted]),
+            "deadlock_count_sum": _sum([v.deadlock_count for v in values_sorted]),
             "monotonic_stack_rate_mean": _mean([v.monotonic_stack_rate for v in values_sorted]),
             "placements_below_current_top_band_after_opening_next_band_mean": _mean(
                 [v.placements_below_current_top_band_after_opening_next_band for v in values_sorted]
