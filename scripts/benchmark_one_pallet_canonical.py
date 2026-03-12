@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from palca.integration.layer_monotonicity import compute_layer_monotonicity_metrics
+from palca.integration.prefix_oracle_audit import audit_prefix_oracle_for_seed
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -44,7 +46,12 @@ PARAM_ALIASES = {
 
 RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
 RUN_SIMULATION_PARAM_KEYS = set(RUN_SIMULATION_SIGNATURE.parameters.keys())
-REQUIRED_PARAM_KEYS = set(RUN_SIMULATION_PARAM_KEYS - RUN_SIM_EXCLUDED_PROFILE_KEYS)
+PROFILE_ALLOWED_PARAM_KEYS = set(RUN_SIMULATION_PARAM_KEYS - RUN_SIM_EXCLUDED_PROFILE_KEYS)
+REQUIRED_PARAM_KEYS = {
+    name
+    for name, param in RUN_SIMULATION_SIGNATURE.parameters.items()
+    if name not in RUN_SIM_EXCLUDED_PROFILE_KEYS and param.default is inspect._empty
+}
 
 
 def _validate_harness_contract() -> None:
@@ -55,7 +62,7 @@ def _validate_harness_contract() -> None:
             f"{missing_excluded}"
         )
 
-    invalid_alias_targets = sorted({dst for dst in PARAM_ALIASES.values() if dst not in REQUIRED_PARAM_KEYS})
+    invalid_alias_targets = sorted({dst for dst in PARAM_ALIASES.values() if dst not in PROFILE_ALLOWED_PARAM_KEYS})
     if invalid_alias_targets:
         raise RuntimeError(
             "PARAM_ALIASES desalineado con run_simulation; destino(s) inexistente(s): "
@@ -80,6 +87,11 @@ class SeedSummary:
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
     lower_layer_reentry_mean_drop_mm: float | None
+    reentries_total: int | None
+    max_layer_drop: int | None
+    reentries_drop_ge_2_count: int | None
+    deep_drop_burden: int | None
+    deadlock_count: int | None
     monotonic_stack_rate: float | None
     placements_below_current_top_band_after_opening_next_band: int | None
     layer_closure_score: float | None
@@ -92,6 +104,9 @@ class SeedSummary:
     z_band_fill_share_json: str
     layer_fill_share_json: str
     step_trace_relevant_json: str
+    layer_drop_histogram_json: str
+    layer_drop_examples_json: str
+    layer_drop_audit_json: str
     output_json: str
     placements_json: str
     effective_config_hash: str
@@ -124,6 +139,27 @@ def _safe_get(d: dict[str, Any], keys: list[str], default: Any = None) -> Any:
         if cur is None:
             return default
     return cur
+
+
+def _derive_deep_drop_burden(metrics_source: dict[str, Any]) -> int:
+    direct = _safe_int(metrics_source.get("deep_drop_burden"))
+    if direct is not None:
+        return int(max(0, int(direct)))
+
+    histogram = metrics_source.get("layer_drop_histogram", {})
+    if isinstance(histogram, dict):
+        burden = 0
+        for raw_drop, raw_count in histogram.items():
+            drop = _safe_int(raw_drop)
+            count = _safe_int(raw_count)
+            if drop is None or count is None:
+                continue
+            if int(drop) < 2 or int(count) <= 0:
+                continue
+            burden += int(drop) * int(count)
+        return int(max(0, int(burden)))
+
+    return 0
 
 
 def _normalize_param_key(raw_key: str) -> str:
@@ -201,7 +237,7 @@ def load_profile(path: str | Path) -> dict[str, Any]:
             f"{missing_params}"
         )
 
-    unknown_params = sorted(set(params.keys()) - REQUIRED_PARAM_KEYS)
+    unknown_params = sorted(set(params.keys()) - PROFILE_ALLOWED_PARAM_KEYS)
     if unknown_params:
         raise ValueError(
             "Perfil invalido: parametros desconocidos/no usados por run_simulation: "
@@ -254,7 +290,7 @@ def load_variant_overrides(path: str | Path | None) -> tuple[str | None, dict[st
 def apply_param_overrides(base_params: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
     out = deepcopy(base_params)
     for key, value in overrides.items():
-        if key not in REQUIRED_PARAM_KEYS:
+        if key not in PROFILE_ALLOWED_PARAM_KEYS:
             raise ValueError(
                 "Override invalido: parametro desconocido/no usado por run_simulation "
                 f"'{key}'"
@@ -401,6 +437,7 @@ def run_seed(
     params: dict[str, Any],
     effective_config_hash: str,
     run_dir: Path,
+    layer_drop_audit: bool = False,
 ) -> SeedSummary:
     run_dir.mkdir(parents=True, exist_ok=True)
     out_json_path = run_dir / f"seed_{int(seed)}.json"
@@ -418,6 +455,12 @@ def run_seed(
 
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
     pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
+    deadlock_count = _safe_int(metrics.get("deadlock_count")) if isinstance(metrics, dict) else None
+    if deadlock_count is None and isinstance(pallet_kpis, dict):
+        deadlock_samples = pallet_kpis.get("deadlock_samples", [])
+        if isinstance(deadlock_samples, list):
+            deadlock_count = int(len(deadlock_samples))
+    deadlock_count = int(max(0, int(deadlock_count or 0)))
 
     processed_boxes = _safe_int(metrics.get("processed_boxes")) if isinstance(metrics, dict) else None
     stand_hw_used_total = _safe_int(pallet_kpis.get("stand_hw_used_total")) if isinstance(pallet_kpis, dict) else None
@@ -437,23 +480,71 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    seq = _extract_placement_sequence(placements_path, forced_destination=forced_destination)
+    recomputed_mono = compute_layer_monotonicity_metrics(
+        seq,
+        layer_band_mm=max(1, _safe_int(mono.get("layer_band_mm")) or 100),
+        layer_drop_audit=bool(layer_drop_audit),
+    )
+    metrics_source = recomputed_mono if seq else mono
+    deep_drop_burden = _derive_deep_drop_burden(metrics_source if isinstance(metrics_source, dict) else {})
 
-    max_z_series = mono.get("max_z_seen_so_far_by_step", [])
+    max_z_series = metrics_source.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
     if isinstance(max_z_series, list) and max_z_series:
         max_z_seen_last_mm = _safe_int(max_z_series[-1])
 
-    active_layers_series = mono.get("active_layers_over_time", [])
+    active_layers_series = metrics_source.get("active_layers_over_time", [])
     active_layers_peak = None
     if isinstance(active_layers_series, list) and active_layers_series:
         active_layers_peak = max((_safe_int(v) or 0) for v in active_layers_series)
 
-    step_trace_relevant = mono.get("step_trace_relevant", [])
+    step_trace_relevant = metrics_source.get("step_trace_relevant", [])
     clean_trace = (
         [item for item in step_trace_relevant if isinstance(item, dict)]
         if isinstance(step_trace_relevant, list)
         else []
     )
+    layer_drop_histogram = metrics_source.get("layer_drop_histogram", {})
+    layer_drop_examples = metrics_source.get("layer_drop_examples", [])
+    if not isinstance(layer_drop_examples, list):
+        layer_drop_examples = []
+
+    layer_drop_audit_path = ""
+    if layer_drop_audit:
+        layer_drop_audit_path_obj = run_dir / f"seed_{int(seed)}_layer_drop_audit.json"
+        layer_drop_audit_payload = {
+            "schema_version": 1,
+            "run_label": str(run_label),
+            "seed": int(seed),
+            "layer_definition": {
+                "chosen_layer": "z_mm // layer_band_mm",
+                "reference_layer": "max seen chosen_layer before current placement",
+            },
+            "summary": {
+                "placements_count": _safe_int(metrics_source.get("placements_count")) or 0,
+                "reentries_total": _safe_int(metrics_source.get("reentries_total")) or 0,
+                "max_layer_drop": _safe_int(metrics_source.get("max_layer_drop")) or 0,
+                "reentries_drop_ge_2_count": _safe_int(metrics_source.get("reentries_drop_ge_2_count")) or 0,
+                "monotonic_stack_rate": _safe_float(metrics_source.get("monotonic_stack_rate")) or 0.0,
+                "layer_drop_histogram": layer_drop_histogram if isinstance(layer_drop_histogram, dict) else {},
+            },
+            "drop_examples": [item for item in layer_drop_examples if isinstance(item, dict)],
+            "placements_audit": [
+                item
+                for item in (metrics_source.get("layer_drop_step_trace") or [])
+                if isinstance(item, dict)
+            ],
+            "source": {
+                "placements_json": str(placements_path),
+                "simulation_output_json": str(out_json_path),
+            },
+        }
+        layer_drop_audit_path_obj.write_text(
+            json.dumps(layer_drop_audit_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        layer_drop_audit_path = str(layer_drop_audit_path_obj)
 
     return SeedSummary(
         run_label=run_label,
@@ -464,27 +555,41 @@ def run_seed(
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
         max_z_seen_last_mm=max_z_seen_last_mm,
-        lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
-        lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
-        lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
-        lower_layer_reentry_mean_drop_mm=_safe_float(mono.get("lower_layer_reentry_mean_drop_mm")),
-        monotonic_stack_rate=_safe_float(mono.get("monotonic_stack_rate")),
+        lower_layer_reentry_count=_safe_int(metrics_source.get("lower_layer_reentry_count")),
+        lower_layer_reentry_total_drop_mm=_safe_int(metrics_source.get("lower_layer_reentry_total_drop_mm")),
+        lower_layer_reentry_max_drop_mm=_safe_int(metrics_source.get("lower_layer_reentry_max_drop_mm")),
+        lower_layer_reentry_mean_drop_mm=_safe_float(metrics_source.get("lower_layer_reentry_mean_drop_mm")),
+        reentries_total=_safe_int(metrics_source.get("reentries_total")),
+        max_layer_drop=_safe_int(metrics_source.get("max_layer_drop")),
+        reentries_drop_ge_2_count=_safe_int(metrics_source.get("reentries_drop_ge_2_count")),
+        deep_drop_burden=int(deep_drop_burden),
+        deadlock_count=int(deadlock_count),
+        monotonic_stack_rate=_safe_float(metrics_source.get("monotonic_stack_rate")),
         placements_below_current_top_band_after_opening_next_band=_safe_int(
-            mono.get("placements_below_current_top_band_after_opening_next_band")
+            metrics_source.get("placements_below_current_top_band_after_opening_next_band")
         ),
-        layer_closure_score=_safe_float(mono.get("layer_closure_score")),
-        layer_fill_homogeneity_score=_safe_float(mono.get("layer_fill_homogeneity_score")),
-        z_band_fill_homogeneity_score=_safe_float(mono.get("z_band_fill_homogeneity_score")),
+        layer_closure_score=_safe_float(metrics_source.get("layer_closure_score")),
+        layer_fill_homogeneity_score=_safe_float(metrics_source.get("layer_fill_homogeneity_score")),
+        z_band_fill_homogeneity_score=_safe_float(metrics_source.get("z_band_fill_homogeneity_score")),
         active_layers_peak=active_layers_peak,
-        layer_band_mm=_safe_int(mono.get("layer_band_mm")),
-        layer_band_fill_progress_json=json.dumps(mono.get("layer_band_fill_progress", []), ensure_ascii=True),
+        layer_band_mm=_safe_int(metrics_source.get("layer_band_mm")),
+        layer_band_fill_progress_json=json.dumps(metrics_source.get("layer_band_fill_progress", []), ensure_ascii=True),
         active_layers_over_time_json=json.dumps(
             active_layers_series if isinstance(active_layers_series, list) else [],
             ensure_ascii=True,
         ),
-        z_band_fill_share_json=json.dumps(mono.get("z_band_fill_share", {}), ensure_ascii=True),
-        layer_fill_share_json=json.dumps(mono.get("layer_fill_share", {}), ensure_ascii=True),
+        z_band_fill_share_json=json.dumps(metrics_source.get("z_band_fill_share", {}), ensure_ascii=True),
+        layer_fill_share_json=json.dumps(metrics_source.get("layer_fill_share", {}), ensure_ascii=True),
         step_trace_relevant_json=json.dumps(clean_trace, ensure_ascii=True),
+        layer_drop_histogram_json=json.dumps(
+            layer_drop_histogram if isinstance(layer_drop_histogram, dict) else {},
+            ensure_ascii=True,
+        ),
+        layer_drop_examples_json=json.dumps(
+            [item for item in layer_drop_examples if isinstance(item, dict)],
+            ensure_ascii=True,
+        ),
+        layer_drop_audit_json=layer_drop_audit_path,
         output_json=str(out_json_path),
         placements_json=str(placements_path),
         effective_config_hash=effective_config_hash,
@@ -496,6 +601,11 @@ def _mean(values: list[int | None]) -> float | None:
     if not nums:
         return None
     return sum(nums) / float(len(nums))
+
+
+def _sum(values: list[int | None]) -> int:
+    nums = [int(v) for v in values if v is not None]
+    return int(sum(nums))
 
 
 def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
@@ -519,6 +629,13 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
+            "reentries_total_sum": _sum([v.reentries_total for v in values_sorted]),
+            "max_layer_drop_max": max(v.max_layer_drop for v in values_sorted if v.max_layer_drop is not None)
+            if any(v.max_layer_drop is not None for v in values_sorted)
+            else None,
+            "reentries_drop_ge_2_count_sum": _sum([v.reentries_drop_ge_2_count for v in values_sorted]),
+            "deep_drop_burden_sum": _sum([v.deep_drop_burden for v in values_sorted]),
+            "deadlock_count_sum": _sum([v.deadlock_count for v in values_sorted]),
             "monotonic_stack_rate_mean": _mean([v.monotonic_stack_rate for v in values_sorted]),
             "placements_below_current_top_band_after_opening_next_band_mean": _mean(
                 [v.placements_below_current_top_band_after_opening_next_band for v in values_sorted]
@@ -602,6 +719,171 @@ def _print_summary_table(rows: list[SeedSummary]) -> None:
         )
 
 
+def _run_prefix_oracle_audit(
+    *,
+    rows_sorted: list[SeedSummary],
+    run_output_dir: Path,
+    run_effective_params: dict[str, dict[str, Any]],
+    prefix_len: int,
+    candidate_cap: int,
+    oracle_rollout_depth: int,
+    max_openings_per_seed: int,
+) -> dict[str, Any]:
+    seed_rows: list[dict[str, Any]] = []
+    opening_rows: list[dict[str, Any]] = []
+    alternative_rows: list[dict[str, Any]] = []
+
+    for row in rows_sorted:
+        params = run_effective_params.get(str(row.run_label), {})
+        forced_destination = _safe_int(params.get("force_destination"))
+        placements = _extract_placement_sequence(
+            Path(row.placements_json),
+            forced_destination=forced_destination,
+        )
+
+        audited = audit_prefix_oracle_for_seed(
+            seed=int(row.seed),
+            run_label=str(row.run_label),
+            placements=placements,
+            params=params,
+            prefix_len=int(max(1, prefix_len)),
+            candidate_cap=int(max(1, candidate_cap)),
+            oracle_rollout_depth=int(max(0, oracle_rollout_depth)),
+            max_openings_per_seed=int(max(0, max_openings_per_seed)),
+            layer_band_mm=int(max(1, _safe_int(params.get("layer_band_mm")) or 100)),
+        )
+        seed_rows.append(dict(audited.get("seed_summary", {})))
+        opening_rows.extend([dict(item) for item in audited.get("opening_rows", []) if isinstance(item, dict)])
+        alternative_rows.extend([dict(item) for item in audited.get("alternative_rows", []) if isinstance(item, dict)])
+
+    audited_openings = len(opening_rows)
+    matches = sum(1 for row in opening_rows if bool(row.get("baseline_matches_best", False)))
+    gaps = audited_openings - matches
+
+    def _mean_num(rows: list[dict[str, Any]], key: str) -> float:
+        vals = [float(_safe_float(row.get(key)) or 0.0) for row in rows]
+        if not vals:
+            return 0.0
+        return float(sum(vals) / float(len(vals)))
+
+    bad_rows = [row for row in opening_rows if not bool(row.get("baseline_matches_best", False))]
+    good_rows = [row for row in opening_rows if bool(row.get("baseline_matches_best", False))]
+
+    bad_shape_counts: dict[str, int] = {}
+    good_shape_counts: dict[str, int] = {}
+    for row in bad_rows:
+        shape = str(row.get("opening_baseline_dominant_bad_residual_shape", "none") or "none")
+        bad_shape_counts[shape] = int(bad_shape_counts.get(shape, 0) + 1)
+    for row in good_rows:
+        shape = str(row.get("opening_baseline_dominant_bad_residual_shape", "none") or "none")
+        good_shape_counts[shape] = int(good_shape_counts.get(shape, 0) + 1)
+
+    bad_shape_top = sorted(bad_shape_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[:5]
+    good_shape_top = sorted(good_shape_counts.items(), key=lambda item: (-int(item[1]), str(item[0])))[:5]
+    top_bad_shape = bad_shape_top[0][0] if bad_shape_top else "none"
+    top_bad_shape_bad_ratio = (
+        float(bad_shape_counts.get(top_bad_shape, 0)) / float(max(1, len(bad_rows)))
+        if bad_rows
+        else 0.0
+    )
+    top_bad_shape_good_ratio = (
+        float(good_shape_counts.get(top_bad_shape, 0)) / float(max(1, len(good_rows)))
+        if good_rows
+        else 0.0
+    )
+
+    mean_gap_deep_drop = _mean_num(opening_rows, "gap_deep_drop_burden_baseline_minus_best")
+    mean_gap_reentries = _mean_num(opening_rows, "gap_reentries_drop_ge_2_baseline_minus_best")
+    mean_gap_processed = _mean_num(opening_rows, "gap_processed_boxes_best_minus_baseline")
+    mean_bad_candidate_count = _mean_num(bad_rows, "opening_feasible_candidate_count")
+    mean_good_candidate_count = _mean_num(good_rows, "opening_feasible_candidate_count")
+    mean_bad_poison = _mean_num(bad_rows, "opening_baseline_poison_risk_score")
+    mean_good_poison = _mean_num(good_rows, "opening_baseline_poison_risk_score")
+
+    signal_gap = bool(gaps > 0 and (mean_gap_deep_drop >= 0.5 or mean_gap_reentries >= 0.25 or mean_gap_processed > 0.0))
+    signal_feature = bool(
+        bad_rows
+        and top_bad_shape != "none"
+        and top_bad_shape_bad_ratio >= 0.50
+        and (not good_rows or top_bad_shape_bad_ratio >= (top_bad_shape_good_ratio + 0.20))
+    )
+    distillable_policy_signal = bool(signal_gap and signal_feature)
+    option_b_likely = bool(gaps > 0 and not distillable_policy_signal)
+
+    aggregate = {
+        "audited_openings": int(audited_openings),
+        "baseline_matches_best_count": int(matches),
+        "baseline_matches_best_rate": float(matches / max(1, audited_openings)),
+        "gap_real_count": int(gaps),
+        "mean_gap_deep_drop_burden_baseline_minus_best": float(mean_gap_deep_drop),
+        "mean_gap_reentries_drop_ge_2_baseline_minus_best": float(mean_gap_reentries),
+        "mean_gap_processed_boxes_best_minus_baseline": float(mean_gap_processed),
+        "features_bad_vs_good": {
+            "mean_bad_opening_feasible_candidate_count": float(mean_bad_candidate_count),
+            "mean_good_opening_feasible_candidate_count": float(mean_good_candidate_count),
+            "mean_bad_baseline_poison_risk": float(mean_bad_poison),
+            "mean_good_baseline_poison_risk": float(mean_good_poison),
+            "bad_opening_dominant_shapes_top": [[str(name), int(count)] for name, count in bad_shape_top],
+            "good_opening_dominant_shapes_top": [[str(name), int(count)] for name, count in good_shape_top],
+            "top_bad_shape": str(top_bad_shape),
+            "top_bad_shape_bad_ratio": float(top_bad_shape_bad_ratio),
+            "top_bad_shape_good_ratio": float(top_bad_shape_good_ratio),
+        },
+        "distillable_policy_signal": bool(distillable_policy_signal),
+        "option_b_likely": bool(option_b_likely),
+        "interpretation": (
+            "signal_distillable_option_a"
+            if distillable_policy_signal
+            else ("signal_exists_but_points_to_option_b" if option_b_likely else "no_actionable_signal")
+        ),
+    }
+
+    prefix_json = run_output_dir / "prefix_oracle_audit_summary.json"
+    prefix_openings_csv = run_output_dir / "prefix_oracle_openings.csv"
+    prefix_alternatives_csv = run_output_dir / "prefix_oracle_alternatives.csv"
+
+    payload = {
+        "audit_name": "prefix_oracle",
+        "config": {
+            "prefix_len": int(max(1, prefix_len)),
+            "candidate_cap": int(max(1, candidate_cap)),
+            "oracle_rollout_depth": int(max(0, oracle_rollout_depth)),
+            "max_openings_per_seed": int(max(0, max_openings_per_seed)),
+        },
+        "seed_summaries": seed_rows,
+        "opening_rows_count": len(opening_rows),
+        "alternative_rows_count": len(alternative_rows),
+        "aggregate": aggregate,
+        "files": {
+            "summary_json": str(prefix_json),
+            "openings_csv": str(prefix_openings_csv),
+            "alternatives_csv": str(prefix_alternatives_csv),
+        },
+    }
+
+    prefix_json.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    opening_fieldnames = list(opening_rows[0].keys()) if opening_rows else ["seed", "run_label", "opening_index"]
+    with prefix_openings_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=opening_fieldnames)
+        writer.writeheader()
+        for item in opening_rows:
+            writer.writerow(item)
+
+    alternative_fieldnames = (
+        list(alternative_rows[0].keys())
+        if alternative_rows
+        else ["seed", "run_label", "opening_index", "candidate_id", "rank"]
+    )
+    with prefix_alternatives_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=alternative_fieldnames)
+        writer.writeheader()
+        for item in alternative_rows:
+            writer.writerow(item)
+
+    return payload
+
+
 def run_benchmark(
     *,
     profile_path: str | Path,
@@ -610,6 +892,12 @@ def run_benchmark(
     set_overrides: list[str] | None = None,
     seeds_override: list[int] | None = None,
     variant_name: str = "variant",
+    layer_drop_audit: bool = False,
+    prefix_oracle_audit: bool = False,
+    prefix_len: int = 3,
+    candidate_cap: int = 8,
+    oracle_rollout_depth: int = 8,
+    max_openings_per_seed: int = 3,
 ) -> dict[str, Any]:
     profile = load_profile(profile_path)
 
@@ -629,7 +917,7 @@ def run_benchmark(
     variant_params = apply_param_overrides(baseline_params, merged_variant_overrides)
 
     baseline_missing_params = sorted(REQUIRED_PARAM_KEYS - set(baseline_params.keys()))
-    baseline_unknown_params = sorted(set(baseline_params.keys()) - REQUIRED_PARAM_KEYS)
+    baseline_unknown_params = sorted(set(baseline_params.keys()) - PROFILE_ALLOWED_PARAM_KEYS)
     if baseline_missing_params:
         raise ValueError(
             "Perfil baseline invalido: faltan parametros requeridos para run_simulation: "
@@ -685,6 +973,7 @@ def run_benchmark(
                 params=params,
                 effective_config_hash=str(effective_hash),
                 run_dir=run_output_dir / run_label,
+                layer_drop_audit=bool(layer_drop_audit),
             )
             rows.append(row)
 
@@ -700,6 +989,23 @@ def run_benchmark(
     aggregates = _aggregate_rows(rows_sorted)
     discriminative = _discriminative_status(rows_sorted)
     baseline_flat = bool(discriminative.get("baseline", {}).get("is_flat_processed_boxes"))
+    run_effective_params: dict[str, dict[str, Any]] = {
+        "baseline": deepcopy(baseline_params),
+    }
+    if variant_requested:
+        run_effective_params[str(variant_name)] = deepcopy(variant_params)
+
+    prefix_oracle_payload: dict[str, Any] | None = None
+    if prefix_oracle_audit:
+        prefix_oracle_payload = _run_prefix_oracle_audit(
+            rows_sorted=rows_sorted,
+            run_output_dir=run_output_dir,
+            run_effective_params=run_effective_params,
+            prefix_len=int(max(1, prefix_len)),
+            candidate_cap=int(max(1, candidate_cap)),
+            oracle_rollout_depth=int(max(0, oracle_rollout_depth)),
+            max_openings_per_seed=int(max(0, max_openings_per_seed)),
+        )
 
     timestamp_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     fingerprint = {
@@ -719,6 +1025,8 @@ def run_benchmark(
         "schema_version": 1,
         "profile_name": profile["profile_name"],
         "profile_description": profile.get("description", ""),
+        "layer_drop_audit_enabled": bool(layer_drop_audit),
+        "prefix_oracle_audit_enabled": bool(prefix_oracle_audit),
         "fingerprint": fingerprint,
         "runs": {
             "baseline": {
@@ -738,6 +1046,7 @@ def run_benchmark(
         },
         "param_contract": {
             "run_simulation_param_keys": sorted(RUN_SIMULATION_PARAM_KEYS),
+            "profile_allowed_param_keys": sorted(PROFILE_ALLOWED_PARAM_KEYS),
             "profile_required_param_keys": sorted(REQUIRED_PARAM_KEYS),
             "profile_param_keys": sorted(profile["params"].keys()),
             "missing_required_in_profile": baseline_missing_params,
@@ -746,10 +1055,29 @@ def run_benchmark(
         },
         "aggregates": aggregates,
         "discriminative": discriminative,
+        "prefix_oracle_audit": prefix_oracle_payload,
         "rows": [asdict(r) for r in rows_sorted],
         "files": {
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
+            "layer_drop_audits": [
+                row.layer_drop_audit_json for row in rows_sorted if row.layer_drop_audit_json
+            ],
+            "prefix_oracle_summary_json": (
+                prefix_oracle_payload["files"]["summary_json"]
+                if isinstance(prefix_oracle_payload, dict)
+                else None
+            ),
+            "prefix_oracle_openings_csv": (
+                prefix_oracle_payload["files"]["openings_csv"]
+                if isinstance(prefix_oracle_payload, dict)
+                else None
+            ),
+            "prefix_oracle_alternatives_csv": (
+                prefix_oracle_payload["files"]["alternatives_csv"]
+                if isinstance(prefix_oracle_payload, dict)
+                else None
+            ),
         },
     }
 
@@ -764,6 +1092,10 @@ def run_benchmark(
     print(f"[benchmark] outdir={run_output_dir}")
     print(f"[benchmark] summary_csv={csv_path}")
     print(f"[benchmark] summary_json={summary_json_path}")
+    if isinstance(prefix_oracle_payload, dict):
+        print(f"[benchmark] prefix_oracle_summary_json={prefix_oracle_payload['files']['summary_json']}")
+        print(f"[benchmark] prefix_oracle_openings_csv={prefix_oracle_payload['files']['openings_csv']}")
+        print(f"[benchmark] prefix_oracle_alternatives_csv={prefix_oracle_payload['files']['alternatives_csv']}")
     if baseline_flat:
         print(
             "[benchmark][warning] baseline flat across seeds in processed_boxes; "
@@ -808,6 +1140,40 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional seed override list. Defaults to profile seeds.",
     )
+    parser.add_argument(
+        "--layer-drop-audit",
+        action="store_true",
+        help="Emit per-seed JSON audit with layer-drop step trace and semantic summary.",
+    )
+    parser.add_argument(
+        "--prefix-oracle-audit",
+        action="store_true",
+        help="Enable offline prefix oracle audit focused on early layer openings.",
+    )
+    parser.add_argument(
+        "--prefix-len",
+        type=int,
+        default=3,
+        help="Prefix length to audit per opening (default: 3).",
+    )
+    parser.add_argument(
+        "--candidate-cap",
+        type=int,
+        default=8,
+        help="Max alternatives per opening in prefix-oracle audit (default: 8).",
+    )
+    parser.add_argument(
+        "--oracle-rollout-depth",
+        type=int,
+        default=8,
+        help="Greedy rollout depth after audited prefix (default: 8).",
+    )
+    parser.add_argument(
+        "--max-openings-per-seed",
+        type=int,
+        default=3,
+        help="Max audited openings per seed (default: 3).",
+    )
     return parser
 
 
@@ -820,6 +1186,12 @@ def main(argv: list[str] | None = None) -> int:
         set_overrides=list(args.set or []),
         seeds_override=(list(args.seeds) if args.seeds else None),
         variant_name=str(args.variant_name),
+        layer_drop_audit=bool(args.layer_drop_audit),
+        prefix_oracle_audit=bool(args.prefix_oracle_audit),
+        prefix_len=int(args.prefix_len),
+        candidate_cap=int(args.candidate_cap),
+        oracle_rollout_depth=int(args.oracle_rollout_depth),
+        max_openings_per_seed=int(args.max_openings_per_seed),
     )
     return 0
 
