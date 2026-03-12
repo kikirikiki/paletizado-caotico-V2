@@ -40,6 +40,7 @@ PARAM_ALIASES = {
     "overhang": "overhang_mm",
     "time_budget": "time_budget_ms",
     "height_slack": "height_slack_mm",
+    "use_active_layer_commit": "use_early_layer_pattern_planner",
 }
 
 RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
@@ -75,6 +76,9 @@ class SeedSummary:
     planner_abstains: int | None
     planned_prefix_len_mean: float | None
     planned_prefix_executed_mean: float | None
+    active_layer_commit_replans_total: int | None
+    active_layer_commit_fallback_same_layer_total: int | None
+    active_layer_commit_closures_total: int | None
     first_stack_step: int | None
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
@@ -440,6 +444,17 @@ def run_seed(
     planned_prefix_executed_mean = (
         _safe_float(pallet_kpis.get("planned_prefix_executed_mean")) if isinstance(pallet_kpis, dict) else None
     )
+    active_layer_commit_replans_total = (
+        _safe_int(pallet_kpis.get("active_layer_commit_replans_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    active_layer_commit_fallback_same_layer_total = (
+        _safe_int(pallet_kpis.get("active_layer_commit_fallback_same_layer_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    active_layer_commit_closures_total = (
+        _safe_int(pallet_kpis.get("active_layer_commit_closures_total")) if isinstance(pallet_kpis, dict) else None
+    )
 
     forced_destination = _safe_int(params.get("force_destination"))
     first_stack_step, first_stand_hw_step = _first_steps_from_placements(
@@ -487,6 +502,9 @@ def run_seed(
         planner_abstains=planner_abstains,
         planned_prefix_len_mean=planned_prefix_len_mean,
         planned_prefix_executed_mean=planned_prefix_executed_mean,
+        active_layer_commit_replans_total=active_layer_commit_replans_total,
+        active_layer_commit_fallback_same_layer_total=active_layer_commit_fallback_same_layer_total,
+        active_layer_commit_closures_total=active_layer_commit_closures_total,
         first_stack_step=first_stack_step,
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
@@ -544,6 +562,15 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "planner_abstains_mean": _mean([v.planner_abstains for v in values_sorted]),
             "planned_prefix_len_mean": _mean([v.planned_prefix_len_mean for v in values_sorted]),
             "planned_prefix_executed_mean": _mean([v.planned_prefix_executed_mean for v in values_sorted]),
+            "active_layer_commit_replans_total_mean": _mean(
+                [v.active_layer_commit_replans_total for v in values_sorted]
+            ),
+            "active_layer_commit_fallback_same_layer_total_mean": _mean(
+                [v.active_layer_commit_fallback_same_layer_total for v in values_sorted]
+            ),
+            "active_layer_commit_closures_total_mean": _mean(
+                [v.active_layer_commit_closures_total for v in values_sorted]
+            ),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),
             "stand_hw_used_total_mean": _mean([v.stand_hw_used_total for v in values_sorted]),

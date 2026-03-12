@@ -61,12 +61,14 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
         "k=10",
         "micro-width=60",
         "score_mode=\"gain_frag\"",
+        "use_active_layer_commit=true",
     ])
 
     merged = bench.apply_param_overrides(base, overrides)
     assert merged["lookahead_k"] == 10
     assert merged["micro_width"] == 60
     assert merged["score_mode"] == "gain_frag"
+    assert bool(merged["use_early_layer_pattern_planner"]) is True
 
 
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
@@ -119,6 +121,9 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                     "planner_abstains": 1,
                     "planned_prefix_len_mean": 3.0,
                     "planned_prefix_executed_mean": 2.0,
+                    "active_layer_commit_replans_total": 4,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 1,
                     "deadlock_count": 0,
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
@@ -201,6 +206,9 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(r["planner_abstains"] == 1 for r in rows)
     assert all(abs(float(r["planned_prefix_len_mean"]) - 3.0) < 1e-9 for r in rows)
     assert all(abs(float(r["planned_prefix_executed_mean"]) - 2.0) < 1e-9 for r in rows)
+    assert all(r["active_layer_commit_replans_total"] == 4 for r in rows)
+    assert all(r["active_layer_commit_fallback_same_layer_total"] == 2 for r in rows)
+    assert all(r["active_layer_commit_closures_total"] == 1 for r in rows)
     assert all(r["deadlock_count"] == 0 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(r["reentries_total"] == 1 for r in rows)
@@ -228,6 +236,9 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "lower_layer_reentry_count" in csv_row
     assert "planner_invocations" in csv_row
     assert "planned_prefix_executed_mean" in csv_row
+    assert "active_layer_commit_replans_total" in csv_row
+    assert "active_layer_commit_fallback_same_layer_total" in csv_row
+    assert "active_layer_commit_closures_total" in csv_row
     assert "reentries_total" in csv_row
     assert "deadlock_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
@@ -248,6 +259,9 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
                     "planner_abstains": 0,
                     "planned_prefix_len_mean": 3.0,
                     "planned_prefix_executed_mean": 3.0,
+                    "active_layer_commit_replans_total": 6,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 3,
                     "deadlock_count": 0,
                     "layer_monotonicity_first_pallet_by_dest": {
                         "1": {
@@ -286,6 +300,7 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
         outdir=tmp_path / "bench_out_feature_on",
         set_overrides=[
             "use_early_layer_pattern_planner=true",
+            "use_active_layer_commit=true",
             "layer_pattern_prefix_depth=3",
             "layer_pattern_beam_width=4",
             "layer_pattern_candidate_cap=8",
@@ -299,6 +314,9 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
     row = rows[0]
     assert row["planner_invocations"] == 3
     assert row["planner_abstains"] == 0
+    assert row["active_layer_commit_replans_total"] == 6
+    assert row["active_layer_commit_fallback_same_layer_total"] == 2
+    assert row["active_layer_commit_closures_total"] == 3
     assert abs(float(row["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(row["reentries_total"]) == 0
     assert int(row["deadlock_count"]) == 0
