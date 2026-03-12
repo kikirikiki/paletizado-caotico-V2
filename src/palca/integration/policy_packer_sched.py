@@ -709,12 +709,24 @@ class PolicyPackerScheduler:
         planned_prefix_len_count = int(getattr(self._scheduler, "planned_prefix_len_count", 0) or 0)
         planned_prefix_executed_sum = int(getattr(self._scheduler, "planned_prefix_executed_sum", 0) or 0)
         planned_prefix_executed_count = int(getattr(self._scheduler, "planned_prefix_executed_count", 0) or 0)
+        active_layer_commit_replans_total = int(
+            getattr(self._scheduler, "active_layer_commit_replans_total", 0) or 0
+        )
+        active_layer_commit_fallback_same_layer_total = int(
+            getattr(self._scheduler, "active_layer_commit_fallback_same_layer_total", 0) or 0
+        )
+        active_layer_commit_closures_total = int(
+            getattr(self._scheduler, "active_layer_commit_closures_total", 0) or 0
+        )
         kpis["planner_invocations"] = int(planner_invocations)
         kpis["planner_abstains"] = int(planner_abstains)
         kpis["planned_prefix_len_mean"] = float(planned_prefix_len_sum / max(1, planned_prefix_len_count))
         kpis["planned_prefix_executed_mean"] = float(
             planned_prefix_executed_sum / max(1, planned_prefix_executed_count)
         )
+        kpis["active_layer_commit_replans_total"] = int(active_layer_commit_replans_total)
+        kpis["active_layer_commit_fallback_same_layer_total"] = int(active_layer_commit_fallback_same_layer_total)
+        kpis["active_layer_commit_closures_total"] = int(active_layer_commit_closures_total)
         kpis["early_layer_pattern_planner_enabled"] = bool(
             getattr(self._scheduler.config, "use_early_layer_pattern_planner", False)
         )

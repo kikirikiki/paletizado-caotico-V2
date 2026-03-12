@@ -68,26 +68,23 @@ class EarlyLayerPatternPlanner:
     ) -> LayerOpeningPlan | None:
         current_top_z = self._current_top_z_mm(pallet)
 
-        all_candidates: list[_LayerCandidate] = []
+        all_candidates = self._collect_candidates(
+            pallet_id=pallet_id,
+            ramp_queues=ramp_queues,
+        )
         starters_raw: list[tuple[_LayerCandidate, PlacementPreview]] = []
         has_active_layer_candidate = False
-        for ramp_id in sorted(ramp_queues):
-            queue = list(ramp_queues.get(ramp_id, []) or [])
-            for box in queue:
-                if getattr(box, "destination", None) != pallet_id:
-                    continue
-                candidate = _LayerCandidate(ramp_id=int(ramp_id), box=box)
-                all_candidates.append(candidate)
-                preview = preview_place_fn(pallet, box)
-                if not bool(getattr(preview, "feasible", False)):
-                    continue
-                preview_z_mm = self._preview_z_mm(preview)
-                if preview_z_mm is None:
-                    continue
-                if int(preview_z_mm) == int(current_top_z):
-                    has_active_layer_candidate = True
-                if int(preview_z_mm) > int(current_top_z):
-                    starters_raw.append((candidate, preview))
+        for candidate in all_candidates:
+            preview = preview_place_fn(pallet, candidate.box)
+            if not bool(getattr(preview, "feasible", False)):
+                continue
+            preview_z_mm = self._preview_z_mm(preview)
+            if preview_z_mm is None:
+                continue
+            if int(preview_z_mm) == int(current_top_z):
+                has_active_layer_candidate = True
+            if int(preview_z_mm) > int(current_top_z):
+                starters_raw.append((candidate, preview))
 
         if has_active_layer_candidate or not starters_raw:
             return None
@@ -100,12 +97,126 @@ class EarlyLayerPatternPlanner:
         if opening_layer_id is None:
             opening_layer_id = len(list(getattr(pallet, "layers", []) or []))
 
+        return self._plan_for_target_layer_at_z(
+            pallet_id=pallet_id,
+            pallet=pallet,
+            all_candidates=all_candidates,
+            target_layer_id=int(opening_layer_id),
+            target_z_mm=int(opening_z_mm),
+            preview_place_fn=preview_place_fn,
+        )
+
+    def plan_for_layer(
+        self,
+        *,
+        pallet_id: int | str,
+        pallet: PalletModel,
+        ramp_queues: Mapping[int, Sequence[Box]],
+        target_layer_id: int,
+        target_z_mm: int | None = None,
+        preview_place_fn: Callable[[PalletModel, Box], PlacementPreview],
+    ) -> LayerOpeningPlan | None:
+        all_candidates = self._collect_candidates(
+            pallet_id=pallet_id,
+            ramp_queues=ramp_queues,
+        )
+        if target_z_mm is not None:
+            return self._plan_for_target_layer_at_z(
+                pallet_id=pallet_id,
+                pallet=pallet,
+                all_candidates=all_candidates,
+                target_layer_id=int(target_layer_id),
+                target_z_mm=int(target_z_mm),
+                preview_place_fn=preview_place_fn,
+            )
+
+        candidate_z_values: set[int] = set()
+        for candidate in all_candidates:
+            preview = preview_place_fn(pallet, candidate.box)
+            if not bool(getattr(preview, "feasible", False)):
+                continue
+            preview_layer_id = self._preview_layer_id(preview)
+            preview_z_mm = self._preview_z_mm(preview)
+            if preview_layer_id is None or preview_z_mm is None:
+                continue
+            if int(preview_layer_id) != int(target_layer_id):
+                continue
+            candidate_z_values.add(int(preview_z_mm))
+
+        best_plan: LayerOpeningPlan | None = None
+        for candidate_z in sorted(candidate_z_values):
+            plan = self._plan_for_target_layer_at_z(
+                pallet_id=pallet_id,
+                pallet=pallet,
+                all_candidates=all_candidates,
+                target_layer_id=int(target_layer_id),
+                target_z_mm=int(candidate_z),
+                preview_place_fn=preview_place_fn,
+            )
+            if plan is None:
+                continue
+            if best_plan is None:
+                best_plan = plan
+                continue
+            if len(plan.placements) > len(best_plan.placements):
+                best_plan = plan
+                continue
+            if len(plan.placements) == len(best_plan.placements) and int(plan.z_mm) < int(best_plan.z_mm):
+                best_plan = plan
+        if best_plan is None:
+            return None
+        return best_plan
+
+    def _plan_for_target_layer(
+        self,
+        *,
+        pallet_id: int | str,
+        pallet: PalletModel,
+        all_candidates: Sequence[_LayerCandidate],
+        target_layer_id: int,
+        target_z_mm: int,
+        preview_place_fn: Callable[[PalletModel, Box], PlacementPreview],
+    ) -> LayerOpeningPlan | None:
+        return self._plan_for_target_layer_at_z(
+            pallet_id=pallet_id,
+            pallet=pallet,
+            all_candidates=all_candidates,
+            target_layer_id=int(target_layer_id),
+            target_z_mm=int(target_z_mm),
+            preview_place_fn=preview_place_fn,
+        )
+
+    @staticmethod
+    def _collect_candidates(
+        *,
+        pallet_id: int | str,
+        ramp_queues: Mapping[int, Sequence[Box]],
+    ) -> list[_LayerCandidate]:
+        out: list[_LayerCandidate] = []
+        for ramp_id in sorted(ramp_queues):
+            queue = list(ramp_queues.get(ramp_id, []) or [])
+            for box in queue:
+                if getattr(box, "destination", None) != pallet_id:
+                    continue
+                out.append(_LayerCandidate(ramp_id=int(ramp_id), box=box))
+        return out
+
+    def _plan_for_target_layer_at_z(
+        self,
+        *,
+        pallet_id: int | str,
+        pallet: PalletModel,
+        all_candidates: Sequence[_LayerCandidate],
+        target_layer_id: int,
+        target_z_mm: int,
+        preview_place_fn: Callable[[PalletModel, Box], PlacementPreview],
+    ) -> LayerOpeningPlan | None:
         root = self._build_node(
             pallet=copy.deepcopy(pallet),
             remaining=tuple(all_candidates),
             placements=(),
-            opening_layer_id=int(opening_layer_id),
-            opening_z_mm=int(opening_z_mm),
+            opening_layer_id=int(target_layer_id),
+            opening_z_mm=int(target_z_mm),
             min_support_ratio=1.0,
             preview_place_fn=preview_place_fn,
         )
@@ -117,8 +228,8 @@ class EarlyLayerPatternPlanner:
             for node in beam:
                 expansions = self._expand_node(
                     node=node,
-                    opening_layer_id=int(opening_layer_id),
-                    opening_z_mm=int(opening_z_mm),
+                    opening_layer_id=int(target_layer_id),
+                    opening_z_mm=int(target_z_mm),
                     preview_place_fn=preview_place_fn,
                     pallet_id=pallet_id,
                 )
@@ -135,8 +246,8 @@ class EarlyLayerPatternPlanner:
             return None
         return LayerOpeningPlan(
             pallet_id=pallet_id,
-            layer_id=int(opening_layer_id),
-            z_mm=int(opening_z_mm),
+            layer_id=int(target_layer_id),
+            z_mm=int(target_z_mm),
             placements=tuple(best.placements),
         )
 
