@@ -65,6 +65,8 @@ class SchedulerConfig:
     human_like_layer_opener_poison_penalty_weight: float = 0.4
     human_like_layer_opener_closure_weight: float = 1.0
     human_like_layer_opener_fragmentation_weight: float = 0.4
+    human_like_layer_opener_tail_risk_enabled: bool = False
+    human_like_layer_opener_tail_risk_weight: float = 0.6
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -102,6 +104,11 @@ class SchedulerConfig:
             self,
             "human_like_layer_opener_fragmentation_weight",
             max(0.0, float(self.human_like_layer_opener_fragmentation_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_tail_risk_weight",
+            max(0.0, float(self.human_like_layer_opener_tail_risk_weight)),
         )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
@@ -236,6 +243,10 @@ class _LayerOpenerPatternEval:
     layer_closure_score: float
     fillability_score: float
     fragmentation_penalty: float
+    tail_risk_score: float
+    tail_risk_narrow_residual_penalty: float
+    tail_risk_small_pocket_penalty: float
+    tail_risk_low_fit_penalty: float
     simulated_prefix_placements: int
 
 
@@ -304,6 +315,10 @@ class SchedulerV1:
         self.human_like_layer_opener_selected_layer_closure_sum = 0.0
         self.human_like_layer_opener_selected_fillability_sum = 0.0
         self.human_like_layer_opener_selected_fragmentation_penalty_sum = 0.0
+        self.human_like_layer_opener_selected_tail_risk_sum = 0.0
+        self.human_like_layer_opener_selected_tail_risk_narrow_residual_sum = 0.0
+        self.human_like_layer_opener_selected_tail_risk_small_pocket_sum = 0.0
+        self.human_like_layer_opener_selected_tail_risk_low_fit_sum = 0.0
         self.human_like_layer_opener_selected_prefix_placements_sum = 0
         self.human_like_layer_opener_selected_count = 0
 
@@ -569,6 +584,10 @@ class SchedulerV1:
             "human_like_layer_opener_selected_layer_closure_score_mean": 0.0,
             "human_like_layer_opener_selected_fillability_score_mean": 0.0,
             "human_like_layer_opener_selected_fragmentation_penalty_mean": 0.0,
+            "human_like_layer_opener_selected_tail_risk_score_mean": 0.0,
+            "human_like_layer_opener_selected_tail_risk_narrow_residual_mean": 0.0,
+            "human_like_layer_opener_selected_tail_risk_small_pocket_mean": 0.0,
+            "human_like_layer_opener_selected_tail_risk_low_fit_mean": 0.0,
             "human_like_layer_opener_selected_prefix_placements_mean": 0.0,
         }
         if feasible_candidates and bool(self.config.human_like_layer_opener_enabled):
@@ -609,6 +628,18 @@ class SchedulerV1:
             ),
             "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
                 layer_opener_stats["human_like_layer_opener_selected_fragmentation_penalty_mean"]
+            ),
+            "human_like_layer_opener_selected_tail_risk_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_tail_risk_score_mean"]
+            ),
+            "human_like_layer_opener_selected_tail_risk_narrow_residual_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_tail_risk_narrow_residual_mean"]
+            ),
+            "human_like_layer_opener_selected_tail_risk_small_pocket_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_tail_risk_small_pocket_mean"]
+            ),
+            "human_like_layer_opener_selected_tail_risk_low_fit_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_tail_risk_low_fit_mean"]
             ),
             "human_like_layer_opener_selected_prefix_placements_mean": float(
                 layer_opener_stats["human_like_layer_opener_selected_prefix_placements_mean"]
@@ -728,6 +759,10 @@ class SchedulerV1:
         layer_opener_selected_layer_closure_sum_local = 0.0
         layer_opener_selected_fillability_sum_local = 0.0
         layer_opener_selected_fragmentation_sum_local = 0.0
+        layer_opener_selected_tail_risk_sum_local = 0.0
+        layer_opener_selected_tail_risk_narrow_sum_local = 0.0
+        layer_opener_selected_tail_risk_small_pocket_sum_local = 0.0
+        layer_opener_selected_tail_risk_low_fit_sum_local = 0.0
         layer_opener_selected_prefix_placements_sum_local = 0
         layer_opener_selected_count_local = 0
 
@@ -811,6 +846,18 @@ class SchedulerV1:
                     layer_opener_selected_fragmentation_sum_local += float(
                         layer_opener_stats["human_like_layer_opener_selected_fragmentation_penalty_sum"]
                     )
+                    layer_opener_selected_tail_risk_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_tail_risk_score_sum"]
+                    )
+                    layer_opener_selected_tail_risk_narrow_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_tail_risk_narrow_residual_sum"]
+                    )
+                    layer_opener_selected_tail_risk_small_pocket_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_tail_risk_small_pocket_sum"]
+                    )
+                    layer_opener_selected_tail_risk_low_fit_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_tail_risk_low_fit_sum"]
+                    )
                     layer_opener_selected_prefix_placements_sum_local += int(
                         layer_opener_stats["human_like_layer_opener_selected_prefix_placements_sum"]
                     )
@@ -889,6 +936,22 @@ class SchedulerV1:
                                 ),
                                 "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
                                     layer_opener_selected_fragmentation_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_tail_risk_score_mean": float(
+                                    layer_opener_selected_tail_risk_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_tail_risk_narrow_residual_mean": float(
+                                    layer_opener_selected_tail_risk_narrow_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_tail_risk_small_pocket_mean": float(
+                                    layer_opener_selected_tail_risk_small_pocket_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_tail_risk_low_fit_mean": float(
+                                    layer_opener_selected_tail_risk_low_fit_sum_local
                                     / max(1, int(layer_opener_selected_count_local))
                                 ),
                                 "human_like_layer_opener_selected_prefix_placements_mean": float(
@@ -995,6 +1058,18 @@ class SchedulerV1:
             ),
             "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
                 layer_opener_selected_fragmentation_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_score_mean": float(
+                layer_opener_selected_tail_risk_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_narrow_residual_mean": float(
+                layer_opener_selected_tail_risk_narrow_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_small_pocket_mean": float(
+                layer_opener_selected_tail_risk_small_pocket_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_low_fit_mean": float(
+                layer_opener_selected_tail_risk_low_fit_sum_local / max(1, int(layer_opener_selected_count_local))
             ),
             "human_like_layer_opener_selected_prefix_placements_mean": float(
                 float(layer_opener_selected_prefix_placements_sum_local) / max(1, int(layer_opener_selected_count_local))
@@ -1575,6 +1650,10 @@ class SchedulerV1:
         selected_layer_closure_sum: float,
         selected_fillability_sum: float,
         selected_fragmentation_penalty_sum: float,
+        selected_tail_risk_sum: float,
+        selected_tail_risk_narrow_residual_sum: float,
+        selected_tail_risk_small_pocket_sum: float,
+        selected_tail_risk_low_fit_sum: float,
         selected_prefix_placements_sum: int,
         selected_count: int,
     ) -> None:
@@ -1589,6 +1668,19 @@ class SchedulerV1:
         self.human_like_layer_opener_selected_fragmentation_penalty_sum += max(
             0.0,
             float(selected_fragmentation_penalty_sum),
+        )
+        self.human_like_layer_opener_selected_tail_risk_sum += max(0.0, float(selected_tail_risk_sum))
+        self.human_like_layer_opener_selected_tail_risk_narrow_residual_sum += max(
+            0.0,
+            float(selected_tail_risk_narrow_residual_sum),
+        )
+        self.human_like_layer_opener_selected_tail_risk_small_pocket_sum += max(
+            0.0,
+            float(selected_tail_risk_small_pocket_sum),
+        )
+        self.human_like_layer_opener_selected_tail_risk_low_fit_sum += max(
+            0.0,
+            float(selected_tail_risk_low_fit_sum),
         )
         self.human_like_layer_opener_selected_prefix_placements_sum += max(0, int(selected_prefix_placements_sum))
         self.human_like_layer_opener_selected_count += max(0, int(selected_count))
@@ -1761,6 +1853,7 @@ class SchedulerV1:
         fillability_score = float(fit_candidates) / float(max(1, future_considered))
 
         dims_by_box: list[tuple[int, int]] = []
+        unique_dims: set[tuple[int, int]] = set()
         for box in remaining_boxes:
             try:
                 bl = int(getattr(box, "length_mm", 0) or 0)
@@ -1770,14 +1863,25 @@ class SchedulerV1:
             if bl <= 0 or bw <= 0:
                 continue
             dims_by_box.append((bl, bw))
+            unique_dims.add((bl, bw))
             if bl != bw:
                 dims_by_box.append((bw, bl))
+                unique_dims.add((bw, bl))
         min_short_side = min((min(dim[0], dim[1]) for dim in dims_by_box), default=0)
         thin_threshold = max(1, int(0.85 * float(min_short_side))) if min_short_side > 0 else 1
+        unique_dims_list = sorted(unique_dims)
+        min_box_area = min((int(dl) * int(dw) for dl, dw in unique_dims_list), default=0)
 
         thin_area = 0.0
         unfillable_area = 0.0
         thin_unfillable_mix_area = 0.0
+        tail_risk_narrow_residual_penalty = 0.0
+        tail_risk_small_pocket_penalty = 0.0
+        tail_risk_low_fit_penalty = 0.0
+        tail_risk_enabled = bool(
+            getattr(self.config, "human_like_layer_opener_tail_risk_enabled", False)
+        )
+        target_short_side = max(1, int(min_short_side)) if min_short_side > 0 else 1
         for rect in free_rects:
             rw, rh = self._rect_dims(rect)
             area = float(max(0, int(rw)) * max(0, int(rh)))
@@ -1786,19 +1890,39 @@ class SchedulerV1:
             short_side = min(int(rw), int(rh))
             is_thin = bool(short_side < int(thin_threshold))
             can_fit_any = False
-            for dl, dw in dims_by_box:
+            fit_count = 0
+            for dl, dw in unique_dims_list:
                 if int(dl) <= int(rw) and int(dw) <= int(rh):
                     can_fit_any = True
-                    break
+                    fit_count += 1
             if is_thin:
                 thin_area += area
             if not can_fit_any:
                 unfillable_area += area
             if is_thin and not can_fit_any:
                 thin_unfillable_mix_area += area
+            if not tail_risk_enabled or not unique_dims_list:
+                continue
+            area_ratio = float(area) / float(bin_area)
+            if int(short_side) < int(target_short_side):
+                shortfall = float(target_short_side - int(short_side)) / float(target_short_side)
+                tail_risk_narrow_residual_penalty += float(area_ratio) * float(max(0.0, shortfall))
+            if int(min_box_area) > 0 and float(area) < float(min_box_area):
+                tail_risk_small_pocket_penalty += float(area_ratio)
+            if int(fit_count) <= 0:
+                tail_risk_low_fit_penalty += float(area_ratio)
+            elif int(fit_count) == 1:
+                tail_risk_low_fit_penalty += 0.5 * float(area_ratio)
         thin_unfillable_mix_risk = (
             float(thin_unfillable_mix_area) + 0.50 * float(unfillable_area) + 0.25 * float(thin_area)
         ) / float(bin_area)
+        tail_risk_score = 0.0
+        if tail_risk_enabled and unique_dims_list:
+            tail_risk_score = (
+                float(tail_risk_narrow_residual_penalty)
+                + 0.80 * float(tail_risk_small_pocket_penalty)
+                + 1.10 * float(tail_risk_low_fit_penalty)
+            )
 
         fragmentation_penalty = (
             float(fragmentation_sum) / float(max(1, int(simulated_prefix_placements)))
@@ -1814,10 +1938,12 @@ class SchedulerV1:
         fragmentation_weight = float(
             getattr(self.config, "human_like_layer_opener_fragmentation_weight", 1.0) or 1.0
         )
+        tail_risk_weight = float(getattr(self.config, "human_like_layer_opener_tail_risk_weight", 0.0) or 0.0)
         score = (
             float(closure_weight) * float(layer_closure_score)
             - float(poison_weight) * float(thin_unfillable_mix_risk)
             - float(fragmentation_weight) * float(fragmentation_penalty)
+            - (float(tail_risk_weight) * float(tail_risk_score) if tail_risk_enabled else 0.0)
         )
         return _LayerOpenerPatternEval(
             score=float(score),
@@ -1825,6 +1951,10 @@ class SchedulerV1:
             layer_closure_score=float(layer_closure_score),
             fillability_score=float(fillability_score),
             fragmentation_penalty=float(fragmentation_penalty),
+            tail_risk_score=float(tail_risk_score),
+            tail_risk_narrow_residual_penalty=float(tail_risk_narrow_residual_penalty),
+            tail_risk_small_pocket_penalty=float(tail_risk_small_pocket_penalty),
+            tail_risk_low_fit_penalty=float(tail_risk_low_fit_penalty),
             simulated_prefix_placements=int(simulated_prefix_placements),
         )
 
@@ -1854,6 +1984,10 @@ class SchedulerV1:
         selected_layer_closure_sum_local = 0.0
         selected_fillability_sum_local = 0.0
         selected_fragmentation_penalty_sum_local = 0.0
+        selected_tail_risk_sum_local = 0.0
+        selected_tail_risk_narrow_sum_local = 0.0
+        selected_tail_risk_small_pocket_sum_local = 0.0
+        selected_tail_risk_low_fit_sum_local = 0.0
         selected_prefix_placements_sum_local = 0
         selected_count_local = 0
         filtered_candidates: list[_ScoredCandidate] = []
@@ -1912,6 +2046,7 @@ class SchedulerV1:
                     float(sim.score),
                     float(sim.layer_closure_score),
                     -float(sim.thin_unfillable_mix_risk),
+                    -float(sim.tail_risk_score),
                     float(starter.terms.scalar_score),
                 )
                 if best_key is None or key > best_key:
@@ -1933,6 +2068,10 @@ class SchedulerV1:
             selected_layer_closure_sum_local += float(best_eval.layer_closure_score)
             selected_fillability_sum_local += float(best_eval.fillability_score)
             selected_fragmentation_penalty_sum_local += float(best_eval.fragmentation_penalty)
+            selected_tail_risk_sum_local += float(best_eval.tail_risk_score)
+            selected_tail_risk_narrow_sum_local += float(best_eval.tail_risk_narrow_residual_penalty)
+            selected_tail_risk_small_pocket_sum_local += float(best_eval.tail_risk_small_pocket_penalty)
+            selected_tail_risk_low_fit_sum_local += float(best_eval.tail_risk_low_fit_penalty)
             selected_prefix_placements_sum_local += int(best_eval.simulated_prefix_placements)
             selected_count_local += 1
 
@@ -1952,6 +2091,10 @@ class SchedulerV1:
             selected_layer_closure_sum=selected_layer_closure_sum_local,
             selected_fillability_sum=selected_fillability_sum_local,
             selected_fragmentation_penalty_sum=selected_fragmentation_penalty_sum_local,
+            selected_tail_risk_sum=selected_tail_risk_sum_local,
+            selected_tail_risk_narrow_residual_sum=selected_tail_risk_narrow_sum_local,
+            selected_tail_risk_small_pocket_sum=selected_tail_risk_small_pocket_sum_local,
+            selected_tail_risk_low_fit_sum=selected_tail_risk_low_fit_sum_local,
             selected_prefix_placements_sum=selected_prefix_placements_sum_local,
             selected_count=selected_count_local,
         )
@@ -1974,6 +2117,18 @@ class SchedulerV1:
             ),
             "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
                 float(selected_fragmentation_penalty_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_score_mean": float(
+                float(selected_tail_risk_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_narrow_residual_mean": float(
+                float(selected_tail_risk_narrow_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_small_pocket_mean": float(
+                float(selected_tail_risk_small_pocket_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_tail_risk_low_fit_mean": float(
+                float(selected_tail_risk_low_fit_sum_local) / max(1, int(selected_count_local))
             ),
             "human_like_layer_opener_selected_prefix_placements_mean": float(
                 float(selected_prefix_placements_sum_local) / max(1, int(selected_count_local))
@@ -2007,6 +2162,10 @@ class SchedulerV1:
         selected_layer_closure_sum_local = 0.0
         selected_fillability_sum_local = 0.0
         selected_fragmentation_penalty_sum_local = 0.0
+        selected_tail_risk_sum_local = 0.0
+        selected_tail_risk_narrow_sum_local = 0.0
+        selected_tail_risk_small_pocket_sum_local = 0.0
+        selected_tail_risk_low_fit_sum_local = 0.0
         selected_prefix_placements_sum_local = 0
         selected_count_local = 0
         filtered: list[_BeamExpansion] = []
@@ -2078,6 +2237,7 @@ class SchedulerV1:
                     float(sim.score),
                     float(sim.layer_closure_score),
                     -float(sim.thin_unfillable_mix_risk),
+                    -float(sim.tail_risk_score),
                     float(starter.terms.scalar_score),
                 )
                 if best_key is None or key > best_key:
@@ -2099,6 +2259,10 @@ class SchedulerV1:
             selected_layer_closure_sum_local += float(best_eval.layer_closure_score)
             selected_fillability_sum_local += float(best_eval.fillability_score)
             selected_fragmentation_penalty_sum_local += float(best_eval.fragmentation_penalty)
+            selected_tail_risk_sum_local += float(best_eval.tail_risk_score)
+            selected_tail_risk_narrow_sum_local += float(best_eval.tail_risk_narrow_residual_penalty)
+            selected_tail_risk_small_pocket_sum_local += float(best_eval.tail_risk_small_pocket_penalty)
+            selected_tail_risk_low_fit_sum_local += float(best_eval.tail_risk_low_fit_penalty)
             selected_prefix_placements_sum_local += int(best_eval.simulated_prefix_placements)
             selected_count_local += 1
 
@@ -2118,6 +2282,10 @@ class SchedulerV1:
             selected_layer_closure_sum=selected_layer_closure_sum_local,
             selected_fillability_sum=selected_fillability_sum_local,
             selected_fragmentation_penalty_sum=selected_fragmentation_penalty_sum_local,
+            selected_tail_risk_sum=selected_tail_risk_sum_local,
+            selected_tail_risk_narrow_residual_sum=selected_tail_risk_narrow_sum_local,
+            selected_tail_risk_small_pocket_sum=selected_tail_risk_small_pocket_sum_local,
+            selected_tail_risk_low_fit_sum=selected_tail_risk_low_fit_sum_local,
             selected_prefix_placements_sum=selected_prefix_placements_sum_local,
             selected_count=selected_count_local,
         )
@@ -2131,6 +2299,12 @@ class SchedulerV1:
             "human_like_layer_opener_selected_layer_closure_score_sum": float(selected_layer_closure_sum_local),
             "human_like_layer_opener_selected_fillability_score_sum": float(selected_fillability_sum_local),
             "human_like_layer_opener_selected_fragmentation_penalty_sum": float(selected_fragmentation_penalty_sum_local),
+            "human_like_layer_opener_selected_tail_risk_score_sum": float(selected_tail_risk_sum_local),
+            "human_like_layer_opener_selected_tail_risk_narrow_residual_sum": float(selected_tail_risk_narrow_sum_local),
+            "human_like_layer_opener_selected_tail_risk_small_pocket_sum": float(
+                selected_tail_risk_small_pocket_sum_local
+            ),
+            "human_like_layer_opener_selected_tail_risk_low_fit_sum": float(selected_tail_risk_low_fit_sum_local),
             "human_like_layer_opener_selected_prefix_placements_sum": int(selected_prefix_placements_sum_local),
             "human_like_layer_opener_selected_count": int(selected_count_local),
         }

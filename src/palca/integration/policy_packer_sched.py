@@ -79,6 +79,8 @@ class PolicyConfig:
     human_like_layer_opener_poison_penalty_weight: float = 0.4
     human_like_layer_opener_closure_weight: float = 1.0
     human_like_layer_opener_fragmentation_weight: float = 0.4
+    human_like_layer_opener_tail_risk: bool = False
+    human_like_layer_opener_tail_risk_weight: float = 0.6
     online_controller: bool = False
     controller_debug: bool = False
 
@@ -213,6 +215,8 @@ class PolicyPackerScheduler:
         human_like_layer_opener_poison_penalty_weight: float = 0.4,
         human_like_layer_opener_closure_weight: float = 1.0,
         human_like_layer_opener_fragmentation_weight: float = 0.4,
+        human_like_layer_opener_tail_risk: bool = False,
+        human_like_layer_opener_tail_risk_weight: float = 0.6,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -258,6 +262,8 @@ class PolicyPackerScheduler:
             human_like_layer_opener_poison_penalty_weight=human_like_layer_opener_poison_penalty_weight,
             human_like_layer_opener_closure_weight=human_like_layer_opener_closure_weight,
             human_like_layer_opener_fragmentation_weight=human_like_layer_opener_fragmentation_weight,
+            human_like_layer_opener_tail_risk_enabled=human_like_layer_opener_tail_risk,
+            human_like_layer_opener_tail_risk_weight=human_like_layer_opener_tail_risk_weight,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -312,6 +318,8 @@ class PolicyPackerScheduler:
             human_like_layer_opener_poison_penalty_weight=max(0.0, float(human_like_layer_opener_poison_penalty_weight)),
             human_like_layer_opener_closure_weight=max(0.0, float(human_like_layer_opener_closure_weight)),
             human_like_layer_opener_fragmentation_weight=max(0.0, float(human_like_layer_opener_fragmentation_weight)),
+            human_like_layer_opener_tail_risk=bool(human_like_layer_opener_tail_risk),
+            human_like_layer_opener_tail_risk_weight=max(0.0, float(human_like_layer_opener_tail_risk_weight)),
             online_controller=online_controller,
             controller_debug=controller_debug,
         )
@@ -752,6 +760,12 @@ class PolicyPackerScheduler:
         human_like_layer_opener_fragmentation_weight = float(
             getattr(self._scheduler.config, "human_like_layer_opener_fragmentation_weight", 1.0) or 1.0
         )
+        human_like_layer_opener_tail_risk_enabled = bool(
+            getattr(self._scheduler.config, "human_like_layer_opener_tail_risk_enabled", False)
+        )
+        human_like_layer_opener_tail_risk_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_tail_risk_weight", 0.0) or 0.0
+        )
         human_like_layer_opener_calls = int(getattr(self._scheduler, "human_like_layer_opener_calls", 0) or 0)
         human_like_layer_opener_applied = int(getattr(self._scheduler, "human_like_layer_opener_applied", 0) or 0)
         human_like_layer_opener_new_layer_applied = int(
@@ -777,6 +791,18 @@ class PolicyPackerScheduler:
         )
         human_like_layer_opener_selected_fragmentation_penalty_sum = float(
             getattr(self._scheduler, "human_like_layer_opener_selected_fragmentation_penalty_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_tail_risk_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_tail_risk_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_tail_risk_narrow_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_tail_risk_narrow_residual_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_tail_risk_small_pocket_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_tail_risk_small_pocket_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_tail_risk_low_fit_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_tail_risk_low_fit_sum", 0.0) or 0.0
         )
         human_like_layer_opener_selected_prefix_placements_sum = float(
             getattr(self._scheduler, "human_like_layer_opener_selected_prefix_placements_sum", 0.0) or 0.0
@@ -879,6 +905,8 @@ class PolicyPackerScheduler:
         kpis["human_like_layer_opener_fragmentation_weight"] = float(
             human_like_layer_opener_fragmentation_weight
         )
+        kpis["human_like_layer_opener_tail_risk_enabled"] = bool(human_like_layer_opener_tail_risk_enabled)
+        kpis["human_like_layer_opener_tail_risk_weight"] = float(human_like_layer_opener_tail_risk_weight)
         kpis["human_like_layer_opener_calls"] = int(human_like_layer_opener_calls)
         kpis["human_like_layer_opener_applied"] = int(human_like_layer_opener_applied)
         kpis["human_like_layer_opener_new_layer_applied"] = int(human_like_layer_opener_new_layer_applied)
@@ -898,6 +926,18 @@ class PolicyPackerScheduler:
         kpis["human_like_layer_opener_selected_fragmentation_penalty_mean"] = float(
             human_like_layer_opener_selected_fragmentation_penalty_sum
             / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_tail_risk_score_mean"] = float(
+            human_like_layer_opener_selected_tail_risk_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_tail_risk_narrow_residual_mean"] = float(
+            human_like_layer_opener_selected_tail_risk_narrow_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_tail_risk_small_pocket_mean"] = float(
+            human_like_layer_opener_selected_tail_risk_small_pocket_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_tail_risk_low_fit_mean"] = float(
+            human_like_layer_opener_selected_tail_risk_low_fit_sum / max(1, human_like_layer_opener_selected_count)
         )
         kpis["human_like_layer_opener_selected_prefix_placements_mean"] = float(
             human_like_layer_opener_selected_prefix_placements_sum

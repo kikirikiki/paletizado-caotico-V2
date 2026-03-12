@@ -80,3 +80,47 @@ def test_human_like_layer_opener_flag_off_preserves_baseline_choice() -> None:
     assert int(baseline_plan.box_id) == 1
     assert int(off_plan.box_id) == int(baseline_plan.box_id)
     assert int(with_flag_off.human_like_layer_opener_applied) == 0
+
+
+def test_human_like_layer_opener_tail_risk_scores_residual_trap_higher() -> None:
+    state = _build_layer_opening_state()
+    pallet = state.pallets[1]
+    pool_boxes = list(state.ramps[1])
+
+    risky_starter = pool_boxes[0]
+    safer_starter = pool_boxes[1]
+
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            micro_plan_enabled=False,
+            human_like_layer_opener_enabled=True,
+            human_like_layer_opener_prefix_len=2,
+            human_like_layer_opener_candidate_cap=3,
+            human_like_layer_opener_poison_penalty_weight=0.0,
+            human_like_layer_opener_closure_weight=0.0,
+            human_like_layer_opener_fragmentation_weight=0.0,
+            human_like_layer_opener_tail_risk_enabled=True,
+            human_like_layer_opener_tail_risk_weight=1.0,
+        )
+    )
+
+    risky_eval = scheduler._simulate_human_like_layer_prefix(  # noqa: SLF001
+        pallet=pallet,
+        starter_box=risky_starter,
+        pool_boxes=pool_boxes,
+        target_layer_id=1,
+        deadline=None,
+    )
+    safer_eval = scheduler._simulate_human_like_layer_prefix(  # noqa: SLF001
+        pallet=pallet,
+        starter_box=safer_starter,
+        pool_boxes=pool_boxes,
+        target_layer_id=1,
+        deadline=None,
+    )
+
+    assert risky_eval is not None
+    assert safer_eval is not None
+    assert float(risky_eval.tail_risk_score) > float(safer_eval.tail_risk_score)
+    assert float(risky_eval.tail_risk_low_fit_penalty) > 0.0

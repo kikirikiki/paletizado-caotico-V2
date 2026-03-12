@@ -21,6 +21,9 @@ def test_build_parser_accepts_human_like_layer_opener_flags() -> None:
             "0.9",
             "--human-like-layer-opener-fragmentation-weight",
             "1.2",
+            "--human-like-layer-opener-tail-risk",
+            "--human-like-layer-opener-tail-risk-weight",
+            "0.8",
         ]
     )
     assert bool(args.human_like_layer_opener) is True
@@ -29,6 +32,8 @@ def test_build_parser_accepts_human_like_layer_opener_flags() -> None:
     assert float(args.human_like_layer_opener_poison_penalty_weight) == 1.7
     assert float(args.human_like_layer_opener_closure_weight) == 0.9
     assert float(args.human_like_layer_opener_fragmentation_weight) == 1.2
+    assert bool(args.human_like_layer_opener_tail_risk) is True
+    assert float(args.human_like_layer_opener_tail_risk_weight) == 0.8
 
 
 def test_policy_from_defaults_propagates_human_like_layer_opener_config() -> None:
@@ -39,6 +44,8 @@ def test_policy_from_defaults_propagates_human_like_layer_opener_config() -> Non
         human_like_layer_opener_poison_penalty_weight=1.7,
         human_like_layer_opener_closure_weight=0.9,
         human_like_layer_opener_fragmentation_weight=1.2,
+        human_like_layer_opener_tail_risk=True,
+        human_like_layer_opener_tail_risk_weight=0.8,
     )
     cfg = policy.config.scheduler
     assert bool(cfg.human_like_layer_opener_enabled) is True
@@ -47,3 +54,5 @@ def test_policy_from_defaults_propagates_human_like_layer_opener_config() -> Non
     assert float(cfg.human_like_layer_opener_poison_penalty_weight) == 1.7
     assert float(cfg.human_like_layer_opener_closure_weight) == 0.9
     assert float(cfg.human_like_layer_opener_fragmentation_weight) == 1.2
+    assert bool(cfg.human_like_layer_opener_tail_risk_enabled) is True
+    assert float(cfg.human_like_layer_opener_tail_risk_weight) == 0.8

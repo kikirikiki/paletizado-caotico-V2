@@ -301,6 +301,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Peso de penalizacion por fragmentacion temprana en opener.",
     )
     parser.add_argument(
+        "--human-like-layer-opener-tail-risk",
+        action="store_true",
+        help="Activa penalizacion explicita de tail risk estructural en opener (residuos/pockets).",
+    )
+    parser.add_argument(
+        "--human-like-layer-opener-tail-risk-weight",
+        type=float,
+        default=0.6,
+        help="Peso de penalizacion del score de tail risk estructural en opener.",
+    )
+    parser.add_argument(
         "--online-controller",
         action="store_true",
         help="Habilita controller online de modos NORMAL/PUSH/RESCUE sobre palca",
@@ -511,6 +522,8 @@ def run_simulation(
     human_like_layer_opener_poison_penalty_weight: float = 0.4,
     human_like_layer_opener_closure_weight: float = 1.0,
     human_like_layer_opener_fragmentation_weight: float = 0.4,
+    human_like_layer_opener_tail_risk: bool = False,
+    human_like_layer_opener_tail_risk_weight: float = 0.6,
     online_controller: bool = False,
     controller_debug: bool = False,
     weight_col: str | None = None,
@@ -678,6 +691,8 @@ def run_simulation(
                 0.0,
                 float(human_like_layer_opener_fragmentation_weight),
             ),
+            human_like_layer_opener_tail_risk=bool(human_like_layer_opener_tail_risk),
+            human_like_layer_opener_tail_risk_weight=max(0.0, float(human_like_layer_opener_tail_risk_weight)),
             online_controller=bool(online_controller),
             controller_debug=bool(controller_debug),
             priority_weight=priority_weight,
@@ -845,6 +860,10 @@ def run_simulation(
             "human_like_layer_opener_fragmentation_weight": float(
                 max(0.0, float(human_like_layer_opener_fragmentation_weight))
             ),
+            "human_like_layer_opener_tail_risk": bool(human_like_layer_opener_tail_risk),
+            "human_like_layer_opener_tail_risk_weight": float(
+                max(0.0, float(human_like_layer_opener_tail_risk_weight))
+            ),
             "online_controller": bool(online_controller),
             "controller_debug": bool(controller_debug),
             "weight_col": weight_col,
@@ -955,6 +974,8 @@ def main() -> None:
         human_like_layer_opener_poison_penalty_weight=float(args.human_like_layer_opener_poison_penalty_weight),
         human_like_layer_opener_closure_weight=float(args.human_like_layer_opener_closure_weight),
         human_like_layer_opener_fragmentation_weight=float(args.human_like_layer_opener_fragmentation_weight),
+        human_like_layer_opener_tail_risk=bool(args.human_like_layer_opener_tail_risk),
+        human_like_layer_opener_tail_risk_weight=float(args.human_like_layer_opener_tail_risk_weight),
         online_controller=bool(args.online_controller),
         controller_debug=bool(args.controller_debug),
         weight_col=args.weight_col,
