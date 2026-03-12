@@ -65,6 +65,13 @@ class SchedulerConfig:
     human_like_layer_opener_poison_penalty_weight: float = 0.4
     human_like_layer_opener_closure_weight: float = 1.0
     human_like_layer_opener_fragmentation_weight: float = 0.4
+    human_like_reentry_contract_enabled: bool = False
+    human_like_reentry_contract_require_opener: bool = True
+    human_like_reentry_contract_max_shallow_drop: int = 1
+    human_like_reentry_contract_deep_reentry_advantage_margin: float = 0.25
+    human_like_reentry_contract_shallow_candidate_cap: int = 6
+    human_like_reentry_contract_l1_correction_budget_per_layer: int = 2
+    human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow: bool = False
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -102,6 +109,26 @@ class SchedulerConfig:
             self,
             "human_like_layer_opener_fragmentation_weight",
             max(0.0, float(self.human_like_layer_opener_fragmentation_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_max_shallow_drop",
+            max(0, int(self.human_like_reentry_contract_max_shallow_drop)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_deep_reentry_advantage_margin",
+            max(0.0, float(self.human_like_reentry_contract_deep_reentry_advantage_margin)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_shallow_candidate_cap",
+            max(1, int(self.human_like_reentry_contract_shallow_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_l1_correction_budget_per_layer",
+            max(0, int(self.human_like_reentry_contract_l1_correction_budget_per_layer)),
         )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
@@ -306,6 +333,15 @@ class SchedulerV1:
         self.human_like_layer_opener_selected_fragmentation_penalty_sum = 0.0
         self.human_like_layer_opener_selected_prefix_placements_sum = 0
         self.human_like_layer_opener_selected_count = 0
+        self.reentries_total = 0
+        self.max_layer_drop = 0
+        self.reentries_drop_ge_2_count = 0
+        self.deep_reentry_attempts = 0
+        self.deep_reentry_vetoed = 0
+        self.deep_reentry_allowed_no_shallow = 0
+        self.deep_reentry_allowed_margin_win = 0
+        self.l1_corrections_used = 0
+        self._l1_corrections_used_by_layer: dict[tuple[int | str, int], int] = {}
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -316,6 +352,7 @@ class SchedulerV1:
         self.last_micro_feasible_first_candidates = 0
         self._hard_floor_phase_active_counted_this_decision = False
         self._rebuild_spatial_state(sim_state.pallets)
+        self._sync_l1_correction_budget_state(sim_state.pallets)
         k = max(1, int(self.config.lookahead_k))
 
         deadline = None
@@ -346,6 +383,7 @@ class SchedulerV1:
             if micro_plan is not None:
                 self._record_selected_spatial_tower_penalty(micro_plan)
                 self._update_spatial_state_from_selected_plan(micro_plan)
+                self._record_selected_reentry_metrics(plan=micro_plan, pallets=sim_state.pallets)
                 self._record_height_decision(
                     selected_height=micro_stats.get("selected_height_after_mm"),
                     min_feasible_height=micro_stats.get("feasible_first_min_height_mm"),
@@ -374,6 +412,7 @@ class SchedulerV1:
         if plan is not None:
             self._record_selected_spatial_tower_penalty(plan)
             self._update_spatial_state_from_selected_plan(plan)
+            self._record_selected_reentry_metrics(plan=plan, pallets=sim_state.pallets)
         return plan
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
@@ -613,6 +652,10 @@ class SchedulerV1:
             "human_like_layer_opener_selected_prefix_placements_mean": float(
                 layer_opener_stats["human_like_layer_opener_selected_prefix_placements_mean"]
             ),
+            "human_like_reentry_contract_enabled": bool(
+                getattr(self.config, "human_like_reentry_contract_enabled", False)
+            ),
+            "human_like_reentry_contract_active": bool(self._human_like_reentry_contract_active()),
         }
 
         best_plan: PickPlan | None = None
@@ -622,6 +665,7 @@ class SchedulerV1:
                 pallets=sim_state.pallets,
             )
             selected: _ScoredCandidate | None = None
+            hard_floor_selected: _HardFloorScoredCandidate | None = None
             slack_stats: SlackDecisionStats | None = None
             if hard_floor_candidates:
                 hard_floor_selected = max(
@@ -634,11 +678,6 @@ class SchedulerV1:
                     ),
                 )
                 selected = hard_floor_selected.candidate
-                self._record_hard_floor_phase_choice(
-                    selected.plan,
-                    selected.terms.scalar_score,
-                    stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
-                )
             else:
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
                 min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
@@ -662,6 +701,20 @@ class SchedulerV1:
                     selected = best_by_slack
 
             if selected is not None:
+                selected = self._apply_human_like_reentry_contract_on_scored_selection(
+                    selected=selected,
+                    feasible_candidates=feasible_candidates,
+                    pallets=sim_state.pallets,
+                )
+                if (
+                    hard_floor_selected is not None
+                    and selected is hard_floor_selected.candidate
+                ):
+                    self._record_hard_floor_phase_choice(
+                        selected.plan,
+                        selected.terms.scalar_score,
+                        stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
+                    )
                 best_plan = selected.plan
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
@@ -730,6 +783,7 @@ class SchedulerV1:
         layer_opener_selected_fragmentation_sum_local = 0.0
         layer_opener_selected_prefix_placements_sum_local = 0
         layer_opener_selected_count_local = 0
+        root_first_expansions: list[_BeamExpansion] = []
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -821,6 +875,7 @@ class SchedulerV1:
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    root_first_expansions = list(expansions)
                     hard_floor_expansions = self._hard_floor_phase_filter_beam_expansions(
                         expansions=expansions,
                         pallets=node.pallets,
@@ -836,12 +891,19 @@ class SchedulerV1:
                             ),
                         )
                         chosen_plan = chosen.expansion.node.first_plan
+                        selected_expansion = self._apply_human_like_reentry_contract_on_beam_selection(
+                            selected=chosen.expansion,
+                            expansions=expansions,
+                            pallets=node.pallets,
+                        )
+                        selected_plan = selected_expansion.node.first_plan
                         if chosen_plan is not None:
-                            self._record_hard_floor_phase_choice(
-                                chosen_plan,
-                                chosen.base_score,
-                                stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
-                            )
+                            if self._plans_match(chosen_plan, selected_plan):
+                                self._record_hard_floor_phase_choice(
+                                    chosen_plan,
+                                    chosen.base_score,
+                                    stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
+                                )
                             stats = {
                                 "enabled": True,
                                 "score_mode": str(self.config.score_mode),
@@ -855,7 +917,11 @@ class SchedulerV1:
                                 "feasible_first_min_height_mm": min(
                                     int(item.expansion.terms.height_after_mm) for item in hard_floor_expansions
                                 ),
-                                "selected_height_after_mm": self._resolve_height_after_mm(chosen_plan.preview),
+                                "selected_height_after_mm": (
+                                    self._resolve_height_after_mm(selected_plan.preview)
+                                    if selected_plan is not None
+                                    else self._resolve_height_after_mm(chosen_plan.preview)
+                                ),
                                 "height_slack_mm": int(self.config.height_slack_mm),
                                 "cutoff": bool(cutoff),
                                 "cutoff_reason": str(cutoff_reason),
@@ -895,8 +961,12 @@ class SchedulerV1:
                                     float(layer_opener_selected_prefix_placements_sum_local)
                                     / max(1, int(layer_opener_selected_count_local))
                                 ),
+                                "human_like_reentry_contract_enabled": bool(
+                                    getattr(self.config, "human_like_reentry_contract_enabled", False)
+                                ),
+                                "human_like_reentry_contract_active": bool(self._human_like_reentry_contract_active()),
                             }
-                            return chosen_plan, stats, None
+                            return (selected_plan or chosen_plan), stats, None
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -999,11 +1069,32 @@ class SchedulerV1:
             "human_like_layer_opener_selected_prefix_placements_mean": float(
                 float(layer_opener_selected_prefix_placements_sum_local) / max(1, int(layer_opener_selected_count_local))
             ),
+            "human_like_reentry_contract_enabled": bool(
+                getattr(self.config, "human_like_reentry_contract_enabled", False)
+            ),
+            "human_like_reentry_contract_active": bool(self._human_like_reentry_contract_active()),
         }
 
-        if best_node.first_plan is None:
+        selected_plan = best_node.first_plan
+        if selected_plan is not None and root_first_expansions:
+            selected_expansion = self._find_expansion_for_plan(
+                plan=selected_plan,
+                expansions=root_first_expansions,
+            )
+            if selected_expansion is not None:
+                selected_expansion = self._apply_human_like_reentry_contract_on_beam_selection(
+                    selected=selected_expansion,
+                    expansions=root_first_expansions,
+                    pallets=root.pallets,
+                )
+                adjusted_plan = selected_expansion.node.first_plan
+                if adjusted_plan is not None:
+                    selected_plan = adjusted_plan
+                    stats["selected_height_after_mm"] = self._resolve_height_after_mm(selected_plan.preview)
+
+        if selected_plan is None:
             return None, stats, root_slack_stats
-        return best_node.first_plan, stats, root_slack_stats
+        return selected_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.score_mode == "min_height_then_gain":
@@ -1210,6 +1301,348 @@ class SchedulerV1:
             return int(getattr(placement, "layer_id"))
         except (TypeError, ValueError):
             return None
+
+    def _human_like_reentry_contract_active(self) -> bool:
+        if not bool(getattr(self.config, "human_like_reentry_contract_enabled", False)):
+            return False
+        require_opener = bool(getattr(self.config, "human_like_reentry_contract_require_opener", True))
+        if require_opener and not bool(getattr(self.config, "human_like_layer_opener_enabled", False)):
+            return False
+        return True
+
+    def _sync_l1_correction_budget_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
+        if not self._l1_corrections_used_by_layer:
+            return
+        active_pallet_ids = set(pallets.keys())
+        stale_keys = [key for key in self._l1_corrections_used_by_layer if key[0] not in active_pallet_ids]
+        for key in stale_keys:
+            self._l1_corrections_used_by_layer.pop(key, None)
+
+    @staticmethod
+    def _active_layer_id_for_pallet(pallet: PalletModel) -> int | None:
+        layers = list(getattr(pallet, "layers", []) or [])
+        if not layers:
+            return None
+        return int(len(layers) - 1)
+
+    def _layer_drop_for_preview(self, *, pallet: PalletModel, preview: PlacementPreview | None) -> int:
+        active_layer_id = self._active_layer_id_for_pallet(pallet)
+        preview_layer_id = self._preview_layer_id(preview)
+        if active_layer_id is None or preview_layer_id is None:
+            return 0
+        return max(0, int(active_layer_id) - int(preview_layer_id))
+
+    def _layer_drop_for_plan(self, *, pallet: PalletModel, plan: PickPlan) -> int:
+        return self._layer_drop_for_preview(pallet=pallet, preview=plan.preview)
+
+    def _layer_drop_for_scored_candidate(self, *, pallet: PalletModel, candidate: _ScoredCandidate) -> int:
+        return self._layer_drop_for_preview(pallet=pallet, preview=candidate.plan.preview)
+
+    def _layer_drop_for_beam_expansion(self, *, pallet: PalletModel, expansion: _BeamExpansion) -> int:
+        first_plan = expansion.node.first_plan
+        if first_plan is None:
+            return 0
+        return self._layer_drop_for_plan(pallet=pallet, plan=first_plan)
+
+    @staticmethod
+    def _l1_budget_key(*, pallet_id: int | str, active_layer_id: int) -> tuple[int | str, int]:
+        return pallet_id, int(active_layer_id)
+
+    def _can_use_l1_correction_budget(self, *, pallet_id: int | str, active_layer_id: int) -> bool:
+        budget = max(0, int(getattr(self.config, "human_like_reentry_contract_l1_correction_budget_per_layer", 0) or 0))
+        if budget <= 0:
+            return False
+        key = self._l1_budget_key(pallet_id=pallet_id, active_layer_id=int(active_layer_id))
+        used = int(self._l1_corrections_used_by_layer.get(key, 0) or 0)
+        return int(used) < int(budget)
+
+    def _consume_l1_correction_budget(self, *, pallet_id: int | str, active_layer_id: int) -> bool:
+        if not self._can_use_l1_correction_budget(pallet_id=pallet_id, active_layer_id=active_layer_id):
+            return False
+        key = self._l1_budget_key(pallet_id=pallet_id, active_layer_id=int(active_layer_id))
+        self._l1_corrections_used_by_layer[key] = int(self._l1_corrections_used_by_layer.get(key, 0) or 0) + 1
+        self.l1_corrections_used += 1
+        return True
+
+    def _select_best_scored_candidate(self, *, candidates: Sequence[_ScoredCandidate]) -> _ScoredCandidate | None:
+        if not candidates:
+            return None
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+        best, _stats = choose_with_height_slack(
+            candidates=list(candidates),
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda c: int(c.terms.height_after_mm),
+            gain_frag_key_fn=self._gain_frag_candidate_key,
+        )
+        return best
+
+    def _select_best_beam_expansion(self, *, candidates: Sequence[_BeamExpansion]) -> _BeamExpansion | None:
+        if not candidates:
+            return None
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+        best, _stats = choose_with_height_slack(
+            candidates=list(candidates),
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda c: int(c.terms.height_after_mm),
+            gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+        )
+        return best
+
+    def _trim_scored_candidates_for_reentry_contract(
+        self,
+        *,
+        candidates: Sequence[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        cap = max(1, int(getattr(self.config, "human_like_reentry_contract_shallow_candidate_cap", 6) or 6))
+        if len(candidates) <= cap:
+            return list(candidates)
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            ordered = sorted(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+            return list(ordered[:cap])
+        ordered = sorted(candidates, key=lambda c: float(c.terms.scalar_score), reverse=True)
+        return list(ordered[:cap])
+
+    def _trim_beam_expansions_for_reentry_contract(
+        self,
+        *,
+        candidates: Sequence[_BeamExpansion],
+    ) -> list[_BeamExpansion]:
+        cap = max(1, int(getattr(self.config, "human_like_reentry_contract_shallow_candidate_cap", 6) or 6))
+        if len(candidates) <= cap:
+            return list(candidates)
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            ordered = sorted(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+            return list(ordered[:cap])
+        ordered = sorted(candidates, key=lambda c: float(c.terms.scalar_score), reverse=True)
+        return list(ordered[:cap])
+
+    def _apply_human_like_reentry_contract_on_scored_selection(
+        self,
+        *,
+        selected: _ScoredCandidate,
+        feasible_candidates: Sequence[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> _ScoredCandidate:
+        if not self._human_like_reentry_contract_active():
+            return selected
+
+        pallet_id = selected.plan.pallet_id
+        pallet = pallets.get(pallet_id)
+        if pallet is None:
+            return selected
+        active_layer_id = self._active_layer_id_for_pallet(pallet)
+        if active_layer_id is None:
+            return selected
+
+        selected_drop = self._layer_drop_for_scored_candidate(pallet=pallet, candidate=selected)
+        max_shallow_drop = max(0, int(getattr(self.config, "human_like_reentry_contract_max_shallow_drop", 1) or 1))
+        margin = float(
+            getattr(self.config, "human_like_reentry_contract_deep_reentry_advantage_margin", 0.0) or 0.0
+        )
+        allow_only_if_no_shallow = bool(
+            getattr(self.config, "human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow", False)
+        )
+
+        group = [c for c in feasible_candidates if c.plan.pallet_id == pallet_id]
+        if not group:
+            return selected
+
+        if selected_drop == 1:
+            if int(max_shallow_drop) < 1:
+                l0_candidates = [c for c in group if self._layer_drop_for_scored_candidate(pallet=pallet, candidate=c) == 0]
+                replacement = self._select_best_scored_candidate(candidates=l0_candidates)
+                return replacement if replacement is not None else selected
+            if self._consume_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                return selected
+            l0_candidates = [c for c in group if self._layer_drop_for_scored_candidate(pallet=pallet, candidate=c) == 0]
+            replacement = self._select_best_scored_candidate(candidates=l0_candidates)
+            return replacement if replacement is not None else selected
+
+        if selected_drop < 2:
+            return selected
+
+        self.deep_reentry_attempts += 1
+        shallow_candidates: list[_ScoredCandidate] = []
+        shallow_l0_candidates: list[_ScoredCandidate] = []
+        for candidate in group:
+            drop = self._layer_drop_for_scored_candidate(pallet=pallet, candidate=candidate)
+            if drop == 0:
+                shallow_candidates.append(candidate)
+                shallow_l0_candidates.append(candidate)
+                continue
+            if 1 <= drop <= int(max_shallow_drop):
+                if not self._can_use_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                    continue
+                shallow_candidates.append(candidate)
+
+        if not shallow_candidates:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        trimmed_shallow = self._trim_scored_candidates_for_reentry_contract(candidates=shallow_candidates)
+        best_shallow = self._select_best_scored_candidate(candidates=trimmed_shallow)
+        if best_shallow is None:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        selected_score = float(selected.terms.scalar_score)
+        shallow_score = float(best_shallow.terms.scalar_score)
+        deep_wins_by_margin = selected_score >= (shallow_score + float(margin))
+
+        if not allow_only_if_no_shallow and deep_wins_by_margin:
+            self.deep_reentry_allowed_margin_win += 1
+            return selected
+
+        shallow_drop = self._layer_drop_for_scored_candidate(pallet=pallet, candidate=best_shallow)
+        if shallow_drop == 1 and not self._consume_l1_correction_budget(
+            pallet_id=pallet_id,
+            active_layer_id=int(active_layer_id),
+        ):
+            replacement_l0 = self._select_best_scored_candidate(candidates=shallow_l0_candidates)
+            if replacement_l0 is None:
+                return selected
+            best_shallow = replacement_l0
+
+        self.deep_reentry_vetoed += 1
+        return best_shallow
+
+    def _apply_human_like_reentry_contract_on_beam_selection(
+        self,
+        *,
+        selected: _BeamExpansion,
+        expansions: Sequence[_BeamExpansion],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> _BeamExpansion:
+        if not self._human_like_reentry_contract_active():
+            return selected
+
+        pallet_id = selected.box.destination
+        if pallet_id is None:
+            return selected
+        pallet = pallets.get(pallet_id)
+        if pallet is None:
+            return selected
+        active_layer_id = self._active_layer_id_for_pallet(pallet)
+        if active_layer_id is None:
+            return selected
+
+        selected_drop = self._layer_drop_for_beam_expansion(pallet=pallet, expansion=selected)
+        max_shallow_drop = max(0, int(getattr(self.config, "human_like_reentry_contract_max_shallow_drop", 1) or 1))
+        margin = float(
+            getattr(self.config, "human_like_reentry_contract_deep_reentry_advantage_margin", 0.0) or 0.0
+        )
+        allow_only_if_no_shallow = bool(
+            getattr(self.config, "human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow", False)
+        )
+
+        group = [e for e in expansions if e.box.destination == pallet_id]
+        if not group:
+            return selected
+
+        if selected_drop == 1:
+            if int(max_shallow_drop) < 1:
+                l0_candidates = [e for e in group if self._layer_drop_for_beam_expansion(pallet=pallet, expansion=e) == 0]
+                replacement = self._select_best_beam_expansion(candidates=l0_candidates)
+                return replacement if replacement is not None else selected
+            if self._consume_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                return selected
+            l0_candidates = [e for e in group if self._layer_drop_for_beam_expansion(pallet=pallet, expansion=e) == 0]
+            replacement = self._select_best_beam_expansion(candidates=l0_candidates)
+            return replacement if replacement is not None else selected
+
+        if selected_drop < 2:
+            return selected
+
+        self.deep_reentry_attempts += 1
+        shallow_candidates: list[_BeamExpansion] = []
+        shallow_l0_candidates: list[_BeamExpansion] = []
+        for candidate in group:
+            drop = self._layer_drop_for_beam_expansion(pallet=pallet, expansion=candidate)
+            if drop == 0:
+                shallow_candidates.append(candidate)
+                shallow_l0_candidates.append(candidate)
+                continue
+            if 1 <= drop <= int(max_shallow_drop):
+                if not self._can_use_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                    continue
+                shallow_candidates.append(candidate)
+
+        if not shallow_candidates:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        trimmed_shallow = self._trim_beam_expansions_for_reentry_contract(candidates=shallow_candidates)
+        best_shallow = self._select_best_beam_expansion(candidates=trimmed_shallow)
+        if best_shallow is None:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        selected_score = float(selected.terms.scalar_score)
+        shallow_score = float(best_shallow.terms.scalar_score)
+        deep_wins_by_margin = selected_score >= (shallow_score + float(margin))
+
+        if not allow_only_if_no_shallow and deep_wins_by_margin:
+            self.deep_reentry_allowed_margin_win += 1
+            return selected
+
+        shallow_drop = self._layer_drop_for_beam_expansion(pallet=pallet, expansion=best_shallow)
+        if shallow_drop == 1 and not self._consume_l1_correction_budget(
+            pallet_id=pallet_id,
+            active_layer_id=int(active_layer_id),
+        ):
+            replacement_l0 = self._select_best_beam_expansion(candidates=shallow_l0_candidates)
+            if replacement_l0 is None:
+                return selected
+            best_shallow = replacement_l0
+
+        self.deep_reentry_vetoed += 1
+        return best_shallow
+
+    @staticmethod
+    def _plans_match(a: PickPlan | None, b: PickPlan | None) -> bool:
+        if a is None or b is None:
+            return False
+        return (
+            int(a.ramp_id) == int(b.ramp_id)
+            and int(a.buffer_index) == int(b.buffer_index)
+            and str(a.pallet_id) == str(b.pallet_id)
+            and str(a.box_id) == str(b.box_id)
+        )
+
+    def _find_expansion_for_plan(
+        self,
+        *,
+        plan: PickPlan | None,
+        expansions: Sequence[_BeamExpansion],
+    ) -> _BeamExpansion | None:
+        if plan is None:
+            return None
+        for expansion in expansions:
+            first_plan = expansion.node.first_plan
+            if self._plans_match(first_plan, plan):
+                return expansion
+        return None
+
+    def _record_selected_reentry_metrics(
+        self,
+        *,
+        plan: PickPlan,
+        pallets: Mapping[int | str, PalletModel],
+    ) -> None:
+        pallet = pallets.get(plan.pallet_id)
+        if pallet is None:
+            return
+        drop = max(0, int(self._layer_drop_for_plan(pallet=pallet, plan=plan)))
+        self.max_layer_drop = max(int(self.max_layer_drop), int(drop))
+        if int(drop) <= 0:
+            return
+        self.reentries_total += 1
+        if int(drop) >= 2:
+            self.reentries_drop_ge_2_count += 1
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))
