@@ -73,6 +73,19 @@ class PolicyConfig:
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
+    human_like_layer_opener: bool = False
+    human_like_layer_opener_prefix_len: int = 2
+    human_like_layer_opener_candidate_cap: int = 6
+    human_like_layer_opener_poison_penalty_weight: float = 0.4
+    human_like_layer_opener_closure_weight: float = 1.0
+    human_like_layer_opener_fragmentation_weight: float = 0.4
+    human_like_reentry_contract: bool = False
+    human_like_reentry_contract_require_opener: bool = True
+    human_like_reentry_contract_max_shallow_drop: int = 1
+    human_like_reentry_contract_deep_reentry_advantage_margin: float = 0.25
+    human_like_reentry_contract_shallow_candidate_cap: int = 6
+    human_like_reentry_contract_l1_correction_budget_per_layer: int = 2
+    human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow: bool = False
     online_controller: bool = False
     controller_debug: bool = False
 
@@ -201,6 +214,19 @@ class PolicyPackerScheduler:
         batchfill_starters_max: int = 6,
         batchfill_budget_ms: int = 150,
         batchfill_greedy_topk: int = 12,
+        human_like_layer_opener: bool = False,
+        human_like_layer_opener_prefix_len: int = 2,
+        human_like_layer_opener_candidate_cap: int = 6,
+        human_like_layer_opener_poison_penalty_weight: float = 0.4,
+        human_like_layer_opener_closure_weight: float = 1.0,
+        human_like_layer_opener_fragmentation_weight: float = 0.4,
+        human_like_reentry_contract: bool = False,
+        human_like_reentry_contract_require_opener: bool = True,
+        human_like_reentry_contract_max_shallow_drop: int = 1,
+        human_like_reentry_contract_deep_reentry_advantage_margin: float = 0.25,
+        human_like_reentry_contract_shallow_candidate_cap: int = 6,
+        human_like_reentry_contract_l1_correction_budget_per_layer: int = 2,
+        human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow: bool = False,
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
@@ -240,6 +266,25 @@ class PolicyPackerScheduler:
             batchfill_starters_max=batchfill_starters_max,
             batchfill_budget_ms=batchfill_budget_ms,
             batchfill_greedy_topk=batchfill_greedy_topk,
+            human_like_layer_opener_enabled=human_like_layer_opener,
+            human_like_layer_opener_prefix_len=human_like_layer_opener_prefix_len,
+            human_like_layer_opener_candidate_cap=human_like_layer_opener_candidate_cap,
+            human_like_layer_opener_poison_penalty_weight=human_like_layer_opener_poison_penalty_weight,
+            human_like_layer_opener_closure_weight=human_like_layer_opener_closure_weight,
+            human_like_layer_opener_fragmentation_weight=human_like_layer_opener_fragmentation_weight,
+            human_like_reentry_contract_enabled=human_like_reentry_contract,
+            human_like_reentry_contract_require_opener=human_like_reentry_contract_require_opener,
+            human_like_reentry_contract_max_shallow_drop=human_like_reentry_contract_max_shallow_drop,
+            human_like_reentry_contract_deep_reentry_advantage_margin=(
+                human_like_reentry_contract_deep_reentry_advantage_margin
+            ),
+            human_like_reentry_contract_shallow_candidate_cap=human_like_reentry_contract_shallow_candidate_cap,
+            human_like_reentry_contract_l1_correction_budget_per_layer=(
+                human_like_reentry_contract_l1_correction_budget_per_layer
+            ),
+            human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow=(
+                human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow
+            ),
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
@@ -288,6 +333,27 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            human_like_layer_opener=bool(human_like_layer_opener),
+            human_like_layer_opener_prefix_len=max(1, int(human_like_layer_opener_prefix_len)),
+            human_like_layer_opener_candidate_cap=max(1, int(human_like_layer_opener_candidate_cap)),
+            human_like_layer_opener_poison_penalty_weight=max(0.0, float(human_like_layer_opener_poison_penalty_weight)),
+            human_like_layer_opener_closure_weight=max(0.0, float(human_like_layer_opener_closure_weight)),
+            human_like_layer_opener_fragmentation_weight=max(0.0, float(human_like_layer_opener_fragmentation_weight)),
+            human_like_reentry_contract=bool(human_like_reentry_contract),
+            human_like_reentry_contract_require_opener=bool(human_like_reentry_contract_require_opener),
+            human_like_reentry_contract_max_shallow_drop=max(0, int(human_like_reentry_contract_max_shallow_drop)),
+            human_like_reentry_contract_deep_reentry_advantage_margin=max(
+                0.0,
+                float(human_like_reentry_contract_deep_reentry_advantage_margin),
+            ),
+            human_like_reentry_contract_shallow_candidate_cap=max(1, int(human_like_reentry_contract_shallow_candidate_cap)),
+            human_like_reentry_contract_l1_correction_budget_per_layer=max(
+                0,
+                int(human_like_reentry_contract_l1_correction_budget_per_layer),
+            ),
+            human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow=bool(
+                human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow
+            ),
             online_controller=online_controller,
             controller_debug=controller_debug,
         )
@@ -685,6 +751,86 @@ class PolicyPackerScheduler:
         kpis["batchfill_selected_layer_boxes_mean"] = float(
             float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
         )
+        human_like_layer_opener_enabled = bool(
+            getattr(self._scheduler.config, "human_like_layer_opener_enabled", False)
+        )
+        human_like_layer_opener_prefix_len = int(
+            getattr(self._scheduler.config, "human_like_layer_opener_prefix_len", 3) or 3
+        )
+        human_like_layer_opener_candidate_cap = int(
+            getattr(self._scheduler.config, "human_like_layer_opener_candidate_cap", 6) or 6
+        )
+        human_like_layer_opener_poison_penalty_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_poison_penalty_weight", 1.0) or 1.0
+        )
+        human_like_layer_opener_closure_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_closure_weight", 1.0) or 1.0
+        )
+        human_like_layer_opener_fragmentation_weight = float(
+            getattr(self._scheduler.config, "human_like_layer_opener_fragmentation_weight", 1.0) or 1.0
+        )
+        human_like_reentry_contract_enabled = bool(
+            getattr(self._scheduler.config, "human_like_reentry_contract_enabled", False)
+        )
+        human_like_reentry_contract_require_opener = bool(
+            getattr(self._scheduler.config, "human_like_reentry_contract_require_opener", True)
+        )
+        human_like_reentry_contract_max_shallow_drop = int(
+            getattr(self._scheduler.config, "human_like_reentry_contract_max_shallow_drop", 1) or 1
+        )
+        human_like_reentry_contract_deep_reentry_advantage_margin = float(
+            getattr(self._scheduler.config, "human_like_reentry_contract_deep_reentry_advantage_margin", 0.25) or 0.25
+        )
+        human_like_reentry_contract_shallow_candidate_cap = int(
+            getattr(self._scheduler.config, "human_like_reentry_contract_shallow_candidate_cap", 6) or 6
+        )
+        human_like_reentry_contract_l1_correction_budget_per_layer = int(
+            getattr(self._scheduler.config, "human_like_reentry_contract_l1_correction_budget_per_layer", 2) or 2
+        )
+        human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow = bool(
+            getattr(
+                self._scheduler.config,
+                "human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow",
+                False,
+            )
+        )
+        human_like_layer_opener_calls = int(getattr(self._scheduler, "human_like_layer_opener_calls", 0) or 0)
+        human_like_layer_opener_applied = int(getattr(self._scheduler, "human_like_layer_opener_applied", 0) or 0)
+        human_like_layer_opener_new_layer_applied = int(
+            getattr(self._scheduler, "human_like_layer_opener_new_layer_applied", 0) or 0
+        )
+        human_like_layer_opener_active_prefix_applied = int(
+            getattr(self._scheduler, "human_like_layer_opener_active_prefix_applied", 0) or 0
+        )
+        human_like_layer_opener_selected_count = int(
+            getattr(self._scheduler, "human_like_layer_opener_selected_count", 0) or 0
+        )
+        human_like_layer_opener_selected_score_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_score_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_thin_risk_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_thin_unfillable_mix_risk_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_layer_closure_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_layer_closure_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_fillability_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_fillability_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_fragmentation_penalty_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_fragmentation_penalty_sum", 0.0) or 0.0
+        )
+        human_like_layer_opener_selected_prefix_placements_sum = float(
+            getattr(self._scheduler, "human_like_layer_opener_selected_prefix_placements_sum", 0.0) or 0.0
+        )
+        reentries_total = int(getattr(self._scheduler, "reentries_total", 0) or 0)
+        max_layer_drop = int(getattr(self._scheduler, "max_layer_drop", 0) or 0)
+        reentries_drop_ge_2_count = int(getattr(self._scheduler, "reentries_drop_ge_2_count", 0) or 0)
+        deep_reentry_attempts = int(getattr(self._scheduler, "deep_reentry_attempts", 0) or 0)
+        deep_reentry_vetoed = int(getattr(self._scheduler, "deep_reentry_vetoed", 0) or 0)
+        deep_reentry_allowed_no_shallow = int(getattr(self._scheduler, "deep_reentry_allowed_no_shallow", 0) or 0)
+        deep_reentry_allowed_margin_win = int(getattr(self._scheduler, "deep_reentry_allowed_margin_win", 0) or 0)
+        l1_corrections_used = int(getattr(self._scheduler, "l1_corrections_used", 0) or 0)
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)
@@ -774,6 +920,62 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+
+        kpis["human_like_layer_opener_enabled"] = bool(human_like_layer_opener_enabled)
+        kpis["human_like_layer_opener_prefix_len"] = int(human_like_layer_opener_prefix_len)
+        kpis["human_like_layer_opener_candidate_cap"] = int(human_like_layer_opener_candidate_cap)
+        kpis["human_like_layer_opener_poison_penalty_weight"] = float(human_like_layer_opener_poison_penalty_weight)
+        kpis["human_like_layer_opener_closure_weight"] = float(human_like_layer_opener_closure_weight)
+        kpis["human_like_layer_opener_fragmentation_weight"] = float(
+            human_like_layer_opener_fragmentation_weight
+        )
+        kpis["human_like_layer_opener_calls"] = int(human_like_layer_opener_calls)
+        kpis["human_like_layer_opener_applied"] = int(human_like_layer_opener_applied)
+        kpis["human_like_layer_opener_new_layer_applied"] = int(human_like_layer_opener_new_layer_applied)
+        kpis["human_like_layer_opener_active_prefix_applied"] = int(human_like_layer_opener_active_prefix_applied)
+        kpis["human_like_layer_opener_selected_score_mean"] = float(
+            human_like_layer_opener_selected_score_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_thin_unfillable_mix_risk_mean"] = float(
+            human_like_layer_opener_selected_thin_risk_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_layer_closure_score_mean"] = float(
+            human_like_layer_opener_selected_layer_closure_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_fillability_score_mean"] = float(
+            human_like_layer_opener_selected_fillability_sum / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_fragmentation_penalty_mean"] = float(
+            human_like_layer_opener_selected_fragmentation_penalty_sum
+            / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_layer_opener_selected_prefix_placements_mean"] = float(
+            human_like_layer_opener_selected_prefix_placements_sum
+            / max(1, human_like_layer_opener_selected_count)
+        )
+        kpis["human_like_reentry_contract_enabled"] = bool(human_like_reentry_contract_enabled)
+        kpis["human_like_reentry_contract_require_opener"] = bool(human_like_reentry_contract_require_opener)
+        kpis["human_like_reentry_contract_max_shallow_drop"] = int(human_like_reentry_contract_max_shallow_drop)
+        kpis["human_like_reentry_contract_deep_reentry_advantage_margin"] = float(
+            human_like_reentry_contract_deep_reentry_advantage_margin
+        )
+        kpis["human_like_reentry_contract_shallow_candidate_cap"] = int(
+            human_like_reentry_contract_shallow_candidate_cap
+        )
+        kpis["human_like_reentry_contract_l1_correction_budget_per_layer"] = int(
+            human_like_reentry_contract_l1_correction_budget_per_layer
+        )
+        kpis["human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow"] = bool(
+            human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow
+        )
+        kpis["reentries_total"] = int(reentries_total)
+        kpis["max_layer_drop"] = int(max_layer_drop)
+        kpis["reentries_drop_ge_2_count"] = int(reentries_drop_ge_2_count)
+        kpis["deep_reentry_attempts"] = int(deep_reentry_attempts)
+        kpis["deep_reentry_vetoed"] = int(deep_reentry_vetoed)
+        kpis["deep_reentry_allowed_no_shallow"] = int(deep_reentry_allowed_no_shallow)
+        kpis["deep_reentry_allowed_margin_win"] = int(deep_reentry_allowed_margin_win)
+        kpis["l1_corrections_used"] = int(l1_corrections_used)
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)

@@ -59,6 +59,19 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    human_like_layer_opener_enabled: bool = False
+    human_like_layer_opener_prefix_len: int = 2
+    human_like_layer_opener_candidate_cap: int = 6
+    human_like_layer_opener_poison_penalty_weight: float = 0.4
+    human_like_layer_opener_closure_weight: float = 1.0
+    human_like_layer_opener_fragmentation_weight: float = 0.4
+    human_like_reentry_contract_enabled: bool = False
+    human_like_reentry_contract_require_opener: bool = True
+    human_like_reentry_contract_max_shallow_drop: int = 1
+    human_like_reentry_contract_deep_reentry_advantage_margin: float = 0.25
+    human_like_reentry_contract_shallow_candidate_cap: int = 6
+    human_like_reentry_contract_l1_correction_budget_per_layer: int = 2
+    human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow: bool = False
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -80,6 +93,43 @@ class SchedulerConfig:
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
+        object.__setattr__(self, "human_like_layer_opener_prefix_len", max(1, int(self.human_like_layer_opener_prefix_len)))
+        object.__setattr__(self, "human_like_layer_opener_candidate_cap", max(1, int(self.human_like_layer_opener_candidate_cap)))
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_poison_penalty_weight",
+            max(0.0, float(self.human_like_layer_opener_poison_penalty_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_closure_weight",
+            max(0.0, float(self.human_like_layer_opener_closure_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_fragmentation_weight",
+            max(0.0, float(self.human_like_layer_opener_fragmentation_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_max_shallow_drop",
+            max(0, int(self.human_like_reentry_contract_max_shallow_drop)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_deep_reentry_advantage_margin",
+            max(0.0, float(self.human_like_reentry_contract_deep_reentry_advantage_margin)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_shallow_candidate_cap",
+            max(1, int(self.human_like_reentry_contract_shallow_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_reentry_contract_l1_correction_budget_per_layer",
+            max(0, int(self.human_like_reentry_contract_l1_correction_budget_per_layer)),
+        )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -206,6 +256,16 @@ class _HardFloorScoredExpansion:
     stand_mix_bonus_applied: bool = False
 
 
+@dataclass(frozen=True)
+class _LayerOpenerPatternEval:
+    score: float
+    thin_unfillable_mix_risk: float
+    layer_closure_score: float
+    fillability_score: float
+    fragmentation_penalty: float
+    simulated_prefix_placements: int
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -262,6 +322,26 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.human_like_layer_opener_calls = 0
+        self.human_like_layer_opener_applied = 0
+        self.human_like_layer_opener_new_layer_applied = 0
+        self.human_like_layer_opener_active_prefix_applied = 0
+        self.human_like_layer_opener_selected_score_sum = 0.0
+        self.human_like_layer_opener_selected_thin_unfillable_mix_risk_sum = 0.0
+        self.human_like_layer_opener_selected_layer_closure_sum = 0.0
+        self.human_like_layer_opener_selected_fillability_sum = 0.0
+        self.human_like_layer_opener_selected_fragmentation_penalty_sum = 0.0
+        self.human_like_layer_opener_selected_prefix_placements_sum = 0
+        self.human_like_layer_opener_selected_count = 0
+        self.reentries_total = 0
+        self.max_layer_drop = 0
+        self.reentries_drop_ge_2_count = 0
+        self.deep_reentry_attempts = 0
+        self.deep_reentry_vetoed = 0
+        self.deep_reentry_allowed_no_shallow = 0
+        self.deep_reentry_allowed_margin_win = 0
+        self.l1_corrections_used = 0
+        self._l1_corrections_used_by_layer: dict[tuple[int | str, int], int] = {}
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -272,6 +352,7 @@ class SchedulerV1:
         self.last_micro_feasible_first_candidates = 0
         self._hard_floor_phase_active_counted_this_decision = False
         self._rebuild_spatial_state(sim_state.pallets)
+        self._sync_l1_correction_budget_state(sim_state.pallets)
         k = max(1, int(self.config.lookahead_k))
 
         deadline = None
@@ -302,6 +383,7 @@ class SchedulerV1:
             if micro_plan is not None:
                 self._record_selected_spatial_tower_penalty(micro_plan)
                 self._update_spatial_state_from_selected_plan(micro_plan)
+                self._record_selected_reentry_metrics(plan=micro_plan, pallets=sim_state.pallets)
                 self._record_height_decision(
                     selected_height=micro_stats.get("selected_height_after_mm"),
                     min_feasible_height=micro_stats.get("feasible_first_min_height_mm"),
@@ -330,6 +412,7 @@ class SchedulerV1:
         if plan is not None:
             self._record_selected_spatial_tower_penalty(plan)
             self._update_spatial_state_from_selected_plan(plan)
+            self._record_selected_reentry_metrics(plan=plan, pallets=sim_state.pallets)
         return plan
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
@@ -515,6 +598,25 @@ class SchedulerV1:
                 window_boxes_by_pallet_id=window_boxes_by_pallet_id,
                 deadline=deadline,
             )
+        layer_opener_stats = {
+            "human_like_layer_opener_calls": 0,
+            "human_like_layer_opener_applied": 0,
+            "human_like_layer_opener_new_layer_applied": 0,
+            "human_like_layer_opener_active_prefix_applied": 0,
+            "human_like_layer_opener_selected_score_mean": 0.0,
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": 0.0,
+            "human_like_layer_opener_selected_layer_closure_score_mean": 0.0,
+            "human_like_layer_opener_selected_fillability_score_mean": 0.0,
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": 0.0,
+            "human_like_layer_opener_selected_prefix_placements_mean": 0.0,
+        }
+        if feasible_candidates and bool(self.config.human_like_layer_opener_enabled):
+            feasible_candidates, layer_opener_stats = self._apply_human_like_layer_opener_on_scored_candidates(
+                feasible_candidates=feasible_candidates,
+                pallets=sim_state.pallets,
+                window_boxes_by_pallet_id=window_boxes_by_pallet_id,
+                deadline=deadline,
+            )
 
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
@@ -524,6 +626,36 @@ class SchedulerV1:
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
             "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
             "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
+            "human_like_layer_opener_calls": int(layer_opener_stats["human_like_layer_opener_calls"]),
+            "human_like_layer_opener_applied": int(layer_opener_stats["human_like_layer_opener_applied"]),
+            "human_like_layer_opener_new_layer_applied": int(
+                layer_opener_stats["human_like_layer_opener_new_layer_applied"]
+            ),
+            "human_like_layer_opener_active_prefix_applied": int(
+                layer_opener_stats["human_like_layer_opener_active_prefix_applied"]
+            ),
+            "human_like_layer_opener_selected_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_score_mean"]
+            ),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_thin_unfillable_mix_risk_mean"]
+            ),
+            "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_layer_closure_score_mean"]
+            ),
+            "human_like_layer_opener_selected_fillability_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_fillability_score_mean"]
+            ),
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_fragmentation_penalty_mean"]
+            ),
+            "human_like_layer_opener_selected_prefix_placements_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_prefix_placements_mean"]
+            ),
+            "human_like_reentry_contract_enabled": bool(
+                getattr(self.config, "human_like_reentry_contract_enabled", False)
+            ),
+            "human_like_reentry_contract_active": bool(self._human_like_reentry_contract_active()),
         }
 
         best_plan: PickPlan | None = None
@@ -533,6 +665,7 @@ class SchedulerV1:
                 pallets=sim_state.pallets,
             )
             selected: _ScoredCandidate | None = None
+            hard_floor_selected: _HardFloorScoredCandidate | None = None
             slack_stats: SlackDecisionStats | None = None
             if hard_floor_candidates:
                 hard_floor_selected = max(
@@ -545,11 +678,6 @@ class SchedulerV1:
                     ),
                 )
                 selected = hard_floor_selected.candidate
-                self._record_hard_floor_phase_choice(
-                    selected.plan,
-                    selected.terms.scalar_score,
-                    stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
-                )
             else:
                 feasible_candidates = self._apply_spatial_tower_penalty_scored_candidates(candidates=feasible_candidates)
                 min_feasible_height_after_mm = min(int(c.terms.height_after_mm) for c in feasible_candidates)
@@ -573,6 +701,20 @@ class SchedulerV1:
                     selected = best_by_slack
 
             if selected is not None:
+                selected = self._apply_human_like_reentry_contract_on_scored_selection(
+                    selected=selected,
+                    feasible_candidates=feasible_candidates,
+                    pallets=sim_state.pallets,
+                )
+                if (
+                    hard_floor_selected is not None
+                    and selected is hard_floor_selected.candidate
+                ):
+                    self._record_hard_floor_phase_choice(
+                        selected.plan,
+                        selected.terms.scalar_score,
+                        stand_mix_bonus_applied=bool(hard_floor_selected.stand_mix_bonus_applied),
+                    )
                 best_plan = selected.plan
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
@@ -630,6 +772,18 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        layer_opener_calls_local = 0
+        layer_opener_applied_local = 0
+        layer_opener_new_layer_applied_local = 0
+        layer_opener_active_prefix_applied_local = 0
+        layer_opener_selected_score_sum_local = 0.0
+        layer_opener_selected_thin_risk_sum_local = 0.0
+        layer_opener_selected_layer_closure_sum_local = 0.0
+        layer_opener_selected_fillability_sum_local = 0.0
+        layer_opener_selected_fragmentation_sum_local = 0.0
+        layer_opener_selected_prefix_placements_sum_local = 0
+        layer_opener_selected_count_local = 0
+        root_first_expansions: list[_BeamExpansion] = []
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -682,12 +836,46 @@ class SchedulerV1:
                     batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
                     batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
+                if depth == 0 and node.first_plan is None and expansions and bool(self.config.human_like_layer_opener_enabled):
+                    expansions, layer_opener_stats = self._apply_human_like_layer_opener_on_beam_expansions(
+                        node=node,
+                        expansions=expansions,
+                        deadline=deadline,
+                    )
+                    layer_opener_calls_local += int(layer_opener_stats["human_like_layer_opener_calls"])
+                    layer_opener_applied_local += int(layer_opener_stats["human_like_layer_opener_applied"])
+                    layer_opener_new_layer_applied_local += int(
+                        layer_opener_stats["human_like_layer_opener_new_layer_applied"]
+                    )
+                    layer_opener_active_prefix_applied_local += int(
+                        layer_opener_stats["human_like_layer_opener_active_prefix_applied"]
+                    )
+                    layer_opener_selected_score_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_score_sum"]
+                    )
+                    layer_opener_selected_thin_risk_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_thin_unfillable_mix_risk_sum"]
+                    )
+                    layer_opener_selected_layer_closure_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_layer_closure_score_sum"]
+                    )
+                    layer_opener_selected_fillability_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_fillability_score_sum"]
+                    )
+                    layer_opener_selected_fragmentation_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_fragmentation_penalty_sum"]
+                    )
+                    layer_opener_selected_prefix_placements_sum_local += int(
+                        layer_opener_stats["human_like_layer_opener_selected_prefix_placements_sum"]
+                    )
+                    layer_opener_selected_count_local += int(layer_opener_stats["human_like_layer_opener_selected_count"])
 
                 if depth == 0 and node.first_plan is None and expansions:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
                         expansions=expansions,
                         adjust_first_plan=True,
                     )
+                    root_first_expansions = list(expansions)
                     hard_floor_expansions = self._hard_floor_phase_filter_beam_expansions(
                         expansions=expansions,
                         pallets=node.pallets,
@@ -703,12 +891,19 @@ class SchedulerV1:
                             ),
                         )
                         chosen_plan = chosen.expansion.node.first_plan
+                        selected_expansion = self._apply_human_like_reentry_contract_on_beam_selection(
+                            selected=chosen.expansion,
+                            expansions=expansions,
+                            pallets=node.pallets,
+                        )
+                        selected_plan = selected_expansion.node.first_plan
                         if chosen_plan is not None:
-                            self._record_hard_floor_phase_choice(
-                                chosen_plan,
-                                chosen.base_score,
-                                stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
-                            )
+                            if self._plans_match(chosen_plan, selected_plan):
+                                self._record_hard_floor_phase_choice(
+                                    chosen_plan,
+                                    chosen.base_score,
+                                    stand_mix_bonus_applied=bool(chosen.stand_mix_bonus_applied),
+                                )
                             stats = {
                                 "enabled": True,
                                 "score_mode": str(self.config.score_mode),
@@ -722,7 +917,11 @@ class SchedulerV1:
                                 "feasible_first_min_height_mm": min(
                                     int(item.expansion.terms.height_after_mm) for item in hard_floor_expansions
                                 ),
-                                "selected_height_after_mm": self._resolve_height_after_mm(chosen_plan.preview),
+                                "selected_height_after_mm": (
+                                    self._resolve_height_after_mm(selected_plan.preview)
+                                    if selected_plan is not None
+                                    else self._resolve_height_after_mm(chosen_plan.preview)
+                                ),
                                 "height_slack_mm": int(self.config.height_slack_mm),
                                 "cutoff": bool(cutoff),
                                 "cutoff_reason": str(cutoff_reason),
@@ -732,8 +931,42 @@ class SchedulerV1:
                                     float(batchfill_selected_boxes_sum_local)
                                     / max(1, int(batchfill_selected_boxes_count_local))
                                 ),
+                                "human_like_layer_opener_calls": int(layer_opener_calls_local),
+                                "human_like_layer_opener_applied": int(layer_opener_applied_local),
+                                "human_like_layer_opener_new_layer_applied": int(layer_opener_new_layer_applied_local),
+                                "human_like_layer_opener_active_prefix_applied": int(
+                                    layer_opener_active_prefix_applied_local
+                                ),
+                                "human_like_layer_opener_selected_score_mean": float(
+                                    layer_opener_selected_score_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                                    layer_opener_selected_thin_risk_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                                    layer_opener_selected_layer_closure_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_fillability_score_mean": float(
+                                    layer_opener_selected_fillability_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                                    layer_opener_selected_fragmentation_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_prefix_placements_mean": float(
+                                    float(layer_opener_selected_prefix_placements_sum_local)
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_reentry_contract_enabled": bool(
+                                    getattr(self.config, "human_like_reentry_contract_enabled", False)
+                                ),
+                                "human_like_reentry_contract_active": bool(self._human_like_reentry_contract_active()),
                             }
-                            return chosen_plan, stats, None
+                            return (selected_plan or chosen_plan), stats, None
 
                 if depth == 0:
                     feasible_first_candidates += len(expansions)
@@ -814,11 +1047,54 @@ class SchedulerV1:
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
             ),
+            "human_like_layer_opener_calls": int(layer_opener_calls_local),
+            "human_like_layer_opener_applied": int(layer_opener_applied_local),
+            "human_like_layer_opener_new_layer_applied": int(layer_opener_new_layer_applied_local),
+            "human_like_layer_opener_active_prefix_applied": int(layer_opener_active_prefix_applied_local),
+            "human_like_layer_opener_selected_score_mean": float(
+                layer_opener_selected_score_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                layer_opener_selected_thin_risk_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                layer_opener_selected_layer_closure_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fillability_score_mean": float(
+                layer_opener_selected_fillability_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                layer_opener_selected_fragmentation_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_prefix_placements_mean": float(
+                float(layer_opener_selected_prefix_placements_sum_local) / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_reentry_contract_enabled": bool(
+                getattr(self.config, "human_like_reentry_contract_enabled", False)
+            ),
+            "human_like_reentry_contract_active": bool(self._human_like_reentry_contract_active()),
         }
 
-        if best_node.first_plan is None:
+        selected_plan = best_node.first_plan
+        if selected_plan is not None and root_first_expansions:
+            selected_expansion = self._find_expansion_for_plan(
+                plan=selected_plan,
+                expansions=root_first_expansions,
+            )
+            if selected_expansion is not None:
+                selected_expansion = self._apply_human_like_reentry_contract_on_beam_selection(
+                    selected=selected_expansion,
+                    expansions=root_first_expansions,
+                    pallets=root.pallets,
+                )
+                adjusted_plan = selected_expansion.node.first_plan
+                if adjusted_plan is not None:
+                    selected_plan = adjusted_plan
+                    stats["selected_height_after_mm"] = self._resolve_height_after_mm(selected_plan.preview)
+
+        if selected_plan is None:
             return None, stats, root_slack_stats
-        return best_node.first_plan, stats, root_slack_stats
+        return selected_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.score_mode == "min_height_then_gain":
@@ -1025,6 +1301,348 @@ class SchedulerV1:
             return int(getattr(placement, "layer_id"))
         except (TypeError, ValueError):
             return None
+
+    def _human_like_reentry_contract_active(self) -> bool:
+        if not bool(getattr(self.config, "human_like_reentry_contract_enabled", False)):
+            return False
+        require_opener = bool(getattr(self.config, "human_like_reentry_contract_require_opener", True))
+        if require_opener and not bool(getattr(self.config, "human_like_layer_opener_enabled", False)):
+            return False
+        return True
+
+    def _sync_l1_correction_budget_state(self, pallets: Mapping[int | str, PalletModel]) -> None:
+        if not self._l1_corrections_used_by_layer:
+            return
+        active_pallet_ids = set(pallets.keys())
+        stale_keys = [key for key in self._l1_corrections_used_by_layer if key[0] not in active_pallet_ids]
+        for key in stale_keys:
+            self._l1_corrections_used_by_layer.pop(key, None)
+
+    @staticmethod
+    def _active_layer_id_for_pallet(pallet: PalletModel) -> int | None:
+        layers = list(getattr(pallet, "layers", []) or [])
+        if not layers:
+            return None
+        return int(len(layers) - 1)
+
+    def _layer_drop_for_preview(self, *, pallet: PalletModel, preview: PlacementPreview | None) -> int:
+        active_layer_id = self._active_layer_id_for_pallet(pallet)
+        preview_layer_id = self._preview_layer_id(preview)
+        if active_layer_id is None or preview_layer_id is None:
+            return 0
+        return max(0, int(active_layer_id) - int(preview_layer_id))
+
+    def _layer_drop_for_plan(self, *, pallet: PalletModel, plan: PickPlan) -> int:
+        return self._layer_drop_for_preview(pallet=pallet, preview=plan.preview)
+
+    def _layer_drop_for_scored_candidate(self, *, pallet: PalletModel, candidate: _ScoredCandidate) -> int:
+        return self._layer_drop_for_preview(pallet=pallet, preview=candidate.plan.preview)
+
+    def _layer_drop_for_beam_expansion(self, *, pallet: PalletModel, expansion: _BeamExpansion) -> int:
+        first_plan = expansion.node.first_plan
+        if first_plan is None:
+            return 0
+        return self._layer_drop_for_plan(pallet=pallet, plan=first_plan)
+
+    @staticmethod
+    def _l1_budget_key(*, pallet_id: int | str, active_layer_id: int) -> tuple[int | str, int]:
+        return pallet_id, int(active_layer_id)
+
+    def _can_use_l1_correction_budget(self, *, pallet_id: int | str, active_layer_id: int) -> bool:
+        budget = max(0, int(getattr(self.config, "human_like_reentry_contract_l1_correction_budget_per_layer", 0) or 0))
+        if budget <= 0:
+            return False
+        key = self._l1_budget_key(pallet_id=pallet_id, active_layer_id=int(active_layer_id))
+        used = int(self._l1_corrections_used_by_layer.get(key, 0) or 0)
+        return int(used) < int(budget)
+
+    def _consume_l1_correction_budget(self, *, pallet_id: int | str, active_layer_id: int) -> bool:
+        if not self._can_use_l1_correction_budget(pallet_id=pallet_id, active_layer_id=active_layer_id):
+            return False
+        key = self._l1_budget_key(pallet_id=pallet_id, active_layer_id=int(active_layer_id))
+        self._l1_corrections_used_by_layer[key] = int(self._l1_corrections_used_by_layer.get(key, 0) or 0) + 1
+        self.l1_corrections_used += 1
+        return True
+
+    def _select_best_scored_candidate(self, *, candidates: Sequence[_ScoredCandidate]) -> _ScoredCandidate | None:
+        if not candidates:
+            return None
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+        best, _stats = choose_with_height_slack(
+            candidates=list(candidates),
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda c: int(c.terms.height_after_mm),
+            gain_frag_key_fn=self._gain_frag_candidate_key,
+        )
+        return best
+
+    def _select_best_beam_expansion(self, *, candidates: Sequence[_BeamExpansion]) -> _BeamExpansion | None:
+        if not candidates:
+            return None
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+        best, _stats = choose_with_height_slack(
+            candidates=list(candidates),
+            score_mode=self.config.score_mode,
+            height_slack_mm=int(self.config.height_slack_mm),
+            height_after_mm_fn=lambda c: int(c.terms.height_after_mm),
+            gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+        )
+        return best
+
+    def _trim_scored_candidates_for_reentry_contract(
+        self,
+        *,
+        candidates: Sequence[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        cap = max(1, int(getattr(self.config, "human_like_reentry_contract_shallow_candidate_cap", 6) or 6))
+        if len(candidates) <= cap:
+            return list(candidates)
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            ordered = sorted(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+            return list(ordered[:cap])
+        ordered = sorted(candidates, key=lambda c: float(c.terms.scalar_score), reverse=True)
+        return list(ordered[:cap])
+
+    def _trim_beam_expansions_for_reentry_contract(
+        self,
+        *,
+        candidates: Sequence[_BeamExpansion],
+    ) -> list[_BeamExpansion]:
+        cap = max(1, int(getattr(self.config, "human_like_reentry_contract_shallow_candidate_cap", 6) or 6))
+        if len(candidates) <= cap:
+            return list(candidates)
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            ordered = sorted(candidates, key=lambda c: self._min_height_then_gain_key(terms=c.terms, box=c.box))
+            return list(ordered[:cap])
+        ordered = sorted(candidates, key=lambda c: float(c.terms.scalar_score), reverse=True)
+        return list(ordered[:cap])
+
+    def _apply_human_like_reentry_contract_on_scored_selection(
+        self,
+        *,
+        selected: _ScoredCandidate,
+        feasible_candidates: Sequence[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> _ScoredCandidate:
+        if not self._human_like_reentry_contract_active():
+            return selected
+
+        pallet_id = selected.plan.pallet_id
+        pallet = pallets.get(pallet_id)
+        if pallet is None:
+            return selected
+        active_layer_id = self._active_layer_id_for_pallet(pallet)
+        if active_layer_id is None:
+            return selected
+
+        selected_drop = self._layer_drop_for_scored_candidate(pallet=pallet, candidate=selected)
+        max_shallow_drop = max(0, int(getattr(self.config, "human_like_reentry_contract_max_shallow_drop", 1) or 1))
+        margin = float(
+            getattr(self.config, "human_like_reentry_contract_deep_reentry_advantage_margin", 0.0) or 0.0
+        )
+        allow_only_if_no_shallow = bool(
+            getattr(self.config, "human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow", False)
+        )
+
+        group = [c for c in feasible_candidates if c.plan.pallet_id == pallet_id]
+        if not group:
+            return selected
+
+        if selected_drop == 1:
+            if int(max_shallow_drop) < 1:
+                l0_candidates = [c for c in group if self._layer_drop_for_scored_candidate(pallet=pallet, candidate=c) == 0]
+                replacement = self._select_best_scored_candidate(candidates=l0_candidates)
+                return replacement if replacement is not None else selected
+            if self._consume_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                return selected
+            l0_candidates = [c for c in group if self._layer_drop_for_scored_candidate(pallet=pallet, candidate=c) == 0]
+            replacement = self._select_best_scored_candidate(candidates=l0_candidates)
+            return replacement if replacement is not None else selected
+
+        if selected_drop < 2:
+            return selected
+
+        self.deep_reentry_attempts += 1
+        shallow_candidates: list[_ScoredCandidate] = []
+        shallow_l0_candidates: list[_ScoredCandidate] = []
+        for candidate in group:
+            drop = self._layer_drop_for_scored_candidate(pallet=pallet, candidate=candidate)
+            if drop == 0:
+                shallow_candidates.append(candidate)
+                shallow_l0_candidates.append(candidate)
+                continue
+            if 1 <= drop <= int(max_shallow_drop):
+                if not self._can_use_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                    continue
+                shallow_candidates.append(candidate)
+
+        if not shallow_candidates:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        trimmed_shallow = self._trim_scored_candidates_for_reentry_contract(candidates=shallow_candidates)
+        best_shallow = self._select_best_scored_candidate(candidates=trimmed_shallow)
+        if best_shallow is None:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        selected_score = float(selected.terms.scalar_score)
+        shallow_score = float(best_shallow.terms.scalar_score)
+        deep_wins_by_margin = selected_score >= (shallow_score + float(margin))
+
+        if not allow_only_if_no_shallow and deep_wins_by_margin:
+            self.deep_reentry_allowed_margin_win += 1
+            return selected
+
+        shallow_drop = self._layer_drop_for_scored_candidate(pallet=pallet, candidate=best_shallow)
+        if shallow_drop == 1 and not self._consume_l1_correction_budget(
+            pallet_id=pallet_id,
+            active_layer_id=int(active_layer_id),
+        ):
+            replacement_l0 = self._select_best_scored_candidate(candidates=shallow_l0_candidates)
+            if replacement_l0 is None:
+                return selected
+            best_shallow = replacement_l0
+
+        self.deep_reentry_vetoed += 1
+        return best_shallow
+
+    def _apply_human_like_reentry_contract_on_beam_selection(
+        self,
+        *,
+        selected: _BeamExpansion,
+        expansions: Sequence[_BeamExpansion],
+        pallets: Mapping[int | str, PalletModel],
+    ) -> _BeamExpansion:
+        if not self._human_like_reentry_contract_active():
+            return selected
+
+        pallet_id = selected.box.destination
+        if pallet_id is None:
+            return selected
+        pallet = pallets.get(pallet_id)
+        if pallet is None:
+            return selected
+        active_layer_id = self._active_layer_id_for_pallet(pallet)
+        if active_layer_id is None:
+            return selected
+
+        selected_drop = self._layer_drop_for_beam_expansion(pallet=pallet, expansion=selected)
+        max_shallow_drop = max(0, int(getattr(self.config, "human_like_reentry_contract_max_shallow_drop", 1) or 1))
+        margin = float(
+            getattr(self.config, "human_like_reentry_contract_deep_reentry_advantage_margin", 0.0) or 0.0
+        )
+        allow_only_if_no_shallow = bool(
+            getattr(self.config, "human_like_reentry_contract_allow_deep_reentry_only_if_no_shallow", False)
+        )
+
+        group = [e for e in expansions if e.box.destination == pallet_id]
+        if not group:
+            return selected
+
+        if selected_drop == 1:
+            if int(max_shallow_drop) < 1:
+                l0_candidates = [e for e in group if self._layer_drop_for_beam_expansion(pallet=pallet, expansion=e) == 0]
+                replacement = self._select_best_beam_expansion(candidates=l0_candidates)
+                return replacement if replacement is not None else selected
+            if self._consume_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                return selected
+            l0_candidates = [e for e in group if self._layer_drop_for_beam_expansion(pallet=pallet, expansion=e) == 0]
+            replacement = self._select_best_beam_expansion(candidates=l0_candidates)
+            return replacement if replacement is not None else selected
+
+        if selected_drop < 2:
+            return selected
+
+        self.deep_reentry_attempts += 1
+        shallow_candidates: list[_BeamExpansion] = []
+        shallow_l0_candidates: list[_BeamExpansion] = []
+        for candidate in group:
+            drop = self._layer_drop_for_beam_expansion(pallet=pallet, expansion=candidate)
+            if drop == 0:
+                shallow_candidates.append(candidate)
+                shallow_l0_candidates.append(candidate)
+                continue
+            if 1 <= drop <= int(max_shallow_drop):
+                if not self._can_use_l1_correction_budget(pallet_id=pallet_id, active_layer_id=int(active_layer_id)):
+                    continue
+                shallow_candidates.append(candidate)
+
+        if not shallow_candidates:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        trimmed_shallow = self._trim_beam_expansions_for_reentry_contract(candidates=shallow_candidates)
+        best_shallow = self._select_best_beam_expansion(candidates=trimmed_shallow)
+        if best_shallow is None:
+            self.deep_reentry_allowed_no_shallow += 1
+            return selected
+
+        selected_score = float(selected.terms.scalar_score)
+        shallow_score = float(best_shallow.terms.scalar_score)
+        deep_wins_by_margin = selected_score >= (shallow_score + float(margin))
+
+        if not allow_only_if_no_shallow and deep_wins_by_margin:
+            self.deep_reentry_allowed_margin_win += 1
+            return selected
+
+        shallow_drop = self._layer_drop_for_beam_expansion(pallet=pallet, expansion=best_shallow)
+        if shallow_drop == 1 and not self._consume_l1_correction_budget(
+            pallet_id=pallet_id,
+            active_layer_id=int(active_layer_id),
+        ):
+            replacement_l0 = self._select_best_beam_expansion(candidates=shallow_l0_candidates)
+            if replacement_l0 is None:
+                return selected
+            best_shallow = replacement_l0
+
+        self.deep_reentry_vetoed += 1
+        return best_shallow
+
+    @staticmethod
+    def _plans_match(a: PickPlan | None, b: PickPlan | None) -> bool:
+        if a is None or b is None:
+            return False
+        return (
+            int(a.ramp_id) == int(b.ramp_id)
+            and int(a.buffer_index) == int(b.buffer_index)
+            and str(a.pallet_id) == str(b.pallet_id)
+            and str(a.box_id) == str(b.box_id)
+        )
+
+    def _find_expansion_for_plan(
+        self,
+        *,
+        plan: PickPlan | None,
+        expansions: Sequence[_BeamExpansion],
+    ) -> _BeamExpansion | None:
+        if plan is None:
+            return None
+        for expansion in expansions:
+            first_plan = expansion.node.first_plan
+            if self._plans_match(first_plan, plan):
+                return expansion
+        return None
+
+    def _record_selected_reentry_metrics(
+        self,
+        *,
+        plan: PickPlan,
+        pallets: Mapping[int | str, PalletModel],
+    ) -> None:
+        pallet = pallets.get(plan.pallet_id)
+        if pallet is None:
+            return
+        drop = max(0, int(self._layer_drop_for_plan(pallet=pallet, plan=plan)))
+        self.max_layer_drop = max(int(self.max_layer_drop), int(drop))
+        if int(drop) <= 0:
+            return
+        self.reentries_total += 1
+        if int(drop) >= 2:
+            self.reentries_drop_ge_2_count += 1
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))
@@ -1376,6 +1994,578 @@ class SchedulerV1:
             "batchfill_applied": int(batchfill_applied_local),
             "selected_boxes_sum": int(batchfill_selected_boxes_sum_local),
             "selected_boxes_count": int(batchfill_selected_boxes_count_local),
+        }
+
+    def _accumulate_human_like_layer_opener_stats(
+        self,
+        *,
+        calls: int,
+        applied: int,
+        new_layer_applied: int,
+        active_prefix_applied: int,
+        selected_score_sum: float,
+        selected_thin_risk_sum: float,
+        selected_layer_closure_sum: float,
+        selected_fillability_sum: float,
+        selected_fragmentation_penalty_sum: float,
+        selected_prefix_placements_sum: int,
+        selected_count: int,
+    ) -> None:
+        self.human_like_layer_opener_calls += max(0, int(calls))
+        self.human_like_layer_opener_applied += max(0, int(applied))
+        self.human_like_layer_opener_new_layer_applied += max(0, int(new_layer_applied))
+        self.human_like_layer_opener_active_prefix_applied += max(0, int(active_prefix_applied))
+        self.human_like_layer_opener_selected_score_sum += max(0.0, float(selected_score_sum))
+        self.human_like_layer_opener_selected_thin_unfillable_mix_risk_sum += max(0.0, float(selected_thin_risk_sum))
+        self.human_like_layer_opener_selected_layer_closure_sum += max(0.0, float(selected_layer_closure_sum))
+        self.human_like_layer_opener_selected_fillability_sum += max(0.0, float(selected_fillability_sum))
+        self.human_like_layer_opener_selected_fragmentation_penalty_sum += max(
+            0.0,
+            float(selected_fragmentation_penalty_sum),
+        )
+        self.human_like_layer_opener_selected_prefix_placements_sum += max(0, int(selected_prefix_placements_sum))
+        self.human_like_layer_opener_selected_count += max(0, int(selected_count))
+
+    @staticmethod
+    def _remove_first_matching_box(*, boxes: list[Box], target: Box) -> None:
+        target_id = getattr(target, "box_id", None)
+        for idx, queued in enumerate(boxes):
+            if queued is target:
+                boxes.pop(idx)
+                return
+            if getattr(queued, "box_id", None) == target_id:
+                boxes.pop(idx)
+                return
+
+    @staticmethod
+    def _layer_placement_count(pallet: PalletModel, *, layer_id: int) -> int:
+        count = 0
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                if int(getattr(placement, "layer_id", -1)) == int(layer_id):
+                    count += 1
+            except Exception:
+                continue
+        return int(count)
+
+    def _pick_human_like_target_layer_id(
+        self,
+        *,
+        pallet: PalletModel,
+        preview_layer_ids: Sequence[int | None],
+    ) -> tuple[int, bool] | None:
+        prefix_len = max(1, int(getattr(self.config, "human_like_layer_opener_prefix_len", 3) or 3))
+        layers = list(getattr(pallet, "layers", []) or [])
+        start_layer_id = int(len(layers))
+        active_layer_id = (start_layer_id - 1) if start_layer_id > 0 else None
+        has_active_candidate = bool(
+            active_layer_id is not None and any(layer_id == active_layer_id for layer_id in preview_layer_ids)
+        )
+        has_new_layer_candidate = bool(any(layer_id == start_layer_id for layer_id in preview_layer_ids))
+
+        if active_layer_id is not None and has_active_candidate:
+            active_count = self._layer_placement_count(pallet, layer_id=int(active_layer_id))
+            if 0 < int(active_count) < int(prefix_len):
+                return int(active_layer_id), False
+
+        if has_new_layer_candidate and not has_active_candidate:
+            return int(start_layer_id), True
+        return None
+
+    @staticmethod
+    def _rect_dims(rect: object) -> tuple[int, int]:
+        width = getattr(rect, "w", None)
+        if width is None:
+            width = getattr(rect, "width", None)
+        if width is None:
+            width = getattr(rect, "width_mm", None)
+        if width is None:
+            width = getattr(rect, "length_mm", None)
+
+        height = getattr(rect, "h", None)
+        if height is None:
+            height = getattr(rect, "height", None)
+        if height is None:
+            height = getattr(rect, "height_mm", None)
+        if height is None:
+            height = getattr(rect, "width_mm", None)
+
+        try:
+            rw = max(0, int(width or 0))
+        except Exception:
+            rw = 0
+        try:
+            rh = max(0, int(height or 0))
+        except Exception:
+            rh = 0
+        return int(rw), int(rh)
+
+    def _simulate_human_like_layer_prefix(
+        self,
+        *,
+        pallet: PalletModel,
+        starter_box: Box,
+        pool_boxes: Sequence[Box],
+        target_layer_id: int,
+        deadline: float | None,
+    ) -> _LayerOpenerPatternEval | None:
+        try:
+            pallet_clone = copy.deepcopy(pallet)
+        except Exception:
+            return None
+
+        try:
+            starter_preview_local = self._preview_place(pallet_clone, starter_box)
+            if not starter_preview_local.feasible:
+                return None
+            starter_placement = pallet_clone.commit_place(starter_preview_local)
+        except Exception:
+            return None
+
+        placed_layer_id = int(getattr(starter_placement, "layer_id", -1))
+        if int(placed_layer_id) != int(target_layer_id):
+            return None
+
+        prefix_len = max(1, int(getattr(self.config, "human_like_layer_opener_prefix_len", 3) or 3))
+        candidate_cap = max(1, int(getattr(self.config, "human_like_layer_opener_candidate_cap", 6) or 6))
+        fragmentation_sum = max(0.0, float(getattr(starter_preview_local, "fragmentation", 0.0) or 0.0))
+        simulated_prefix_placements = 1
+
+        remaining_boxes = list(pool_boxes)
+        self._remove_first_matching_box(boxes=remaining_boxes, target=starter_box)
+
+        while int(simulated_prefix_placements) < int(prefix_len):
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            feasible_fillers: list[tuple[float, float, PlacementPreview, Box]] = []
+            for box in remaining_boxes:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                preview = self._preview_place(pallet_clone, box)
+                if not preview.feasible:
+                    continue
+                preview_layer_id = self._preview_layer_id(preview)
+                if preview_layer_id != int(target_layer_id):
+                    continue
+                rank_score = (
+                    float(preview.packing_gain)
+                    - float(preview.fragmentation)
+                    + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
+                )
+                feasible_fillers.append((rank_score, -float(preview.fragmentation), preview, box))
+
+            if not feasible_fillers:
+                break
+            feasible_fillers.sort(key=lambda item: (float(item[0]), float(item[1])), reverse=True)
+            _rank_score, _neg_frag, chosen_preview, chosen_box = feasible_fillers[:candidate_cap][0]
+            try:
+                pallet_clone.commit_place(chosen_preview)
+            except Exception:
+                break
+            fragmentation_sum += max(0.0, float(getattr(chosen_preview, "fragmentation", 0.0) or 0.0))
+            simulated_prefix_placements += 1
+            self._remove_first_matching_box(boxes=remaining_boxes, target=chosen_box)
+
+        layers_after = list(getattr(pallet_clone, "layers", []) or [])
+        if int(target_layer_id) < 0 or int(target_layer_id) >= len(layers_after):
+            return None
+        layer_state = layers_after[int(target_layer_id)]
+        free_rects = list(getattr(getattr(layer_state, "bin", None), "free_rects", []) or [])
+        bin_area = float(max(1, int(getattr(pallet_clone, "bin_area_mm2", 1) or 1)))
+        free_area = 0.0
+        max_rect_area = 0.0
+        for rect in free_rects:
+            rw, rh = self._rect_dims(rect)
+            area = float(max(0, int(rw)) * max(0, int(rh)))
+            free_area += area
+            max_rect_area = max(float(max_rect_area), float(area))
+        fill_ratio = max(0.0, min(1.0, 1.0 - (float(free_area) / float(bin_area))))
+        continuity_score = float(max_rect_area) / max(1.0, float(free_area)) if free_area > 0.0 else 1.0
+
+        fit_candidates = 0
+        future_considered = 0
+        for box in remaining_boxes[:candidate_cap]:
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            future_considered += 1
+            future_preview = self._preview_place(pallet_clone, box)
+            if future_preview.feasible and self._preview_layer_id(future_preview) == int(target_layer_id):
+                fit_candidates += 1
+        fillability_score = float(fit_candidates) / float(max(1, future_considered))
+
+        dims_by_box: list[tuple[int, int]] = []
+        for box in remaining_boxes:
+            try:
+                bl = int(getattr(box, "length_mm", 0) or 0)
+                bw = int(getattr(box, "width_mm", 0) or 0)
+            except Exception:
+                continue
+            if bl <= 0 or bw <= 0:
+                continue
+            dims_by_box.append((bl, bw))
+            if bl != bw:
+                dims_by_box.append((bw, bl))
+        min_short_side = min((min(dim[0], dim[1]) for dim in dims_by_box), default=0)
+        thin_threshold = max(1, int(0.85 * float(min_short_side))) if min_short_side > 0 else 1
+
+        thin_area = 0.0
+        unfillable_area = 0.0
+        thin_unfillable_mix_area = 0.0
+        for rect in free_rects:
+            rw, rh = self._rect_dims(rect)
+            area = float(max(0, int(rw)) * max(0, int(rh)))
+            if area <= 0.0:
+                continue
+            short_side = min(int(rw), int(rh))
+            is_thin = bool(short_side < int(thin_threshold))
+            can_fit_any = False
+            for dl, dw in dims_by_box:
+                if int(dl) <= int(rw) and int(dw) <= int(rh):
+                    can_fit_any = True
+                    break
+            if is_thin:
+                thin_area += area
+            if not can_fit_any:
+                unfillable_area += area
+            if is_thin and not can_fit_any:
+                thin_unfillable_mix_area += area
+        thin_unfillable_mix_risk = (
+            float(thin_unfillable_mix_area) + 0.50 * float(unfillable_area) + 0.25 * float(thin_area)
+        ) / float(bin_area)
+
+        fragmentation_penalty = (
+            float(fragmentation_sum) / float(max(1, int(simulated_prefix_placements)))
+        ) + 0.25 * (float(len(free_rects)) / float(max(1, int(simulated_prefix_placements) + 1)))
+
+        layer_closure_score = (
+            0.55 * float(fill_ratio)
+            + 0.30 * float(fillability_score)
+            + 0.15 * float(continuity_score)
+        )
+        closure_weight = float(getattr(self.config, "human_like_layer_opener_closure_weight", 1.0) or 1.0)
+        poison_weight = float(getattr(self.config, "human_like_layer_opener_poison_penalty_weight", 1.0) or 1.0)
+        fragmentation_weight = float(
+            getattr(self.config, "human_like_layer_opener_fragmentation_weight", 1.0) or 1.0
+        )
+        score = (
+            float(closure_weight) * float(layer_closure_score)
+            - float(poison_weight) * float(thin_unfillable_mix_risk)
+            - float(fragmentation_weight) * float(fragmentation_penalty)
+        )
+        return _LayerOpenerPatternEval(
+            score=float(score),
+            thin_unfillable_mix_risk=float(thin_unfillable_mix_risk),
+            layer_closure_score=float(layer_closure_score),
+            fillability_score=float(fillability_score),
+            fragmentation_penalty=float(fragmentation_penalty),
+            simulated_prefix_placements=int(simulated_prefix_placements),
+        )
+
+    def _apply_human_like_layer_opener_on_scored_candidates(
+        self,
+        *,
+        feasible_candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+        window_boxes_by_pallet_id: Mapping[int | str, Sequence[Box]],
+        deadline: float | None,
+    ) -> tuple[list[_ScoredCandidate], dict[str, float]]:
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        pallet_order: list[int | str] = []
+        for candidate in feasible_candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        calls_local = 1 if grouped else 0
+        applied_local = 0
+        new_layer_applied_local = 0
+        active_prefix_applied_local = 0
+        selected_score_sum_local = 0.0
+        selected_thin_risk_sum_local = 0.0
+        selected_layer_closure_sum_local = 0.0
+        selected_fillability_sum_local = 0.0
+        selected_fragmentation_penalty_sum_local = 0.0
+        selected_prefix_placements_sum_local = 0
+        selected_count_local = 0
+        filtered_candidates: list[_ScoredCandidate] = []
+
+        candidate_cap = max(1, int(getattr(self.config, "human_like_layer_opener_candidate_cap", 6) or 6))
+        for pallet_id in pallet_order:
+            group = grouped.get(pallet_id, [])
+            pallet = pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered_candidates.extend(group)
+                continue
+
+            preview_layer_ids = [self._preview_layer_id(candidate.plan.preview) for candidate in group]
+            target = self._pick_human_like_target_layer_id(
+                pallet=pallet,
+                preview_layer_ids=preview_layer_ids,
+            )
+            if target is None:
+                filtered_candidates.extend(group)
+                continue
+            target_layer_id, is_new_layer_opening = target
+            scoped_candidates = [
+                candidate
+                for candidate in group
+                if self._preview_layer_id(candidate.plan.preview) == int(target_layer_id)
+            ]
+            if not scoped_candidates:
+                filtered_candidates.extend(group)
+                continue
+
+            starters = sorted(
+                scoped_candidates,
+                key=lambda candidate: float(candidate.terms.scalar_score),
+                reverse=True,
+            )[:candidate_cap]
+            pool_boxes = list(window_boxes_by_pallet_id.get(pallet_id, []) or [])
+            if not pool_boxes:
+                pool_boxes = [candidate.box for candidate in group]
+
+            best_candidate: _ScoredCandidate | None = None
+            best_eval: _LayerOpenerPatternEval | None = None
+            best_key: tuple[Any, ...] | None = None
+            for starter in starters:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                sim = self._simulate_human_like_layer_prefix(
+                    pallet=pallet,
+                    starter_box=starter.box,
+                    pool_boxes=pool_boxes,
+                    target_layer_id=int(target_layer_id),
+                    deadline=deadline,
+                )
+                if sim is None:
+                    continue
+                key = (
+                    float(sim.score),
+                    float(sim.layer_closure_score),
+                    -float(sim.thin_unfillable_mix_risk),
+                    float(starter.terms.scalar_score),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_candidate = starter
+                    best_eval = sim
+
+            if best_candidate is None or best_eval is None:
+                filtered_candidates.extend(group)
+                continue
+
+            applied_local += 1
+            if bool(is_new_layer_opening):
+                new_layer_applied_local += 1
+            else:
+                active_prefix_applied_local += 1
+            selected_score_sum_local += float(best_eval.score)
+            selected_thin_risk_sum_local += float(best_eval.thin_unfillable_mix_risk)
+            selected_layer_closure_sum_local += float(best_eval.layer_closure_score)
+            selected_fillability_sum_local += float(best_eval.fillability_score)
+            selected_fragmentation_penalty_sum_local += float(best_eval.fragmentation_penalty)
+            selected_prefix_placements_sum_local += int(best_eval.simulated_prefix_placements)
+            selected_count_local += 1
+
+            scoped_ids = {id(candidate) for candidate in scoped_candidates}
+            for candidate in group:
+                if id(candidate) in scoped_ids and candidate is not best_candidate:
+                    continue
+                filtered_candidates.append(candidate)
+
+        self._accumulate_human_like_layer_opener_stats(
+            calls=calls_local,
+            applied=applied_local,
+            new_layer_applied=new_layer_applied_local,
+            active_prefix_applied=active_prefix_applied_local,
+            selected_score_sum=selected_score_sum_local,
+            selected_thin_risk_sum=selected_thin_risk_sum_local,
+            selected_layer_closure_sum=selected_layer_closure_sum_local,
+            selected_fillability_sum=selected_fillability_sum_local,
+            selected_fragmentation_penalty_sum=selected_fragmentation_penalty_sum_local,
+            selected_prefix_placements_sum=selected_prefix_placements_sum_local,
+            selected_count=selected_count_local,
+        )
+        return filtered_candidates, {
+            "human_like_layer_opener_calls": int(calls_local),
+            "human_like_layer_opener_applied": int(applied_local),
+            "human_like_layer_opener_new_layer_applied": int(new_layer_applied_local),
+            "human_like_layer_opener_active_prefix_applied": int(active_prefix_applied_local),
+            "human_like_layer_opener_selected_score_mean": float(
+                float(selected_score_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                float(selected_thin_risk_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                float(selected_layer_closure_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fillability_score_mean": float(
+                float(selected_fillability_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                float(selected_fragmentation_penalty_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_prefix_placements_mean": float(
+                float(selected_prefix_placements_sum_local) / max(1, int(selected_count_local))
+            ),
+        }
+
+    def _apply_human_like_layer_opener_on_beam_expansions(
+        self,
+        *,
+        node: _BeamNode,
+        expansions: list[_BeamExpansion],
+        deadline: float | None,
+    ) -> tuple[list[_BeamExpansion], dict[str, float]]:
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        pallet_order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        calls_local = 1 if grouped else 0
+        applied_local = 0
+        new_layer_applied_local = 0
+        active_prefix_applied_local = 0
+        selected_score_sum_local = 0.0
+        selected_thin_risk_sum_local = 0.0
+        selected_layer_closure_sum_local = 0.0
+        selected_fillability_sum_local = 0.0
+        selected_fragmentation_penalty_sum_local = 0.0
+        selected_prefix_placements_sum_local = 0
+        selected_count_local = 0
+        filtered: list[_BeamExpansion] = []
+        handled_pallets: set[int | str] = set()
+
+        candidate_cap = max(1, int(getattr(self.config, "human_like_layer_opener_candidate_cap", 6) or 6))
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None or pallet_id in handled_pallets:
+                if pallet_id is None:
+                    filtered.append(expansion)
+                continue
+            handled_pallets.add(pallet_id)
+
+            group = grouped.get(pallet_id, [])
+            pallet = node.pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered.extend(group)
+                continue
+
+            preview_layer_ids: list[int | None] = []
+            for item in group:
+                first_plan = item.node.first_plan
+                preview_layer_ids.append(self._preview_layer_id(first_plan.preview) if first_plan is not None else None)
+
+            target = self._pick_human_like_target_layer_id(
+                pallet=pallet,
+                preview_layer_ids=preview_layer_ids,
+            )
+            if target is None:
+                filtered.extend(group)
+                continue
+            target_layer_id, is_new_layer_opening = target
+
+            scoped_items: list[_BeamExpansion] = []
+            for item in group:
+                first_plan = item.node.first_plan
+                if first_plan is None:
+                    continue
+                if self._preview_layer_id(first_plan.preview) == int(target_layer_id):
+                    scoped_items.append(item)
+            if not scoped_items:
+                filtered.extend(group)
+                continue
+
+            starters = sorted(
+                scoped_items,
+                key=lambda item: float(item.terms.scalar_score),
+                reverse=True,
+            )[:candidate_cap]
+            pool_boxes = [item.box for item in group]
+
+            best_expansion: _BeamExpansion | None = None
+            best_eval: _LayerOpenerPatternEval | None = None
+            best_key: tuple[Any, ...] | None = None
+            for starter in starters:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                sim = self._simulate_human_like_layer_prefix(
+                    pallet=pallet,
+                    starter_box=starter.box,
+                    pool_boxes=pool_boxes,
+                    target_layer_id=int(target_layer_id),
+                    deadline=deadline,
+                )
+                if sim is None:
+                    continue
+                key = (
+                    float(sim.score),
+                    float(sim.layer_closure_score),
+                    -float(sim.thin_unfillable_mix_risk),
+                    float(starter.terms.scalar_score),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_expansion = starter
+                    best_eval = sim
+
+            if best_expansion is None or best_eval is None:
+                filtered.extend(group)
+                continue
+
+            applied_local += 1
+            if bool(is_new_layer_opening):
+                new_layer_applied_local += 1
+            else:
+                active_prefix_applied_local += 1
+            selected_score_sum_local += float(best_eval.score)
+            selected_thin_risk_sum_local += float(best_eval.thin_unfillable_mix_risk)
+            selected_layer_closure_sum_local += float(best_eval.layer_closure_score)
+            selected_fillability_sum_local += float(best_eval.fillability_score)
+            selected_fragmentation_penalty_sum_local += float(best_eval.fragmentation_penalty)
+            selected_prefix_placements_sum_local += int(best_eval.simulated_prefix_placements)
+            selected_count_local += 1
+
+            scoped_ids = {id(item) for item in scoped_items}
+            for item in group:
+                if id(item) in scoped_ids and item is not best_expansion:
+                    continue
+                filtered.append(item)
+
+        self._accumulate_human_like_layer_opener_stats(
+            calls=calls_local,
+            applied=applied_local,
+            new_layer_applied=new_layer_applied_local,
+            active_prefix_applied=active_prefix_applied_local,
+            selected_score_sum=selected_score_sum_local,
+            selected_thin_risk_sum=selected_thin_risk_sum_local,
+            selected_layer_closure_sum=selected_layer_closure_sum_local,
+            selected_fillability_sum=selected_fillability_sum_local,
+            selected_fragmentation_penalty_sum=selected_fragmentation_penalty_sum_local,
+            selected_prefix_placements_sum=selected_prefix_placements_sum_local,
+            selected_count=selected_count_local,
+        )
+        return filtered, {
+            "human_like_layer_opener_calls": int(calls_local),
+            "human_like_layer_opener_applied": int(applied_local),
+            "human_like_layer_opener_new_layer_applied": int(new_layer_applied_local),
+            "human_like_layer_opener_active_prefix_applied": int(active_prefix_applied_local),
+            "human_like_layer_opener_selected_score_sum": float(selected_score_sum_local),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_sum": float(selected_thin_risk_sum_local),
+            "human_like_layer_opener_selected_layer_closure_score_sum": float(selected_layer_closure_sum_local),
+            "human_like_layer_opener_selected_fillability_score_sum": float(selected_fillability_sum_local),
+            "human_like_layer_opener_selected_fragmentation_penalty_sum": float(selected_fragmentation_penalty_sum_local),
+            "human_like_layer_opener_selected_prefix_placements_sum": int(selected_prefix_placements_sum_local),
+            "human_like_layer_opener_selected_count": int(selected_count_local),
         }
 
     @staticmethod
