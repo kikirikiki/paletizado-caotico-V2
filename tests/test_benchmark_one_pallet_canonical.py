@@ -62,6 +62,9 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
         "micro-width=60",
         "score_mode=\"gain_frag\"",
         "use_active_layer_commit=true",
+        "use_layer_template_planner=true",
+        "layer_template_candidate_cap=9",
+        "layer_template_plan_cap=6",
     ])
 
     merged = bench.apply_param_overrides(base, overrides)
@@ -69,6 +72,8 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
     assert merged["micro_width"] == 60
     assert merged["score_mode"] == "gain_frag"
     assert bool(merged["use_early_layer_pattern_planner"]) is True
+    assert int(merged["layer_pattern_candidate_cap"]) == 9
+    assert int(merged["layer_pattern_prefix_depth"]) == 6
 
 
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
@@ -124,6 +129,12 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                     "active_layer_commit_replans_total": 4,
                     "active_layer_commit_fallback_same_layer_total": 2,
                     "active_layer_commit_closures_total": 1,
+                    "template_selected_total": 3,
+                    "template_abstains_total": 1,
+                    "template_rebuilds_total": 2,
+                    "committed_layer_plan_len_mean": 3.5,
+                    "template_area_fill_mean": 0.42,
+                    "template_type_histogram": {"Rows-X": 2, "Split-Left-Right": 1},
                     "deadlock_count": 0,
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
@@ -209,6 +220,12 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(r["active_layer_commit_replans_total"] == 4 for r in rows)
     assert all(r["active_layer_commit_fallback_same_layer_total"] == 2 for r in rows)
     assert all(r["active_layer_commit_closures_total"] == 1 for r in rows)
+    assert all(r["template_selected_total"] == 3 for r in rows)
+    assert all(r["template_abstains_total"] == 1 for r in rows)
+    assert all(r["template_rebuilds_total"] == 2 for r in rows)
+    assert all(abs(float(r["committed_layer_plan_len_mean"]) - 3.5) < 1e-9 for r in rows)
+    assert all(abs(float(r["template_area_fill_mean"]) - 0.42) < 1e-9 for r in rows)
+    assert all("Rows-X" in r["template_type_histogram_json"] for r in rows)
     assert all(r["deadlock_count"] == 0 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(r["reentries_total"] == 1 for r in rows)
@@ -239,6 +256,12 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "active_layer_commit_replans_total" in csv_row
     assert "active_layer_commit_fallback_same_layer_total" in csv_row
     assert "active_layer_commit_closures_total" in csv_row
+    assert "template_selected_total" in csv_row
+    assert "template_abstains_total" in csv_row
+    assert "template_rebuilds_total" in csv_row
+    assert "committed_layer_plan_len_mean" in csv_row
+    assert "template_type_histogram_json" in csv_row
+    assert "template_area_fill_mean" in csv_row
     assert "reentries_total" in csv_row
     assert "deadlock_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
@@ -262,6 +285,12 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
                     "active_layer_commit_replans_total": 6,
                     "active_layer_commit_fallback_same_layer_total": 2,
                     "active_layer_commit_closures_total": 3,
+                    "template_selected_total": 4,
+                    "template_abstains_total": 0,
+                    "template_rebuilds_total": 3,
+                    "committed_layer_plan_len_mean": 3.2,
+                    "template_area_fill_mean": 0.5,
+                    "template_type_histogram": {"Rows-Y": 4},
                     "deadlock_count": 0,
                     "layer_monotonicity_first_pallet_by_dest": {
                         "1": {
@@ -301,9 +330,12 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
         set_overrides=[
             "use_early_layer_pattern_planner=true",
             "use_active_layer_commit=true",
+            "use_layer_template_planner=true",
             "layer_pattern_prefix_depth=3",
             "layer_pattern_beam_width=4",
             "layer_pattern_candidate_cap=8",
+            "layer_template_candidate_cap=8",
+            "layer_template_plan_cap=6",
         ],
         seeds_override=[50021],
         variant_name="feature_on",
@@ -317,6 +349,12 @@ def test_run_benchmark_feature_on_keeps_strict_monotonicity(
     assert row["active_layer_commit_replans_total"] == 6
     assert row["active_layer_commit_fallback_same_layer_total"] == 2
     assert row["active_layer_commit_closures_total"] == 3
+    assert row["template_selected_total"] == 4
+    assert row["template_abstains_total"] == 0
+    assert row["template_rebuilds_total"] == 3
+    assert abs(float(row["committed_layer_plan_len_mean"]) - 3.2) < 1e-9
+    assert abs(float(row["template_area_fill_mean"]) - 0.5) < 1e-9
+    assert "Rows-Y" in row["template_type_histogram_json"]
     assert abs(float(row["monotonic_stack_rate"]) - 1.0) < 1e-9
     assert int(row["reentries_total"]) == 0
     assert int(row["deadlock_count"]) == 0

@@ -20,9 +20,9 @@ from ..scoring.height_slack import (
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
 if TYPE_CHECKING:
-    from ..integration.early_layer_pattern_planner import (
-        EarlyLayerPatternPlanner,
+    from ..integration.layer_template_planner import (
         LayerOpeningPlan,
+        LayerTemplatePlanner,
         PlannedLayerPlacement,
     )
 
@@ -68,9 +68,12 @@ class SchedulerConfig:
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
     use_early_layer_pattern_planner: bool = False
+    use_layer_template_planner: bool = False
     layer_pattern_prefix_depth: int = 3
     layer_pattern_beam_width: int = 4
     layer_pattern_candidate_cap: int = 8
+    layer_template_candidate_cap: int = 8
+    layer_template_plan_cap: int = 6
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -106,6 +109,16 @@ class SchedulerConfig:
             self,
             "layer_pattern_candidate_cap",
             max(1, int(self.layer_pattern_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "layer_template_candidate_cap",
+            max(1, int(self.layer_template_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "layer_template_plan_cap",
+            max(1, int(self.layer_template_plan_cap)),
         )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
@@ -308,8 +321,17 @@ class SchedulerV1:
         self.active_layer_commit_replans_total = 0
         self.active_layer_commit_fallback_same_layer_total = 0
         self.active_layer_commit_closures_total = 0
-        self._early_layer_pattern_planner: EarlyLayerPatternPlanner | None = None
-        self._early_layer_pattern_signature: tuple[int, int, int] | None = None
+        self._layer_template_planner: LayerTemplatePlanner | None = None
+        self._layer_template_signature: tuple[int, int] | None = None
+        self.template_selected_total = 0
+        self.template_abstains_total = 0
+        self.template_rebuilds_total = 0
+        self.committed_layer_plan_len_sum = 0
+        self.committed_layer_plan_len_count = 0
+        self._active_layer_committed_moves = 0
+        self.template_area_fill_sum = 0.0
+        self.template_area_fill_count = 0
+        self.template_type_histogram: dict[str, int] = {}
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -340,7 +362,7 @@ class SchedulerV1:
                 "items_feasible": 0,
                 "cutoff": False,
                 "cutoff_reason": "",
-                "mode": "early_layer_pattern_planner",
+                "mode": "layer_template_planner",
                 "planner_invocations": int(self.planner_invocations),
                 "planner_abstains": int(self.planner_abstains),
             }
@@ -404,27 +426,49 @@ class SchedulerV1:
             self._update_spatial_state_from_selected_plan(plan)
         return plan
 
-    def _ensure_early_layer_pattern_planner(self) -> EarlyLayerPatternPlanner | None:
-        if not bool(getattr(self.config, "use_early_layer_pattern_planner", False)):
-            self._early_layer_pattern_planner = None
-            self._early_layer_pattern_signature = None
+    def _template_planner_enabled(self) -> bool:
+        # Compat backward-compatible: el flag legacy activa monotonicidad y planner de capa.
+        return bool(
+            getattr(self.config, "use_layer_template_planner", False)
+            or getattr(self.config, "use_early_layer_pattern_planner", False)
+        )
+
+    def _ensure_layer_template_planner(self) -> LayerTemplatePlanner | None:
+        if not self._template_planner_enabled():
+            self._layer_template_planner = None
+            self._layer_template_signature = None
             return None
 
-        signature = (
-            int(getattr(self.config, "layer_pattern_prefix_depth", 3) or 3),
-            int(getattr(self.config, "layer_pattern_beam_width", 4) or 4),
-            int(getattr(self.config, "layer_pattern_candidate_cap", 8) or 8),
-        )
-        if self._early_layer_pattern_planner is None or self._early_layer_pattern_signature != signature:
-            from ..integration.early_layer_pattern_planner import EarlyLayerPatternPlanner
-
-            self._early_layer_pattern_planner = EarlyLayerPatternPlanner(
-                prefix_depth=int(signature[0]),
-                beam_width=int(signature[1]),
-                candidate_cap=int(signature[2]),
+        candidate_cap = int(
+            getattr(
+                self.config,
+                "layer_template_candidate_cap",
+                getattr(self.config, "layer_pattern_candidate_cap", 8),
             )
-            self._early_layer_pattern_signature = signature
-        return self._early_layer_pattern_planner
+            or 8
+        )
+        plan_cap = int(
+            getattr(
+                self.config,
+                "layer_template_plan_cap",
+                getattr(self.config, "layer_pattern_prefix_depth", 6),
+            )
+            or 6
+        )
+        signature = (max(1, int(candidate_cap)), max(1, int(plan_cap)))
+        if self._layer_template_planner is None or self._layer_template_signature != signature:
+            from ..integration.layer_template_planner import LayerTemplatePlanner
+
+            self._layer_template_planner = LayerTemplatePlanner(
+                candidate_cap=int(signature[0]),
+                plan_cap=int(signature[1]),
+            )
+            self._layer_template_signature = signature
+        return self._layer_template_planner
+
+    # Compatibilidad para tests existentes y monkeypatching.
+    def _ensure_early_layer_pattern_planner(self) -> LayerTemplatePlanner | None:
+        return self._ensure_layer_template_planner()
 
     @staticmethod
     def _box_id_matches(lhs: int | str | None, rhs: int | str | None) -> bool:
@@ -433,7 +477,7 @@ class SchedulerV1:
         return str(lhs) == str(rhs)
 
     def _active_layer_commit_enabled(self) -> bool:
-        return bool(getattr(self.config, "use_early_layer_pattern_planner", False))
+        return self._template_planner_enabled()
 
     def _reset_active_layer_commit_state(self) -> None:
         self.active_committed_layer_index = None
@@ -441,12 +485,14 @@ class SchedulerV1:
         self._active_committed_pallet_id = None
         self._active_layer_commit_started = False
         self._active_layer_commit_min_layer_index = None
+        self._active_layer_committed_moves = 0
 
     def _activate_committed_layer(self, *, pallet_id: int | str, layer_id: int, z_mm: int) -> None:
         self._active_committed_pallet_id = pallet_id
         self.active_committed_layer_index = int(layer_id)
         self._active_committed_layer_z_mm = int(z_mm)
         self._active_layer_commit_started = True
+        self._active_layer_committed_moves = 0
         if self._active_layer_commit_min_layer_index is None:
             self._active_layer_commit_min_layer_index = int(layer_id)
         else:
@@ -454,6 +500,13 @@ class SchedulerV1:
                 int(self._active_layer_commit_min_layer_index),
                 int(layer_id),
             )
+
+    def _record_active_layer_move(self) -> None:
+        if not self._active_layer_commit_enabled():
+            return
+        if self.active_committed_layer_index is None:
+            return
+        self._active_layer_committed_moves += 1
 
     def _maybe_activate_committed_layer_from_plan(self, plan: PickPlan | None) -> None:
         if plan is None:
@@ -476,18 +529,25 @@ class SchedulerV1:
 
     def _release_active_committed_layer(self, *, closed: bool) -> None:
         layer_id = self.active_committed_layer_index
+        if layer_id is not None and int(self._active_layer_committed_moves) > 0:
+            self.committed_layer_plan_len_sum += int(self._active_layer_committed_moves)
+            self.committed_layer_plan_len_count += 1
         if closed and layer_id is not None:
             self.active_layer_commit_closures_total += 1
-            next_layer = int(layer_id) + 1
-            if self._active_layer_commit_min_layer_index is None:
-                self._active_layer_commit_min_layer_index = int(next_layer)
-            else:
-                self._active_layer_commit_min_layer_index = max(
-                    int(self._active_layer_commit_min_layer_index),
-                    int(next_layer),
-                )
+            # Evita endurecer min_layer por cierres degenerados (singleton terminal),
+            # que en benchmark real puede inducir deadlocks prematuros.
+            if int(layer_id) > 0 and int(self._active_layer_committed_moves) >= 2:
+                next_layer = int(layer_id) + 1
+                if self._active_layer_commit_min_layer_index is None:
+                    self._active_layer_commit_min_layer_index = int(next_layer)
+                else:
+                    self._active_layer_commit_min_layer_index = max(
+                        int(self._active_layer_commit_min_layer_index),
+                        int(next_layer),
+                    )
         self.active_committed_layer_index = None
         self._active_committed_layer_z_mm = None
+        self._active_layer_committed_moves = 0
         self._finalize_pending_layer_plan_metrics(reset_plan=True)
 
     def _active_layer_commit_allows_preview(
@@ -547,6 +607,25 @@ class SchedulerV1:
         self._pending_layer_plan_executed = 0
         self.planned_prefix_len_sum += int(len(plan.placements))
         self.planned_prefix_len_count += 1
+        self.committed_layer_plan_len_sum += int(len(plan.placements))
+        self.committed_layer_plan_len_count += 1
+        self.template_selected_total += 1
+        template_name = str(getattr(plan, "template_name", "") or "")
+        if template_name:
+            self.template_type_histogram[template_name] = int(self.template_type_histogram.get(template_name, 0)) + 1
+        template_area_fill = getattr(plan, "template_area_fill", None)
+        if template_area_fill is not None:
+            self.template_area_fill_sum += float(template_area_fill)
+            self.template_area_fill_count += 1
+
+    @staticmethod
+    def _is_actionable_layer_plan(plan: LayerOpeningPlan | None) -> bool:
+        if plan is None:
+            return False
+        plan_len = int(len(getattr(plan, "placements", ()) or ()))
+        if plan_len >= 2:
+            return True
+        return bool(getattr(plan, "terminal_case", False))
 
     def _consume_pending_layer_plan(self, sim_state: SchedulerSimState) -> PickPlan | None:
         if not self.pending_layer_plan:
@@ -617,6 +696,7 @@ class SchedulerV1:
                 self._active_committed_layer_z_mm = int(preview_z_mm)
             else:
                 self._active_committed_layer_z_mm = max(int(active_z_mm), int(preview_z_mm))
+            self._record_active_layer_move()
 
         return PickPlan(
             ramp_id=int(planned.ramp_id),
@@ -698,6 +778,7 @@ class SchedulerV1:
             else:
                 self.planner_invocations += 1
                 self.active_layer_commit_replans_total += 1
+                self.template_rebuilds_total += 1
                 plan = planner.plan_for_layer(
                     pallet_id=active_pallet_id,
                     pallet=active_pallet,
@@ -706,8 +787,9 @@ class SchedulerV1:
                     target_z_mm=None,
                     preview_place_fn=self._preview_place,
                 )
-                if plan is None or not plan.placements:
+                if not self._is_actionable_layer_plan(plan):
                     self.planner_abstains += 1
+                    self.template_abstains_total += 1
                 else:
                     self._set_pending_layer_plan(plan)
                     pending = self._consume_pending_layer_plan(sim_state)
@@ -728,6 +810,7 @@ class SchedulerV1:
                         else:
                             self._active_committed_layer_z_mm = max(int(active_z_mm), int(fallback_z_mm))
                     self.active_layer_commit_fallback_same_layer_total += 1
+                    self._record_active_layer_move()
                     return fallback
 
                 self._release_active_committed_layer(closed=True)
@@ -744,7 +827,7 @@ class SchedulerV1:
         self,
         *,
         sim_state: SchedulerSimState,
-        planner: EarlyLayerPatternPlanner,
+        planner: LayerTemplatePlanner,
     ) -> PickPlan | None:
         for pallet_id, pallet in sorted(sim_state.pallets.items(), key=lambda item: str(item[0])):
             if pallet_id in sim_state.pallet_blocked:
@@ -761,13 +844,15 @@ class SchedulerV1:
                 ramp_queues=sim_state.ramps,
                 preview_place_fn=self._preview_place,
             )
-            if plan is None or not plan.placements:
+            if not self._is_actionable_layer_plan(plan):
                 self.planner_abstains += 1
+                self.template_abstains_total += 1
                 continue
             if self._active_layer_commit_enabled() and self._active_layer_commit_started:
                 min_layer = self._active_layer_commit_min_layer_index
                 if min_layer is not None and int(plan.layer_id) < int(min_layer):
                     self.planner_abstains += 1
+                    self.template_abstains_total += 1
                     continue
             self._set_pending_layer_plan(plan)
             if self._active_layer_commit_enabled():

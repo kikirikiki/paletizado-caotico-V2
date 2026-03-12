@@ -41,6 +41,9 @@ PARAM_ALIASES = {
     "time_budget": "time_budget_ms",
     "height_slack": "height_slack_mm",
     "use_active_layer_commit": "use_early_layer_pattern_planner",
+    "use_layer_template_planner": "use_early_layer_pattern_planner",
+    "layer_template_candidate_cap": "layer_pattern_candidate_cap",
+    "layer_template_plan_cap": "layer_pattern_prefix_depth",
 }
 
 RUN_SIMULATION_SIGNATURE = inspect.signature(run_simulation)
@@ -79,6 +82,12 @@ class SeedSummary:
     active_layer_commit_replans_total: int | None
     active_layer_commit_fallback_same_layer_total: int | None
     active_layer_commit_closures_total: int | None
+    template_selected_total: int | None
+    template_abstains_total: int | None
+    template_rebuilds_total: int | None
+    committed_layer_plan_len_mean: float | None
+    template_area_fill_mean: float | None
+    template_type_histogram_json: str
     first_stack_step: int | None
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
@@ -134,6 +143,41 @@ def _safe_get(d: dict[str, Any], keys: list[str], default: Any = None) -> Any:
         if cur is None:
             return default
     return cur
+
+
+def _safe_histogram_json(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "{}"
+    clean: dict[str, int] = {}
+    for key, raw in value.items():
+        parsed = _safe_int(raw)
+        clean[str(key)] = int(parsed or 0)
+    return json.dumps(clean, ensure_ascii=True, sort_keys=True)
+
+
+def _aggregate_histogram_json(values: list[str]) -> dict[str, float]:
+    by_key: dict[str, list[int]] = {}
+    for raw in values:
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for key, val in payload.items():
+            parsed = _safe_int(val)
+            if parsed is None:
+                continue
+            by_key.setdefault(str(key), []).append(int(parsed))
+    out: dict[str, float] = {}
+    for key in sorted(by_key):
+        series = by_key.get(key, [])
+        if not series:
+            continue
+        out[str(key)] = float(sum(series) / max(1, len(series)))
+    return out
 
 
 def _normalize_param_key(raw_key: str) -> str:
@@ -455,6 +499,24 @@ def run_seed(
     active_layer_commit_closures_total = (
         _safe_int(pallet_kpis.get("active_layer_commit_closures_total")) if isinstance(pallet_kpis, dict) else None
     )
+    template_selected_total = (
+        _safe_int(pallet_kpis.get("template_selected_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    template_abstains_total = (
+        _safe_int(pallet_kpis.get("template_abstains_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    template_rebuilds_total = (
+        _safe_int(pallet_kpis.get("template_rebuilds_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    committed_layer_plan_len_mean = (
+        _safe_float(pallet_kpis.get("committed_layer_plan_len_mean")) if isinstance(pallet_kpis, dict) else None
+    )
+    template_area_fill_mean = (
+        _safe_float(pallet_kpis.get("template_area_fill_mean")) if isinstance(pallet_kpis, dict) else None
+    )
+    template_type_histogram_json = (
+        _safe_histogram_json(pallet_kpis.get("template_type_histogram")) if isinstance(pallet_kpis, dict) else "{}"
+    )
 
     forced_destination = _safe_int(params.get("force_destination"))
     first_stack_step, first_stand_hw_step = _first_steps_from_placements(
@@ -505,6 +567,12 @@ def run_seed(
         active_layer_commit_replans_total=active_layer_commit_replans_total,
         active_layer_commit_fallback_same_layer_total=active_layer_commit_fallback_same_layer_total,
         active_layer_commit_closures_total=active_layer_commit_closures_total,
+        template_selected_total=template_selected_total,
+        template_abstains_total=template_abstains_total,
+        template_rebuilds_total=template_rebuilds_total,
+        committed_layer_plan_len_mean=committed_layer_plan_len_mean,
+        template_area_fill_mean=template_area_fill_mean,
+        template_type_histogram_json=template_type_histogram_json,
         first_stack_step=first_stack_step,
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
@@ -570,6 +638,14 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             ),
             "active_layer_commit_closures_total_mean": _mean(
                 [v.active_layer_commit_closures_total for v in values_sorted]
+            ),
+            "template_selected_total_mean": _mean([v.template_selected_total for v in values_sorted]),
+            "template_abstains_total_mean": _mean([v.template_abstains_total for v in values_sorted]),
+            "template_rebuilds_total_mean": _mean([v.template_rebuilds_total for v in values_sorted]),
+            "committed_layer_plan_len_mean": _mean([v.committed_layer_plan_len_mean for v in values_sorted]),
+            "template_area_fill_mean": _mean([v.template_area_fill_mean for v in values_sorted]),
+            "template_type_histogram_mean": _aggregate_histogram_json(
+                [v.template_type_histogram_json for v in values_sorted]
             ),
             "first_stack_step_mean": _mean([v.first_stack_step for v in values_sorted]),
             "first_stand_hw_step_mean": _mean([v.first_stand_hw_step for v in values_sorted]),

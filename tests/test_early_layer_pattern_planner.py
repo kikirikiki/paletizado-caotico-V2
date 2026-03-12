@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from palca.domain.box import Box
 from palca.domain.pallet_spec import PalletSpec
 from palca.domain.placement import Placement, PlacementPreview
-from palca.integration.early_layer_pattern_planner import LayerOpeningPlan, PlannedLayerPlacement
+from palca.integration.layer_template_planner import LayerOpeningPlan, PlannedLayerPlacement
 from palca.packer.pallet_model import PalletModel
 from palca.scheduler.scheduler_v1 import SchedulerConfig, SchedulerSimState, SchedulerV1
 
@@ -93,6 +93,7 @@ def test_baseline_intact_when_early_layer_planner_flag_is_off() -> None:
             lookahead_k=2,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=False,
+            use_layer_template_planner=False,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -121,6 +122,7 @@ def test_planner_activates_on_new_layer_opening() -> None:
             lookahead_k=2,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -145,6 +147,7 @@ def test_pending_layer_plan_is_consumed_fifo() -> None:
             lookahead_k=2,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -186,6 +189,7 @@ def test_pending_plan_rejects_backstep_to_previous_layer(monkeypatch) -> None:
             lookahead_k=2,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -258,6 +262,7 @@ def test_pending_exhaustion_replans_same_active_layer(monkeypatch) -> None:
             lookahead_k=2,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -305,6 +310,7 @@ def test_same_layer_fallback_greedy_is_used_when_planner_abstains(monkeypatch) -
             lookahead_k=2,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -380,6 +386,7 @@ def test_active_layer_closes_only_when_no_same_layer_candidate_exists(monkeypatc
             lookahead_k=1,
             micro_plan_enabled=False,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -434,6 +441,7 @@ def test_feature_on_never_backsteps_to_previous_layers(monkeypatch) -> None:
             lookahead_k=2,
             micro_plan_enabled=True,
             use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
             layer_pattern_prefix_depth=3,
             layer_pattern_beam_width=4,
             layer_pattern_candidate_cap=8,
@@ -499,3 +507,57 @@ def test_feature_on_never_backsteps_to_previous_layers(monkeypatch) -> None:
     plan = scheduler.choose_action(state)
     assert plan is not None
     assert int(plan.box_id) == 32
+
+
+def test_single_placement_template_is_abstain_when_not_terminal() -> None:
+    pallet = _pallet_with_full_base_layer()
+    boxes = [_box(box_id=41, l=5, w=10), _box(box_id=42, l=5, w=10)]
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            micro_plan_enabled=False,
+            use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
+            layer_template_candidate_cap=8,
+            layer_template_plan_cap=1,
+        )
+    )
+    scheduler._activate_committed_layer(pallet_id=1, layer_id=1, z_mm=10)
+    state = SchedulerSimState(
+        now=0.0,
+        ramps={1: list(boxes)},
+        pallets={1: pallet},
+        pallet_blocked=set(),
+    )
+    plan = scheduler.choose_action(state)
+    assert plan is not None
+    assert int(getattr(plan.preview.placement, "layer_id", -1)) == 1
+    assert int(scheduler.template_abstains_total) >= 1
+    assert int(scheduler.active_layer_commit_fallback_same_layer_total) == 1
+
+
+def test_single_placement_template_allowed_in_terminal_case() -> None:
+    pallet = _pallet_with_full_base_layer()
+    only_box = _box(box_id=51, l=5, w=10)
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=2,
+            micro_plan_enabled=False,
+            use_early_layer_pattern_planner=True,
+            use_layer_template_planner=True,
+            layer_template_candidate_cap=8,
+            layer_template_plan_cap=1,
+        )
+    )
+    scheduler._activate_committed_layer(pallet_id=1, layer_id=1, z_mm=10)
+    state = SchedulerSimState(
+        now=0.0,
+        ramps={1: [only_box]},
+        pallets={1: pallet},
+        pallet_blocked=set(),
+    )
+    plan = scheduler.choose_action(state)
+    assert plan is not None
+    assert int(plan.box_id) == 51
+    assert int(scheduler.active_layer_commit_fallback_same_layer_total) == 0
+    assert int(scheduler.template_selected_total) >= 1
