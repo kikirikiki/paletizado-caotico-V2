@@ -59,6 +59,12 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    human_like_layer_opener_enabled: bool = False
+    human_like_layer_opener_prefix_len: int = 2
+    human_like_layer_opener_candidate_cap: int = 6
+    human_like_layer_opener_poison_penalty_weight: float = 0.4
+    human_like_layer_opener_closure_weight: float = 1.0
+    human_like_layer_opener_fragmentation_weight: float = 0.4
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -80,6 +86,23 @@ class SchedulerConfig:
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
+        object.__setattr__(self, "human_like_layer_opener_prefix_len", max(1, int(self.human_like_layer_opener_prefix_len)))
+        object.__setattr__(self, "human_like_layer_opener_candidate_cap", max(1, int(self.human_like_layer_opener_candidate_cap)))
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_poison_penalty_weight",
+            max(0.0, float(self.human_like_layer_opener_poison_penalty_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_closure_weight",
+            max(0.0, float(self.human_like_layer_opener_closure_weight)),
+        )
+        object.__setattr__(
+            self,
+            "human_like_layer_opener_fragmentation_weight",
+            max(0.0, float(self.human_like_layer_opener_fragmentation_weight)),
+        )
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -206,6 +229,16 @@ class _HardFloorScoredExpansion:
     stand_mix_bonus_applied: bool = False
 
 
+@dataclass(frozen=True)
+class _LayerOpenerPatternEval:
+    score: float
+    thin_unfillable_mix_risk: float
+    layer_closure_score: float
+    fillability_score: float
+    fragmentation_penalty: float
+    simulated_prefix_placements: int
+
+
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
@@ -262,6 +295,17 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.human_like_layer_opener_calls = 0
+        self.human_like_layer_opener_applied = 0
+        self.human_like_layer_opener_new_layer_applied = 0
+        self.human_like_layer_opener_active_prefix_applied = 0
+        self.human_like_layer_opener_selected_score_sum = 0.0
+        self.human_like_layer_opener_selected_thin_unfillable_mix_risk_sum = 0.0
+        self.human_like_layer_opener_selected_layer_closure_sum = 0.0
+        self.human_like_layer_opener_selected_fillability_sum = 0.0
+        self.human_like_layer_opener_selected_fragmentation_penalty_sum = 0.0
+        self.human_like_layer_opener_selected_prefix_placements_sum = 0
+        self.human_like_layer_opener_selected_count = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -515,6 +559,25 @@ class SchedulerV1:
                 window_boxes_by_pallet_id=window_boxes_by_pallet_id,
                 deadline=deadline,
             )
+        layer_opener_stats = {
+            "human_like_layer_opener_calls": 0,
+            "human_like_layer_opener_applied": 0,
+            "human_like_layer_opener_new_layer_applied": 0,
+            "human_like_layer_opener_active_prefix_applied": 0,
+            "human_like_layer_opener_selected_score_mean": 0.0,
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": 0.0,
+            "human_like_layer_opener_selected_layer_closure_score_mean": 0.0,
+            "human_like_layer_opener_selected_fillability_score_mean": 0.0,
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": 0.0,
+            "human_like_layer_opener_selected_prefix_placements_mean": 0.0,
+        }
+        if feasible_candidates and bool(self.config.human_like_layer_opener_enabled):
+            feasible_candidates, layer_opener_stats = self._apply_human_like_layer_opener_on_scored_candidates(
+                feasible_candidates=feasible_candidates,
+                pallets=sim_state.pallets,
+                window_boxes_by_pallet_id=window_boxes_by_pallet_id,
+                deadline=deadline,
+            )
 
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
@@ -524,6 +587,32 @@ class SchedulerV1:
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),
             "batchfill_applied": int(batchfill_stats["batchfill_applied"]),
             "batchfill_selected_layer_boxes_mean": float(batchfill_stats["batchfill_selected_layer_boxes_mean"]),
+            "human_like_layer_opener_calls": int(layer_opener_stats["human_like_layer_opener_calls"]),
+            "human_like_layer_opener_applied": int(layer_opener_stats["human_like_layer_opener_applied"]),
+            "human_like_layer_opener_new_layer_applied": int(
+                layer_opener_stats["human_like_layer_opener_new_layer_applied"]
+            ),
+            "human_like_layer_opener_active_prefix_applied": int(
+                layer_opener_stats["human_like_layer_opener_active_prefix_applied"]
+            ),
+            "human_like_layer_opener_selected_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_score_mean"]
+            ),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_thin_unfillable_mix_risk_mean"]
+            ),
+            "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_layer_closure_score_mean"]
+            ),
+            "human_like_layer_opener_selected_fillability_score_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_fillability_score_mean"]
+            ),
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_fragmentation_penalty_mean"]
+            ),
+            "human_like_layer_opener_selected_prefix_placements_mean": float(
+                layer_opener_stats["human_like_layer_opener_selected_prefix_placements_mean"]
+            ),
         }
 
         best_plan: PickPlan | None = None
@@ -630,6 +719,17 @@ class SchedulerV1:
         batchfill_applied_local = 0
         batchfill_selected_boxes_sum_local = 0
         batchfill_selected_boxes_count_local = 0
+        layer_opener_calls_local = 0
+        layer_opener_applied_local = 0
+        layer_opener_new_layer_applied_local = 0
+        layer_opener_active_prefix_applied_local = 0
+        layer_opener_selected_score_sum_local = 0.0
+        layer_opener_selected_thin_risk_sum_local = 0.0
+        layer_opener_selected_layer_closure_sum_local = 0.0
+        layer_opener_selected_fillability_sum_local = 0.0
+        layer_opener_selected_fragmentation_sum_local = 0.0
+        layer_opener_selected_prefix_placements_sum_local = 0
+        layer_opener_selected_count_local = 0
 
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
@@ -682,6 +782,39 @@ class SchedulerV1:
                     batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
                     batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
+                if depth == 0 and node.first_plan is None and expansions and bool(self.config.human_like_layer_opener_enabled):
+                    expansions, layer_opener_stats = self._apply_human_like_layer_opener_on_beam_expansions(
+                        node=node,
+                        expansions=expansions,
+                        deadline=deadline,
+                    )
+                    layer_opener_calls_local += int(layer_opener_stats["human_like_layer_opener_calls"])
+                    layer_opener_applied_local += int(layer_opener_stats["human_like_layer_opener_applied"])
+                    layer_opener_new_layer_applied_local += int(
+                        layer_opener_stats["human_like_layer_opener_new_layer_applied"]
+                    )
+                    layer_opener_active_prefix_applied_local += int(
+                        layer_opener_stats["human_like_layer_opener_active_prefix_applied"]
+                    )
+                    layer_opener_selected_score_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_score_sum"]
+                    )
+                    layer_opener_selected_thin_risk_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_thin_unfillable_mix_risk_sum"]
+                    )
+                    layer_opener_selected_layer_closure_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_layer_closure_score_sum"]
+                    )
+                    layer_opener_selected_fillability_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_fillability_score_sum"]
+                    )
+                    layer_opener_selected_fragmentation_sum_local += float(
+                        layer_opener_stats["human_like_layer_opener_selected_fragmentation_penalty_sum"]
+                    )
+                    layer_opener_selected_prefix_placements_sum_local += int(
+                        layer_opener_stats["human_like_layer_opener_selected_prefix_placements_sum"]
+                    )
+                    layer_opener_selected_count_local += int(layer_opener_stats["human_like_layer_opener_selected_count"])
 
                 if depth == 0 and node.first_plan is None and expansions:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
@@ -731,6 +864,36 @@ class SchedulerV1:
                                 "batchfill_selected_layer_boxes_mean": float(
                                     float(batchfill_selected_boxes_sum_local)
                                     / max(1, int(batchfill_selected_boxes_count_local))
+                                ),
+                                "human_like_layer_opener_calls": int(layer_opener_calls_local),
+                                "human_like_layer_opener_applied": int(layer_opener_applied_local),
+                                "human_like_layer_opener_new_layer_applied": int(layer_opener_new_layer_applied_local),
+                                "human_like_layer_opener_active_prefix_applied": int(
+                                    layer_opener_active_prefix_applied_local
+                                ),
+                                "human_like_layer_opener_selected_score_mean": float(
+                                    layer_opener_selected_score_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                                    layer_opener_selected_thin_risk_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                                    layer_opener_selected_layer_closure_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_fillability_score_mean": float(
+                                    layer_opener_selected_fillability_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                                    layer_opener_selected_fragmentation_sum_local
+                                    / max(1, int(layer_opener_selected_count_local))
+                                ),
+                                "human_like_layer_opener_selected_prefix_placements_mean": float(
+                                    float(layer_opener_selected_prefix_placements_sum_local)
+                                    / max(1, int(layer_opener_selected_count_local))
                                 ),
                             }
                             return chosen_plan, stats, None
@@ -813,6 +976,28 @@ class SchedulerV1:
             "batchfill_applied": int(batchfill_applied_local),
             "batchfill_selected_layer_boxes_mean": float(
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
+            ),
+            "human_like_layer_opener_calls": int(layer_opener_calls_local),
+            "human_like_layer_opener_applied": int(layer_opener_applied_local),
+            "human_like_layer_opener_new_layer_applied": int(layer_opener_new_layer_applied_local),
+            "human_like_layer_opener_active_prefix_applied": int(layer_opener_active_prefix_applied_local),
+            "human_like_layer_opener_selected_score_mean": float(
+                layer_opener_selected_score_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                layer_opener_selected_thin_risk_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                layer_opener_selected_layer_closure_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fillability_score_mean": float(
+                layer_opener_selected_fillability_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                layer_opener_selected_fragmentation_sum_local / max(1, int(layer_opener_selected_count_local))
+            ),
+            "human_like_layer_opener_selected_prefix_placements_mean": float(
+                float(layer_opener_selected_prefix_placements_sum_local) / max(1, int(layer_opener_selected_count_local))
             ),
         }
 
@@ -1376,6 +1561,578 @@ class SchedulerV1:
             "batchfill_applied": int(batchfill_applied_local),
             "selected_boxes_sum": int(batchfill_selected_boxes_sum_local),
             "selected_boxes_count": int(batchfill_selected_boxes_count_local),
+        }
+
+    def _accumulate_human_like_layer_opener_stats(
+        self,
+        *,
+        calls: int,
+        applied: int,
+        new_layer_applied: int,
+        active_prefix_applied: int,
+        selected_score_sum: float,
+        selected_thin_risk_sum: float,
+        selected_layer_closure_sum: float,
+        selected_fillability_sum: float,
+        selected_fragmentation_penalty_sum: float,
+        selected_prefix_placements_sum: int,
+        selected_count: int,
+    ) -> None:
+        self.human_like_layer_opener_calls += max(0, int(calls))
+        self.human_like_layer_opener_applied += max(0, int(applied))
+        self.human_like_layer_opener_new_layer_applied += max(0, int(new_layer_applied))
+        self.human_like_layer_opener_active_prefix_applied += max(0, int(active_prefix_applied))
+        self.human_like_layer_opener_selected_score_sum += max(0.0, float(selected_score_sum))
+        self.human_like_layer_opener_selected_thin_unfillable_mix_risk_sum += max(0.0, float(selected_thin_risk_sum))
+        self.human_like_layer_opener_selected_layer_closure_sum += max(0.0, float(selected_layer_closure_sum))
+        self.human_like_layer_opener_selected_fillability_sum += max(0.0, float(selected_fillability_sum))
+        self.human_like_layer_opener_selected_fragmentation_penalty_sum += max(
+            0.0,
+            float(selected_fragmentation_penalty_sum),
+        )
+        self.human_like_layer_opener_selected_prefix_placements_sum += max(0, int(selected_prefix_placements_sum))
+        self.human_like_layer_opener_selected_count += max(0, int(selected_count))
+
+    @staticmethod
+    def _remove_first_matching_box(*, boxes: list[Box], target: Box) -> None:
+        target_id = getattr(target, "box_id", None)
+        for idx, queued in enumerate(boxes):
+            if queued is target:
+                boxes.pop(idx)
+                return
+            if getattr(queued, "box_id", None) == target_id:
+                boxes.pop(idx)
+                return
+
+    @staticmethod
+    def _layer_placement_count(pallet: PalletModel, *, layer_id: int) -> int:
+        count = 0
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                if int(getattr(placement, "layer_id", -1)) == int(layer_id):
+                    count += 1
+            except Exception:
+                continue
+        return int(count)
+
+    def _pick_human_like_target_layer_id(
+        self,
+        *,
+        pallet: PalletModel,
+        preview_layer_ids: Sequence[int | None],
+    ) -> tuple[int, bool] | None:
+        prefix_len = max(1, int(getattr(self.config, "human_like_layer_opener_prefix_len", 3) or 3))
+        layers = list(getattr(pallet, "layers", []) or [])
+        start_layer_id = int(len(layers))
+        active_layer_id = (start_layer_id - 1) if start_layer_id > 0 else None
+        has_active_candidate = bool(
+            active_layer_id is not None and any(layer_id == active_layer_id for layer_id in preview_layer_ids)
+        )
+        has_new_layer_candidate = bool(any(layer_id == start_layer_id for layer_id in preview_layer_ids))
+
+        if active_layer_id is not None and has_active_candidate:
+            active_count = self._layer_placement_count(pallet, layer_id=int(active_layer_id))
+            if 0 < int(active_count) < int(prefix_len):
+                return int(active_layer_id), False
+
+        if has_new_layer_candidate and not has_active_candidate:
+            return int(start_layer_id), True
+        return None
+
+    @staticmethod
+    def _rect_dims(rect: object) -> tuple[int, int]:
+        width = getattr(rect, "w", None)
+        if width is None:
+            width = getattr(rect, "width", None)
+        if width is None:
+            width = getattr(rect, "width_mm", None)
+        if width is None:
+            width = getattr(rect, "length_mm", None)
+
+        height = getattr(rect, "h", None)
+        if height is None:
+            height = getattr(rect, "height", None)
+        if height is None:
+            height = getattr(rect, "height_mm", None)
+        if height is None:
+            height = getattr(rect, "width_mm", None)
+
+        try:
+            rw = max(0, int(width or 0))
+        except Exception:
+            rw = 0
+        try:
+            rh = max(0, int(height or 0))
+        except Exception:
+            rh = 0
+        return int(rw), int(rh)
+
+    def _simulate_human_like_layer_prefix(
+        self,
+        *,
+        pallet: PalletModel,
+        starter_box: Box,
+        pool_boxes: Sequence[Box],
+        target_layer_id: int,
+        deadline: float | None,
+    ) -> _LayerOpenerPatternEval | None:
+        try:
+            pallet_clone = copy.deepcopy(pallet)
+        except Exception:
+            return None
+
+        try:
+            starter_preview_local = self._preview_place(pallet_clone, starter_box)
+            if not starter_preview_local.feasible:
+                return None
+            starter_placement = pallet_clone.commit_place(starter_preview_local)
+        except Exception:
+            return None
+
+        placed_layer_id = int(getattr(starter_placement, "layer_id", -1))
+        if int(placed_layer_id) != int(target_layer_id):
+            return None
+
+        prefix_len = max(1, int(getattr(self.config, "human_like_layer_opener_prefix_len", 3) or 3))
+        candidate_cap = max(1, int(getattr(self.config, "human_like_layer_opener_candidate_cap", 6) or 6))
+        fragmentation_sum = max(0.0, float(getattr(starter_preview_local, "fragmentation", 0.0) or 0.0))
+        simulated_prefix_placements = 1
+
+        remaining_boxes = list(pool_boxes)
+        self._remove_first_matching_box(boxes=remaining_boxes, target=starter_box)
+
+        while int(simulated_prefix_placements) < int(prefix_len):
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            feasible_fillers: list[tuple[float, float, PlacementPreview, Box]] = []
+            for box in remaining_boxes:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                preview = self._preview_place(pallet_clone, box)
+                if not preview.feasible:
+                    continue
+                preview_layer_id = self._preview_layer_id(preview)
+                if preview_layer_id != int(target_layer_id):
+                    continue
+                rank_score = (
+                    float(preview.packing_gain)
+                    - float(preview.fragmentation)
+                    + float(getattr(preview, "score_adjustment", 0.0) or 0.0)
+                )
+                feasible_fillers.append((rank_score, -float(preview.fragmentation), preview, box))
+
+            if not feasible_fillers:
+                break
+            feasible_fillers.sort(key=lambda item: (float(item[0]), float(item[1])), reverse=True)
+            _rank_score, _neg_frag, chosen_preview, chosen_box = feasible_fillers[:candidate_cap][0]
+            try:
+                pallet_clone.commit_place(chosen_preview)
+            except Exception:
+                break
+            fragmentation_sum += max(0.0, float(getattr(chosen_preview, "fragmentation", 0.0) or 0.0))
+            simulated_prefix_placements += 1
+            self._remove_first_matching_box(boxes=remaining_boxes, target=chosen_box)
+
+        layers_after = list(getattr(pallet_clone, "layers", []) or [])
+        if int(target_layer_id) < 0 or int(target_layer_id) >= len(layers_after):
+            return None
+        layer_state = layers_after[int(target_layer_id)]
+        free_rects = list(getattr(getattr(layer_state, "bin", None), "free_rects", []) or [])
+        bin_area = float(max(1, int(getattr(pallet_clone, "bin_area_mm2", 1) or 1)))
+        free_area = 0.0
+        max_rect_area = 0.0
+        for rect in free_rects:
+            rw, rh = self._rect_dims(rect)
+            area = float(max(0, int(rw)) * max(0, int(rh)))
+            free_area += area
+            max_rect_area = max(float(max_rect_area), float(area))
+        fill_ratio = max(0.0, min(1.0, 1.0 - (float(free_area) / float(bin_area))))
+        continuity_score = float(max_rect_area) / max(1.0, float(free_area)) if free_area > 0.0 else 1.0
+
+        fit_candidates = 0
+        future_considered = 0
+        for box in remaining_boxes[:candidate_cap]:
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            future_considered += 1
+            future_preview = self._preview_place(pallet_clone, box)
+            if future_preview.feasible and self._preview_layer_id(future_preview) == int(target_layer_id):
+                fit_candidates += 1
+        fillability_score = float(fit_candidates) / float(max(1, future_considered))
+
+        dims_by_box: list[tuple[int, int]] = []
+        for box in remaining_boxes:
+            try:
+                bl = int(getattr(box, "length_mm", 0) or 0)
+                bw = int(getattr(box, "width_mm", 0) or 0)
+            except Exception:
+                continue
+            if bl <= 0 or bw <= 0:
+                continue
+            dims_by_box.append((bl, bw))
+            if bl != bw:
+                dims_by_box.append((bw, bl))
+        min_short_side = min((min(dim[0], dim[1]) for dim in dims_by_box), default=0)
+        thin_threshold = max(1, int(0.85 * float(min_short_side))) if min_short_side > 0 else 1
+
+        thin_area = 0.0
+        unfillable_area = 0.0
+        thin_unfillable_mix_area = 0.0
+        for rect in free_rects:
+            rw, rh = self._rect_dims(rect)
+            area = float(max(0, int(rw)) * max(0, int(rh)))
+            if area <= 0.0:
+                continue
+            short_side = min(int(rw), int(rh))
+            is_thin = bool(short_side < int(thin_threshold))
+            can_fit_any = False
+            for dl, dw in dims_by_box:
+                if int(dl) <= int(rw) and int(dw) <= int(rh):
+                    can_fit_any = True
+                    break
+            if is_thin:
+                thin_area += area
+            if not can_fit_any:
+                unfillable_area += area
+            if is_thin and not can_fit_any:
+                thin_unfillable_mix_area += area
+        thin_unfillable_mix_risk = (
+            float(thin_unfillable_mix_area) + 0.50 * float(unfillable_area) + 0.25 * float(thin_area)
+        ) / float(bin_area)
+
+        fragmentation_penalty = (
+            float(fragmentation_sum) / float(max(1, int(simulated_prefix_placements)))
+        ) + 0.25 * (float(len(free_rects)) / float(max(1, int(simulated_prefix_placements) + 1)))
+
+        layer_closure_score = (
+            0.55 * float(fill_ratio)
+            + 0.30 * float(fillability_score)
+            + 0.15 * float(continuity_score)
+        )
+        closure_weight = float(getattr(self.config, "human_like_layer_opener_closure_weight", 1.0) or 1.0)
+        poison_weight = float(getattr(self.config, "human_like_layer_opener_poison_penalty_weight", 1.0) or 1.0)
+        fragmentation_weight = float(
+            getattr(self.config, "human_like_layer_opener_fragmentation_weight", 1.0) or 1.0
+        )
+        score = (
+            float(closure_weight) * float(layer_closure_score)
+            - float(poison_weight) * float(thin_unfillable_mix_risk)
+            - float(fragmentation_weight) * float(fragmentation_penalty)
+        )
+        return _LayerOpenerPatternEval(
+            score=float(score),
+            thin_unfillable_mix_risk=float(thin_unfillable_mix_risk),
+            layer_closure_score=float(layer_closure_score),
+            fillability_score=float(fillability_score),
+            fragmentation_penalty=float(fragmentation_penalty),
+            simulated_prefix_placements=int(simulated_prefix_placements),
+        )
+
+    def _apply_human_like_layer_opener_on_scored_candidates(
+        self,
+        *,
+        feasible_candidates: list[_ScoredCandidate],
+        pallets: Mapping[int | str, PalletModel],
+        window_boxes_by_pallet_id: Mapping[int | str, Sequence[Box]],
+        deadline: float | None,
+    ) -> tuple[list[_ScoredCandidate], dict[str, float]]:
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        pallet_order: list[int | str] = []
+        for candidate in feasible_candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        calls_local = 1 if grouped else 0
+        applied_local = 0
+        new_layer_applied_local = 0
+        active_prefix_applied_local = 0
+        selected_score_sum_local = 0.0
+        selected_thin_risk_sum_local = 0.0
+        selected_layer_closure_sum_local = 0.0
+        selected_fillability_sum_local = 0.0
+        selected_fragmentation_penalty_sum_local = 0.0
+        selected_prefix_placements_sum_local = 0
+        selected_count_local = 0
+        filtered_candidates: list[_ScoredCandidate] = []
+
+        candidate_cap = max(1, int(getattr(self.config, "human_like_layer_opener_candidate_cap", 6) or 6))
+        for pallet_id in pallet_order:
+            group = grouped.get(pallet_id, [])
+            pallet = pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered_candidates.extend(group)
+                continue
+
+            preview_layer_ids = [self._preview_layer_id(candidate.plan.preview) for candidate in group]
+            target = self._pick_human_like_target_layer_id(
+                pallet=pallet,
+                preview_layer_ids=preview_layer_ids,
+            )
+            if target is None:
+                filtered_candidates.extend(group)
+                continue
+            target_layer_id, is_new_layer_opening = target
+            scoped_candidates = [
+                candidate
+                for candidate in group
+                if self._preview_layer_id(candidate.plan.preview) == int(target_layer_id)
+            ]
+            if not scoped_candidates:
+                filtered_candidates.extend(group)
+                continue
+
+            starters = sorted(
+                scoped_candidates,
+                key=lambda candidate: float(candidate.terms.scalar_score),
+                reverse=True,
+            )[:candidate_cap]
+            pool_boxes = list(window_boxes_by_pallet_id.get(pallet_id, []) or [])
+            if not pool_boxes:
+                pool_boxes = [candidate.box for candidate in group]
+
+            best_candidate: _ScoredCandidate | None = None
+            best_eval: _LayerOpenerPatternEval | None = None
+            best_key: tuple[Any, ...] | None = None
+            for starter in starters:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                sim = self._simulate_human_like_layer_prefix(
+                    pallet=pallet,
+                    starter_box=starter.box,
+                    pool_boxes=pool_boxes,
+                    target_layer_id=int(target_layer_id),
+                    deadline=deadline,
+                )
+                if sim is None:
+                    continue
+                key = (
+                    float(sim.score),
+                    float(sim.layer_closure_score),
+                    -float(sim.thin_unfillable_mix_risk),
+                    float(starter.terms.scalar_score),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_candidate = starter
+                    best_eval = sim
+
+            if best_candidate is None or best_eval is None:
+                filtered_candidates.extend(group)
+                continue
+
+            applied_local += 1
+            if bool(is_new_layer_opening):
+                new_layer_applied_local += 1
+            else:
+                active_prefix_applied_local += 1
+            selected_score_sum_local += float(best_eval.score)
+            selected_thin_risk_sum_local += float(best_eval.thin_unfillable_mix_risk)
+            selected_layer_closure_sum_local += float(best_eval.layer_closure_score)
+            selected_fillability_sum_local += float(best_eval.fillability_score)
+            selected_fragmentation_penalty_sum_local += float(best_eval.fragmentation_penalty)
+            selected_prefix_placements_sum_local += int(best_eval.simulated_prefix_placements)
+            selected_count_local += 1
+
+            scoped_ids = {id(candidate) for candidate in scoped_candidates}
+            for candidate in group:
+                if id(candidate) in scoped_ids and candidate is not best_candidate:
+                    continue
+                filtered_candidates.append(candidate)
+
+        self._accumulate_human_like_layer_opener_stats(
+            calls=calls_local,
+            applied=applied_local,
+            new_layer_applied=new_layer_applied_local,
+            active_prefix_applied=active_prefix_applied_local,
+            selected_score_sum=selected_score_sum_local,
+            selected_thin_risk_sum=selected_thin_risk_sum_local,
+            selected_layer_closure_sum=selected_layer_closure_sum_local,
+            selected_fillability_sum=selected_fillability_sum_local,
+            selected_fragmentation_penalty_sum=selected_fragmentation_penalty_sum_local,
+            selected_prefix_placements_sum=selected_prefix_placements_sum_local,
+            selected_count=selected_count_local,
+        )
+        return filtered_candidates, {
+            "human_like_layer_opener_calls": int(calls_local),
+            "human_like_layer_opener_applied": int(applied_local),
+            "human_like_layer_opener_new_layer_applied": int(new_layer_applied_local),
+            "human_like_layer_opener_active_prefix_applied": int(active_prefix_applied_local),
+            "human_like_layer_opener_selected_score_mean": float(
+                float(selected_score_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_mean": float(
+                float(selected_thin_risk_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_layer_closure_score_mean": float(
+                float(selected_layer_closure_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fillability_score_mean": float(
+                float(selected_fillability_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_fragmentation_penalty_mean": float(
+                float(selected_fragmentation_penalty_sum_local) / max(1, int(selected_count_local))
+            ),
+            "human_like_layer_opener_selected_prefix_placements_mean": float(
+                float(selected_prefix_placements_sum_local) / max(1, int(selected_count_local))
+            ),
+        }
+
+    def _apply_human_like_layer_opener_on_beam_expansions(
+        self,
+        *,
+        node: _BeamNode,
+        expansions: list[_BeamExpansion],
+        deadline: float | None,
+    ) -> tuple[list[_BeamExpansion], dict[str, float]]:
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        pallet_order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        calls_local = 1 if grouped else 0
+        applied_local = 0
+        new_layer_applied_local = 0
+        active_prefix_applied_local = 0
+        selected_score_sum_local = 0.0
+        selected_thin_risk_sum_local = 0.0
+        selected_layer_closure_sum_local = 0.0
+        selected_fillability_sum_local = 0.0
+        selected_fragmentation_penalty_sum_local = 0.0
+        selected_prefix_placements_sum_local = 0
+        selected_count_local = 0
+        filtered: list[_BeamExpansion] = []
+        handled_pallets: set[int | str] = set()
+
+        candidate_cap = max(1, int(getattr(self.config, "human_like_layer_opener_candidate_cap", 6) or 6))
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None or pallet_id in handled_pallets:
+                if pallet_id is None:
+                    filtered.append(expansion)
+                continue
+            handled_pallets.add(pallet_id)
+
+            group = grouped.get(pallet_id, [])
+            pallet = node.pallets.get(pallet_id)
+            if pallet is None or not group:
+                filtered.extend(group)
+                continue
+
+            preview_layer_ids: list[int | None] = []
+            for item in group:
+                first_plan = item.node.first_plan
+                preview_layer_ids.append(self._preview_layer_id(first_plan.preview) if first_plan is not None else None)
+
+            target = self._pick_human_like_target_layer_id(
+                pallet=pallet,
+                preview_layer_ids=preview_layer_ids,
+            )
+            if target is None:
+                filtered.extend(group)
+                continue
+            target_layer_id, is_new_layer_opening = target
+
+            scoped_items: list[_BeamExpansion] = []
+            for item in group:
+                first_plan = item.node.first_plan
+                if first_plan is None:
+                    continue
+                if self._preview_layer_id(first_plan.preview) == int(target_layer_id):
+                    scoped_items.append(item)
+            if not scoped_items:
+                filtered.extend(group)
+                continue
+
+            starters = sorted(
+                scoped_items,
+                key=lambda item: float(item.terms.scalar_score),
+                reverse=True,
+            )[:candidate_cap]
+            pool_boxes = [item.box for item in group]
+
+            best_expansion: _BeamExpansion | None = None
+            best_eval: _LayerOpenerPatternEval | None = None
+            best_key: tuple[Any, ...] | None = None
+            for starter in starters:
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                sim = self._simulate_human_like_layer_prefix(
+                    pallet=pallet,
+                    starter_box=starter.box,
+                    pool_boxes=pool_boxes,
+                    target_layer_id=int(target_layer_id),
+                    deadline=deadline,
+                )
+                if sim is None:
+                    continue
+                key = (
+                    float(sim.score),
+                    float(sim.layer_closure_score),
+                    -float(sim.thin_unfillable_mix_risk),
+                    float(starter.terms.scalar_score),
+                )
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_expansion = starter
+                    best_eval = sim
+
+            if best_expansion is None or best_eval is None:
+                filtered.extend(group)
+                continue
+
+            applied_local += 1
+            if bool(is_new_layer_opening):
+                new_layer_applied_local += 1
+            else:
+                active_prefix_applied_local += 1
+            selected_score_sum_local += float(best_eval.score)
+            selected_thin_risk_sum_local += float(best_eval.thin_unfillable_mix_risk)
+            selected_layer_closure_sum_local += float(best_eval.layer_closure_score)
+            selected_fillability_sum_local += float(best_eval.fillability_score)
+            selected_fragmentation_penalty_sum_local += float(best_eval.fragmentation_penalty)
+            selected_prefix_placements_sum_local += int(best_eval.simulated_prefix_placements)
+            selected_count_local += 1
+
+            scoped_ids = {id(item) for item in scoped_items}
+            for item in group:
+                if id(item) in scoped_ids and item is not best_expansion:
+                    continue
+                filtered.append(item)
+
+        self._accumulate_human_like_layer_opener_stats(
+            calls=calls_local,
+            applied=applied_local,
+            new_layer_applied=new_layer_applied_local,
+            active_prefix_applied=active_prefix_applied_local,
+            selected_score_sum=selected_score_sum_local,
+            selected_thin_risk_sum=selected_thin_risk_sum_local,
+            selected_layer_closure_sum=selected_layer_closure_sum_local,
+            selected_fillability_sum=selected_fillability_sum_local,
+            selected_fragmentation_penalty_sum=selected_fragmentation_penalty_sum_local,
+            selected_prefix_placements_sum=selected_prefix_placements_sum_local,
+            selected_count=selected_count_local,
+        )
+        return filtered, {
+            "human_like_layer_opener_calls": int(calls_local),
+            "human_like_layer_opener_applied": int(applied_local),
+            "human_like_layer_opener_new_layer_applied": int(new_layer_applied_local),
+            "human_like_layer_opener_active_prefix_applied": int(active_prefix_applied_local),
+            "human_like_layer_opener_selected_score_sum": float(selected_score_sum_local),
+            "human_like_layer_opener_selected_thin_unfillable_mix_risk_sum": float(selected_thin_risk_sum_local),
+            "human_like_layer_opener_selected_layer_closure_score_sum": float(selected_layer_closure_sum_local),
+            "human_like_layer_opener_selected_fillability_score_sum": float(selected_fillability_sum_local),
+            "human_like_layer_opener_selected_fragmentation_penalty_sum": float(selected_fragmentation_penalty_sum_local),
+            "human_like_layer_opener_selected_prefix_placements_sum": int(selected_prefix_placements_sum_local),
+            "human_like_layer_opener_selected_count": int(selected_count_local),
         }
 
     @staticmethod
