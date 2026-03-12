@@ -80,6 +80,19 @@ def test_apply_param_overrides_accepts_optional_human_like_layer_opener_knob() -
     assert bool(merged["human_like_layer_opener"]) is True
 
 
+def test_apply_param_overrides_accepts_optional_human_like_layer_opener_tail_risk_knobs() -> None:
+    base = {"model": "M1", "n_per_pallet": 24, "t_pick_place": 14.0, "staging_cap": 0}
+    merged = bench.apply_param_overrides(
+        base,
+        {
+            "human_like_layer_opener_tail_risk": True,
+            "human_like_layer_opener_tail_risk_weight": 0.8,
+        },
+    )
+    assert bool(merged["human_like_layer_opener_tail_risk"]) is True
+    assert float(merged["human_like_layer_opener_tail_risk_weight"]) == 0.8
+
+
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
     profile = bench.load_profile("configs/benchmarks/one_pallet_canonical.json")
     kwargs = bench.build_run_simulation_kwargs(
@@ -208,6 +221,8 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(r["reentries_total"] == 1 for r in rows)
     assert all(r["max_layer_drop"] == 1 for r in rows)
     assert all(r["reentries_drop_ge_2_count"] == 0 for r in rows)
+    assert all(r["deep_drop_burden"] == 0 for r in rows)
+    assert all(r["deadlock_count"] == 0 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
 
@@ -219,6 +234,10 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "human_like_layer_opener" in summary["param_contract"]["profile_allowed_param_keys"]
     assert summary["discriminative"]["baseline"]["is_flat_processed_boxes"] is False
     assert summary["discriminative"]["variant"]["is_flat_processed_boxes"] is False
+    assert summary["aggregates"]["baseline"]["deep_drop_burden_sum"] == 0
+    assert summary["aggregates"]["variant"]["deep_drop_burden_sum"] == 0
+    assert summary["aggregates"]["baseline"]["deadlock_count_sum"] == 0
+    assert summary["aggregates"]["variant"]["deadlock_count_sum"] == 0
     assert summary["runs"]["baseline"]["effective_params"]["lookahead_k"] == 15
     assert summary["runs"]["variant"]["effective_params"]["lookahead_k"] == 10
 
@@ -234,6 +253,8 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "step_trace_relevant_json" in csv_row
     assert "max_layer_drop" in csv_row
     assert "reentries_drop_ge_2_count" in csv_row
+    assert "deep_drop_burden" in csv_row
+    assert "deadlock_count" in csv_row
 
 
 def test_run_benchmark_variant_can_enable_human_like_layer_opener(

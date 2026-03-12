@@ -53,6 +53,7 @@ def test_layer_monotonicity_monotonic_basic() -> None:
     assert int(m["reentries_total"]) == 0
     assert int(m["max_layer_drop"]) == 0
     assert int(m["reentries_drop_ge_2_count"]) == 0
+    assert int(m["deep_drop_burden"]) == 0
 
 
 def test_layer_drop_semantics_l_minus_1() -> None:
@@ -67,6 +68,7 @@ def test_layer_drop_semantics_l_minus_1() -> None:
     assert int(m["reentries_total"]) == 1
     assert int(m["max_layer_drop"]) == 1
     assert int(m["reentries_drop_ge_2_count"]) == 0
+    assert int(m["deep_drop_burden"]) == 0
     examples = m.get("layer_drop_examples", [])
     assert isinstance(examples, list) and examples
     assert int(examples[0]["layer_drop"]) == 1
@@ -84,6 +86,7 @@ def test_layer_drop_semantics_l_minus_2() -> None:
     assert int(m["reentries_total"]) == 1
     assert int(m["max_layer_drop"]) == 2
     assert int(m["reentries_drop_ge_2_count"]) == 1
+    assert int(m["deep_drop_burden"]) == 2
     histogram = m.get("layer_drop_histogram", {})
     assert isinstance(histogram, dict)
     assert int(histogram.get("2", 0)) == 1

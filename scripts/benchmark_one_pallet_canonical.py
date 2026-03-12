@@ -89,6 +89,8 @@ class SeedSummary:
     reentries_total: int | None
     max_layer_drop: int | None
     reentries_drop_ge_2_count: int | None
+    deep_drop_burden: int | None
+    deadlock_count: int | None
     monotonic_stack_rate: float | None
     placements_below_current_top_band_after_opening_next_band: int | None
     layer_closure_score: float | None
@@ -136,6 +138,27 @@ def _safe_get(d: dict[str, Any], keys: list[str], default: Any = None) -> Any:
         if cur is None:
             return default
     return cur
+
+
+def _derive_deep_drop_burden(metrics_source: dict[str, Any]) -> int:
+    direct = _safe_int(metrics_source.get("deep_drop_burden"))
+    if direct is not None:
+        return int(max(0, int(direct)))
+
+    histogram = metrics_source.get("layer_drop_histogram", {})
+    if isinstance(histogram, dict):
+        burden = 0
+        for raw_drop, raw_count in histogram.items():
+            drop = _safe_int(raw_drop)
+            count = _safe_int(raw_count)
+            if drop is None or count is None:
+                continue
+            if int(drop) < 2 or int(count) <= 0:
+                continue
+            burden += int(drop) * int(count)
+        return int(max(0, int(burden)))
+
+    return 0
 
 
 def _normalize_param_key(raw_key: str) -> str:
@@ -431,6 +454,12 @@ def run_seed(
 
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
     pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
+    deadlock_count = _safe_int(metrics.get("deadlock_count")) if isinstance(metrics, dict) else None
+    if deadlock_count is None and isinstance(pallet_kpis, dict):
+        deadlock_samples = pallet_kpis.get("deadlock_samples", [])
+        if isinstance(deadlock_samples, list):
+            deadlock_count = int(len(deadlock_samples))
+    deadlock_count = int(max(0, int(deadlock_count or 0)))
 
     processed_boxes = _safe_int(metrics.get("processed_boxes")) if isinstance(metrics, dict) else None
     stand_hw_used_total = _safe_int(pallet_kpis.get("stand_hw_used_total")) if isinstance(pallet_kpis, dict) else None
@@ -457,6 +486,7 @@ def run_seed(
         layer_drop_audit=bool(layer_drop_audit),
     )
     metrics_source = recomputed_mono if seq else mono
+    deep_drop_burden = _derive_deep_drop_burden(metrics_source if isinstance(metrics_source, dict) else {})
 
     max_z_series = metrics_source.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
@@ -531,6 +561,8 @@ def run_seed(
         reentries_total=_safe_int(metrics_source.get("reentries_total")),
         max_layer_drop=_safe_int(metrics_source.get("max_layer_drop")),
         reentries_drop_ge_2_count=_safe_int(metrics_source.get("reentries_drop_ge_2_count")),
+        deep_drop_burden=int(deep_drop_burden),
+        deadlock_count=int(deadlock_count),
         monotonic_stack_rate=_safe_float(metrics_source.get("monotonic_stack_rate")),
         placements_below_current_top_band_after_opening_next_band=_safe_int(
             metrics_source.get("placements_below_current_top_band_after_opening_next_band")
@@ -601,6 +633,8 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             if any(v.max_layer_drop is not None for v in values_sorted)
             else None,
             "reentries_drop_ge_2_count_sum": _sum([v.reentries_drop_ge_2_count for v in values_sorted]),
+            "deep_drop_burden_sum": _sum([v.deep_drop_burden for v in values_sorted]),
+            "deadlock_count_sum": _sum([v.deadlock_count for v in values_sorted]),
             "monotonic_stack_rate_mean": _mean([v.monotonic_stack_rate for v in values_sorted]),
             "placements_below_current_top_band_after_opening_next_band_mean": _mean(
                 [v.placements_below_current_top_band_after_opening_next_band for v in values_sorted]
