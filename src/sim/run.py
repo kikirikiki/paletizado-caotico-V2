@@ -243,6 +243,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max candidatos factibles a expandir por paso del micro-planner",
     )
     parser.add_argument(
+        "--use-early-layer-pattern-planner",
+        action="store_true",
+        help="Activa planner corto de apertura de capa (prefix beam por capa).",
+    )
+    parser.add_argument(
+        "--layer-pattern-prefix-depth",
+        type=int,
+        default=3,
+        help="Profundidad del prefijo planificado al abrir capa.",
+    )
+    parser.add_argument(
+        "--layer-pattern-beam-width",
+        type=int,
+        default=4,
+        help="Beam width del planner de apertura de capa.",
+    )
+    parser.add_argument(
+        "--layer-pattern-candidate-cap",
+        type=int,
+        default=8,
+        help="Candidatos maximos por expansion del planner de apertura de capa.",
+    )
+    parser.add_argument(
         "--batchfill-layer-starter",
         action="store_true",
         help="Activa BatchFill para elegir mejor starter al abrir capa nueva",
@@ -466,6 +489,10 @@ def run_simulation(
     micro_depth: int = 3,
     micro_width: int = 8,
     micro_topk: int = 15,
+    use_early_layer_pattern_planner: bool = False,
+    layer_pattern_prefix_depth: int = 3,
+    layer_pattern_beam_width: int = 4,
+    layer_pattern_candidate_cap: int = 8,
     batchfill_layer_starter: bool = False,
     batchfill_starters_max: int = 6,
     batchfill_budget_ms: int = 150,
@@ -621,6 +648,10 @@ def run_simulation(
             micro_plan_depth=int(micro_depth),
             micro_plan_width=int(micro_width),
             micro_plan_topk_per_step=int(micro_topk),
+            use_early_layer_pattern_planner=bool(use_early_layer_pattern_planner),
+            layer_pattern_prefix_depth=max(1, int(layer_pattern_prefix_depth)),
+            layer_pattern_beam_width=max(1, int(layer_pattern_beam_width)),
+            layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
             batchfill_layer_starter=bool(batchfill_layer_starter),
             batchfill_starters_max=int(batchfill_starters_max),
             batchfill_budget_ms=int(batchfill_budget_ms),
@@ -778,6 +809,10 @@ def run_simulation(
             "micro_depth": int(micro_depth),
             "micro_width": int(micro_width),
             "micro_topk": int(micro_topk),
+            "use_early_layer_pattern_planner": bool(use_early_layer_pattern_planner),
+            "layer_pattern_prefix_depth": int(max(1, int(layer_pattern_prefix_depth))),
+            "layer_pattern_beam_width": int(max(1, int(layer_pattern_beam_width))),
+            "layer_pattern_candidate_cap": int(max(1, int(layer_pattern_candidate_cap))),
             "batchfill_layer_starter": bool(batchfill_layer_starter),
             "batchfill_starters_max": int(batchfill_starters_max),
             "batchfill_budget_ms": int(batchfill_budget_ms),
@@ -882,6 +917,10 @@ def main() -> None:
         micro_depth=int(args.micro_depth),
         micro_width=int(args.micro_width),
         micro_topk=int(args.micro_topk),
+        use_early_layer_pattern_planner=bool(args.use_early_layer_pattern_planner),
+        layer_pattern_prefix_depth=int(args.layer_pattern_prefix_depth),
+        layer_pattern_beam_width=int(args.layer_pattern_beam_width),
+        layer_pattern_candidate_cap=int(args.layer_pattern_candidate_cap),
         batchfill_layer_starter=bool(args.batchfill_layer_starter),
         batchfill_starters_max=int(args.batchfill_starters_max),
         batchfill_budget_ms=int(args.batchfill_budget_ms),

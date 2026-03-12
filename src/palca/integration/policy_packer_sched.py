@@ -73,6 +73,13 @@ class PolicyConfig:
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
+    use_early_layer_pattern_planner: bool = False
+    use_layer_template_planner: bool = False
+    layer_pattern_prefix_depth: int = 3
+    layer_pattern_beam_width: int = 4
+    layer_pattern_candidate_cap: int = 8
+    layer_template_candidate_cap: int = 8
+    layer_template_plan_cap: int = 6
     online_controller: bool = False
     controller_debug: bool = False
 
@@ -110,6 +117,7 @@ class PolicyPackerScheduler:
         self.sum_pick_index = 0
         self.dt_extra_total = 0.0
         self.dt_extra_non_head_total = 0.0
+        self._deadlock_count = 0
 
         scheduler_cfg = self.config.scheduler
         self._online_controller_enabled = bool(self.config.online_controller)
@@ -197,6 +205,13 @@ class PolicyPackerScheduler:
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
+        use_early_layer_pattern_planner: bool = False,
+        use_layer_template_planner: bool = False,
+        layer_pattern_prefix_depth: int = 3,
+        layer_pattern_beam_width: int = 4,
+        layer_pattern_candidate_cap: int = 8,
+        layer_template_candidate_cap: int = 8,
+        layer_template_plan_cap: int = 6,
         batchfill_layer_starter: bool = False,
         batchfill_starters_max: int = 6,
         batchfill_budget_ms: int = 150,
@@ -236,6 +251,13 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            use_early_layer_pattern_planner=bool(use_early_layer_pattern_planner),
+            use_layer_template_planner=bool(use_layer_template_planner),
+            layer_pattern_prefix_depth=max(1, int(layer_pattern_prefix_depth)),
+            layer_pattern_beam_width=max(1, int(layer_pattern_beam_width)),
+            layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
+            layer_template_candidate_cap=max(1, int(layer_template_candidate_cap)),
+            layer_template_plan_cap=max(1, int(layer_template_plan_cap)),
             batchfill_layer_starter=batchfill_layer_starter,
             batchfill_starters_max=batchfill_starters_max,
             batchfill_budget_ms=batchfill_budget_ms,
@@ -288,6 +310,13 @@ class PolicyPackerScheduler:
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
+            use_early_layer_pattern_planner=bool(use_early_layer_pattern_planner),
+            use_layer_template_planner=bool(use_layer_template_planner),
+            layer_pattern_prefix_depth=max(1, int(layer_pattern_prefix_depth)),
+            layer_pattern_beam_width=max(1, int(layer_pattern_beam_width)),
+            layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
+            layer_template_candidate_cap=max(1, int(layer_template_candidate_cap)),
+            layer_template_plan_cap=max(1, int(layer_template_plan_cap)),
             online_controller=online_controller,
             controller_debug=controller_debug,
         )
@@ -445,6 +474,7 @@ class PolicyPackerScheduler:
         self.stop_reason = stop_reason
         self.stop_details = dict(stop_details)
         if plan is None and self.stop_reason == "DEADLOCK":
+            self._deadlock_count += 1
             self._logger.error(
                 "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s",
                 self.stop_details.get("box_id"),
@@ -685,6 +715,78 @@ class PolicyPackerScheduler:
         kpis["batchfill_selected_layer_boxes_mean"] = float(
             float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
         )
+        planner_invocations = int(getattr(self._scheduler, "planner_invocations", 0) or 0)
+        planner_abstains = int(getattr(self._scheduler, "planner_abstains", 0) or 0)
+        planned_prefix_len_sum = int(getattr(self._scheduler, "planned_prefix_len_sum", 0) or 0)
+        planned_prefix_len_count = int(getattr(self._scheduler, "planned_prefix_len_count", 0) or 0)
+        planned_prefix_executed_sum = int(getattr(self._scheduler, "planned_prefix_executed_sum", 0) or 0)
+        planned_prefix_executed_count = int(getattr(self._scheduler, "planned_prefix_executed_count", 0) or 0)
+        active_layer_commit_replans_total = int(
+            getattr(self._scheduler, "active_layer_commit_replans_total", 0) or 0
+        )
+        active_layer_commit_fallback_same_layer_total = int(
+            getattr(self._scheduler, "active_layer_commit_fallback_same_layer_total", 0) or 0
+        )
+        active_layer_commit_closures_total = int(
+            getattr(self._scheduler, "active_layer_commit_closures_total", 0) or 0
+        )
+        template_selected_total = int(getattr(self._scheduler, "template_selected_total", 0) or 0)
+        template_abstains_total = int(getattr(self._scheduler, "template_abstains_total", 0) or 0)
+        template_rebuilds_total = int(getattr(self._scheduler, "template_rebuilds_total", 0) or 0)
+        committed_layer_plan_len_sum = int(getattr(self._scheduler, "committed_layer_plan_len_sum", 0) or 0)
+        committed_layer_plan_len_count = int(getattr(self._scheduler, "committed_layer_plan_len_count", 0) or 0)
+        template_area_fill_sum = float(getattr(self._scheduler, "template_area_fill_sum", 0.0) or 0.0)
+        template_area_fill_count = int(getattr(self._scheduler, "template_area_fill_count", 0) or 0)
+        template_type_histogram = {
+            str(k): int(v)
+            for k, v in dict(getattr(self._scheduler, "template_type_histogram", {}) or {}).items()
+        }
+        kpis["planner_invocations"] = int(planner_invocations)
+        kpis["planner_abstains"] = int(planner_abstains)
+        kpis["planned_prefix_len_mean"] = float(planned_prefix_len_sum / max(1, planned_prefix_len_count))
+        kpis["planned_prefix_executed_mean"] = float(
+            planned_prefix_executed_sum / max(1, planned_prefix_executed_count)
+        )
+        kpis["active_layer_commit_replans_total"] = int(active_layer_commit_replans_total)
+        kpis["active_layer_commit_fallback_same_layer_total"] = int(active_layer_commit_fallback_same_layer_total)
+        kpis["active_layer_commit_closures_total"] = int(active_layer_commit_closures_total)
+        kpis["template_selected_total"] = int(template_selected_total)
+        kpis["template_abstains_total"] = int(template_abstains_total)
+        kpis["template_rebuilds_total"] = int(template_rebuilds_total)
+        kpis["committed_layer_plan_len_mean"] = float(
+            float(committed_layer_plan_len_sum) / max(1, committed_layer_plan_len_count)
+        )
+        kpis["template_type_histogram"] = dict(template_type_histogram)
+        kpis["template_area_fill_mean"] = float(template_area_fill_sum / max(1, template_area_fill_count))
+        kpis["early_layer_pattern_planner_enabled"] = bool(
+            getattr(self._scheduler.config, "use_early_layer_pattern_planner", False)
+        )
+        kpis["layer_template_planner_enabled"] = bool(
+            getattr(self._scheduler.config, "use_layer_template_planner", False)
+            or getattr(self._scheduler.config, "use_early_layer_pattern_planner", False)
+        )
+        kpis["layer_pattern_prefix_depth"] = int(getattr(self._scheduler.config, "layer_pattern_prefix_depth", 3) or 3)
+        kpis["layer_pattern_beam_width"] = int(getattr(self._scheduler.config, "layer_pattern_beam_width", 4) or 4)
+        kpis["layer_pattern_candidate_cap"] = int(
+            getattr(self._scheduler.config, "layer_pattern_candidate_cap", 8) or 8
+        )
+        kpis["layer_template_candidate_cap"] = int(
+            getattr(
+                self._scheduler.config,
+                "layer_template_candidate_cap",
+                getattr(self._scheduler.config, "layer_pattern_candidate_cap", 8),
+            )
+            or 8
+        )
+        kpis["layer_template_plan_cap"] = int(
+            getattr(
+                self._scheduler.config,
+                "layer_template_plan_cap",
+                getattr(self._scheduler.config, "layer_pattern_prefix_depth", 6),
+            )
+            or 6
+        )
+        kpis["deadlock_count"] = int(self._deadlock_count)
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
         height_hist_sorted = sorted(height_hist)
@@ -825,6 +927,11 @@ class PolicyPackerScheduler:
         kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
         kpis["selected_height_slack_filtered_rate"] = float(slack_filtered_count / max(1, slack_decisions_count))
         kpis["selected_height_slack_set_size_mean"] = float(slack_set_size_sum / max(1, slack_decisions_count))
+        first_pallet_mono = kpis.get("layer_monotonicity_first_pallet", {})
+        if isinstance(first_pallet_mono, dict):
+            kpis["monotonic_stack_rate"] = float(first_pallet_mono.get("monotonic_stack_rate", 1.0) or 1.0)
+            kpis["reentries_total"] = int(first_pallet_mono.get("lower_layer_reentry_count", 0) or 0)
+            kpis["layer_closure_score"] = float(first_pallet_mono.get("layer_closure_score", 1.0) or 1.0)
         return kpis
 
     def collect_controller_metrics(self) -> dict[str, object]:

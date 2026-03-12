@@ -15,6 +15,10 @@ def test_load_profile_canonical_has_required_shape() -> None:
     assert profile["profile_name"] == "one_pallet_canonical"
     assert profile["excel"] == "data/Flujo rampas - Editado.xlsx"
     assert profile["seeds"] == [50021, 50022, 50023, 50024, 50025]
+    assert bool(profile["params"]["use_early_layer_pattern_planner"]) is False
+    assert int(profile["params"]["layer_pattern_prefix_depth"]) == 3
+    assert int(profile["params"]["layer_pattern_beam_width"]) == 4
+    assert int(profile["params"]["layer_pattern_candidate_cap"]) == 8
     assert set(profile["params"].keys()) == set(bench.REQUIRED_PARAM_KEYS)
 
 
@@ -57,12 +61,19 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
         "k=10",
         "micro-width=60",
         "score_mode=\"gain_frag\"",
+        "use_active_layer_commit=true",
+        "use_layer_template_planner=true",
+        "layer_template_candidate_cap=9",
+        "layer_template_plan_cap=6",
     ])
 
     merged = bench.apply_param_overrides(base, overrides)
     assert merged["lookahead_k"] == 10
     assert merged["micro_width"] == 60
     assert merged["score_mode"] == "gain_frag"
+    assert bool(merged["use_early_layer_pattern_planner"]) is True
+    assert int(merged["layer_pattern_candidate_cap"]) == 9
+    assert int(merged["layer_pattern_prefix_depth"]) == 6
 
 
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
@@ -111,6 +122,20 @@ def test_run_benchmark_generates_summary_with_expected_structure(
             "metrics": {
                 "processed_boxes": seed + lookahead_k,
                 "pallet_kpis": {
+                    "planner_invocations": 2,
+                    "planner_abstains": 1,
+                    "planned_prefix_len_mean": 3.0,
+                    "planned_prefix_executed_mean": 2.0,
+                    "active_layer_commit_replans_total": 4,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 1,
+                    "template_selected_total": 3,
+                    "template_abstains_total": 1,
+                    "template_rebuilds_total": 2,
+                    "committed_layer_plan_len_mean": 3.5,
+                    "template_area_fill_mean": 0.42,
+                    "template_type_histogram": {"Rows-X": 2, "Split-Left-Right": 1},
+                    "deadlock_count": 0,
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
                     "layer_monotonicity_first_pallet_by_dest": {
@@ -121,6 +146,7 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                             "lower_layer_reentry_total_drop_mm": 100,
                             "lower_layer_reentry_max_drop_mm": 100,
                             "lower_layer_reentry_mean_drop_mm": 100.0,
+                            "reentries_total": 1,
                             "monotonic_stack_rate": 0.75,
                             "placements_below_current_top_band_after_opening_next_band": 1,
                             "layer_closure_score": 0.5,
@@ -187,7 +213,22 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     assert all(r["first_stack_step"] == 2 for r in rows)
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
+    assert all(r["planner_invocations"] == 2 for r in rows)
+    assert all(r["planner_abstains"] == 1 for r in rows)
+    assert all(abs(float(r["planned_prefix_len_mean"]) - 3.0) < 1e-9 for r in rows)
+    assert all(abs(float(r["planned_prefix_executed_mean"]) - 2.0) < 1e-9 for r in rows)
+    assert all(r["active_layer_commit_replans_total"] == 4 for r in rows)
+    assert all(r["active_layer_commit_fallback_same_layer_total"] == 2 for r in rows)
+    assert all(r["active_layer_commit_closures_total"] == 1 for r in rows)
+    assert all(r["template_selected_total"] == 3 for r in rows)
+    assert all(r["template_abstains_total"] == 1 for r in rows)
+    assert all(r["template_rebuilds_total"] == 2 for r in rows)
+    assert all(abs(float(r["committed_layer_plan_len_mean"]) - 3.5) < 1e-9 for r in rows)
+    assert all(abs(float(r["template_area_fill_mean"]) - 0.42) < 1e-9 for r in rows)
+    assert all("Rows-X" in r["template_type_histogram_json"] for r in rows)
+    assert all(r["deadlock_count"] == 0 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
@@ -210,5 +251,110 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
     assert "lower_layer_reentry_count" in csv_row
+    assert "planner_invocations" in csv_row
+    assert "planned_prefix_executed_mean" in csv_row
+    assert "active_layer_commit_replans_total" in csv_row
+    assert "active_layer_commit_fallback_same_layer_total" in csv_row
+    assert "active_layer_commit_closures_total" in csv_row
+    assert "template_selected_total" in csv_row
+    assert "template_abstains_total" in csv_row
+    assert "template_rebuilds_total" in csv_row
+    assert "committed_layer_plan_len_mean" in csv_row
+    assert "template_type_histogram_json" in csv_row
+    assert "template_area_fill_mean" in csv_row
+    assert "reentries_total" in csv_row
+    assert "deadlock_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+
+
+def test_run_benchmark_feature_on_keeps_strict_monotonicity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_simulation(**kwargs):
+        payload = {
+            "metrics": {
+                "processed_boxes": 18,
+                "stop_reason": None,
+                "pallet_kpis": {
+                    "planner_invocations": 3,
+                    "planner_abstains": 0,
+                    "planned_prefix_len_mean": 3.0,
+                    "planned_prefix_executed_mean": 3.0,
+                    "active_layer_commit_replans_total": 6,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 3,
+                    "template_selected_total": 4,
+                    "template_abstains_total": 0,
+                    "template_rebuilds_total": 3,
+                    "committed_layer_plan_len_mean": 3.2,
+                    "template_area_fill_mean": 0.5,
+                    "template_type_histogram": {"Rows-Y": 4},
+                    "deadlock_count": 0,
+                    "layer_monotonicity_first_pallet_by_dest": {
+                        "1": {
+                            "lower_layer_reentry_count": 0,
+                            "lower_layer_reentry_total_drop_mm": 0,
+                            "lower_layer_reentry_max_drop_mm": 0,
+                            "lower_layer_reentry_mean_drop_mm": 0.0,
+                            "monotonic_stack_rate": 1.0,
+                            "placements_below_current_top_band_after_opening_next_band": 0,
+                            "layer_closure_score": 1.0,
+                            "layer_fill_homogeneity_score": 1.0,
+                            "z_band_fill_homogeneity_score": 1.0,
+                            "layer_band_mm": 100,
+                            "layer_band_fill_progress": [],
+                            "active_layers_over_time": [1, 1, 2, 2],
+                            "z_band_fill_share": {},
+                            "layer_fill_share": {},
+                            "step_trace_relevant": [],
+                            "max_z_seen_so_far_by_step": [0, 100],
+                        }
+                    },
+                },
+            }
+        }
+        out_path = Path(str(kwargs["out_path"]))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps({"pallets": {"1": []}}), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+    summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_out_feature_on",
+        set_overrides=[
+            "use_early_layer_pattern_planner=true",
+            "use_active_layer_commit=true",
+            "use_layer_template_planner=true",
+            "layer_pattern_prefix_depth=3",
+            "layer_pattern_beam_width=4",
+            "layer_pattern_candidate_cap=8",
+            "layer_template_candidate_cap=8",
+            "layer_template_plan_cap=6",
+        ],
+        seeds_override=[50021],
+        variant_name="feature_on",
+    )
+
+    rows = [row for row in summary["rows"] if row["run_label"] == "feature_on"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["planner_invocations"] == 3
+    assert row["planner_abstains"] == 0
+    assert row["active_layer_commit_replans_total"] == 6
+    assert row["active_layer_commit_fallback_same_layer_total"] == 2
+    assert row["active_layer_commit_closures_total"] == 3
+    assert row["template_selected_total"] == 4
+    assert row["template_abstains_total"] == 0
+    assert row["template_rebuilds_total"] == 3
+    assert abs(float(row["committed_layer_plan_len_mean"]) - 3.2) < 1e-9
+    assert abs(float(row["template_area_fill_mean"]) - 0.5) < 1e-9
+    assert "Rows-Y" in row["template_type_histogram_json"]
+    assert abs(float(row["monotonic_stack_rate"]) - 1.0) < 1e-9
+    assert int(row["reentries_total"]) == 0
+    assert int(row["deadlock_count"]) == 0
