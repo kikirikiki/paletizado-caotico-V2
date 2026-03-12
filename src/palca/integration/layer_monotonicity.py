@@ -43,13 +43,15 @@ def compute_layer_monotonicity_metrics(
     layer_band_mm: int = 100,
     bin_area_mm2: int | None = None,
     relevant_steps_limit: int = 40,
+    layer_drop_audit: bool = False,
+    audit_examples_limit: int = 12,
 ) -> dict[str, Any]:
     seq = list(placements)
     n = len(seq)
     band_mm = max(1, int(layer_band_mm))
 
     if n <= 0:
-        return {
+        empty = {
             "layer_band_mm": int(band_mm),
             "placements_count": 0,
             "first_stack_step": -1,
@@ -61,6 +63,11 @@ def compute_layer_monotonicity_metrics(
             "lower_layer_reentry_mean_drop_mm": 0.0,
             "monotonic_stack_rate": 1.0,
             "monotonic_stack_rate_pct": 100.0,
+            "reentries_total": 0,
+            "max_layer_drop": 0,
+            "reentries_drop_ge_2_count": 0,
+            "layer_drop_reference": "max_seen_z_band",
+            "layer_drop_histogram": {"0": 0},
             "monotonic_placements_count": 0,
             "monotonic_violations_count": 0,
             "active_layers_over_time": [],
@@ -80,6 +87,11 @@ def compute_layer_monotonicity_metrics(
             "step_trace_relevant": [],
             "step_trace_head": [],
         }
+        if layer_drop_audit:
+            empty["layer_drop_audit_enabled"] = True
+            empty["layer_drop_examples"] = []
+            empty["layer_drop_step_trace"] = []
+        return empty
 
     first_stack_step = -1
     max_z_seen = 0
@@ -87,6 +99,9 @@ def compute_layer_monotonicity_metrics(
     max_band_seen = 0
     monotonic_count = 0
     reentry_drops: list[int] = []
+    layer_drop_events: list[int] = []
+    layer_drop_histogram: dict[int, int] = defaultdict(int)
+    layer_drop_examples: list[dict[str, Any]] = []
     below_top_after_opening_count = 0
 
     max_z_seen_so_far_by_step: list[int] = []
@@ -114,6 +129,11 @@ def compute_layer_monotonicity_metrics(
 
         prev_max_z = int(max_z_seen)
         prev_max_band = int(max_band_seen)
+        chosen_layer = int(band_id)
+        previous_reference_layer = int(prev_max_band) if step > 0 else int(chosen_layer)
+        layer_drop = max(0, int(previous_reference_layer) - int(chosen_layer))
+        is_layer_reentry = int(layer_drop) > 0
+        layer_drop_histogram[int(layer_drop)] += 1
 
         if step == 0:
             is_reentry = False
@@ -128,11 +148,17 @@ def compute_layer_monotonicity_metrics(
             monotonic_count += 1
         if is_reentry:
             reentry_drops.append(int(reentry_drop_mm))
+        if is_layer_reentry:
+            layer_drop_events.append(int(layer_drop))
 
         opened_new_band = int(band_id) > int(prev_max_band)
         below_current_top_after_opening = int(prev_max_band) >= 1 and int(band_id) < int(prev_max_band)
         if below_current_top_after_opening:
             below_top_after_opening_count += 1
+
+        stacking_mode = _placement_value(placement, "stacking_mode", None)
+        score_mode = _placement_value(placement, "scheduler_score_mode", None)
+        selection_debug = _placement_value(placement, "selection_debug", None)
 
         max_z_seen = max(int(max_z_seen), int(z_mm))
         max_top_seen = max(int(max_top_seen), int(z_mm + h_mm))
@@ -159,7 +185,12 @@ def compute_layer_monotonicity_metrics(
                 "z_mm": int(z_mm),
                 "height_mm": int(h_mm),
                 "top_z_mm": int(z_mm + h_mm),
-                "layer_id": int(layer_id),
+                "runtime_layer_id": int(layer_id),
+                "chosen_layer": int(chosen_layer),
+                "previous_reference_layer": int(previous_reference_layer),
+                "layer_drop": int(layer_drop),
+                "is_layer_reentry": bool(is_layer_reentry),
+                "layer_reference_kind": "max_seen_z_band",
                 "band_id": int(band_id),
                 "max_z_seen_so_far": int(max_z_seen),
                 "max_top_z_seen_so_far": int(max_top_seen),
@@ -169,8 +200,28 @@ def compute_layer_monotonicity_metrics(
                 "reentry_drop_mm": int(reentry_drop_mm),
                 "respects_monotonic_growth": bool(respects_monotonic_growth),
                 "below_current_top_band_after_opening_next_band": bool(below_current_top_after_opening),
+                "stacking_mode": stacking_mode,
+                "score_mode": score_mode,
+                "selection_debug": (
+                    dict(selection_debug)
+                    if isinstance(selection_debug, dict)
+                    else None
+                ),
             }
         )
+        if is_layer_reentry and len(layer_drop_examples) < max(1, int(audit_examples_limit)):
+            layer_drop_examples.append(
+                {
+                    "step": int(step),
+                    "chosen_layer": int(chosen_layer),
+                    "previous_reference_layer": int(previous_reference_layer),
+                    "layer_drop": int(layer_drop),
+                    "z_mm": int(z_mm),
+                    "max_z_seen_so_far": int(max_z_seen),
+                    "stacking_mode": stacking_mode,
+                    "score_mode": score_mode,
+                }
+            )
 
     total_area_mm2 = int(sum(layer_area_mm2.values()))
     total_band_area_mm2 = int(sum(band_area_mm2.values()))
@@ -237,6 +288,7 @@ def compute_layer_monotonicity_metrics(
     for row in step_trace:
         if (
             row["is_reentry"]
+            or row["is_layer_reentry"]
             or row["opened_new_band"]
             or row["below_current_top_band_after_opening_next_band"]
             or row["step"] < 10
@@ -245,7 +297,7 @@ def compute_layer_monotonicity_metrics(
             if len(relevant_steps) >= max(1, int(relevant_steps_limit)):
                 break
 
-    return {
+    payload = {
         "layer_band_mm": int(band_mm),
         "placements_count": int(n),
         "first_stack_step": int(first_stack_step),
@@ -257,6 +309,11 @@ def compute_layer_monotonicity_metrics(
         "lower_layer_reentry_mean_drop_mm": float(mean(reentry_drops)) if reentry_drops else 0.0,
         "monotonic_stack_rate": float(monotonic_stack_rate),
         "monotonic_stack_rate_pct": float(100.0 * monotonic_stack_rate),
+        "reentries_total": int(len(layer_drop_events)),
+        "max_layer_drop": int(max(layer_drop_events)) if layer_drop_events else 0,
+        "reentries_drop_ge_2_count": int(sum(1 for drop in layer_drop_events if int(drop) >= 2)),
+        "layer_drop_reference": "max_seen_z_band",
+        "layer_drop_histogram": _sorted_numeric_dict({int(k): int(v) for k, v in layer_drop_histogram.items()}),
         "monotonic_placements_count": int(monotonic_count),
         "monotonic_violations_count": int(n - monotonic_count),
         "active_layers_over_time": [int(v) for v in active_layers_over_time],
@@ -282,3 +339,8 @@ def compute_layer_monotonicity_metrics(
         "step_trace_relevant": relevant_steps,
         "step_trace_head": step_trace[: max(1, min(60, int(relevant_steps_limit) * 2))],
     }
+    if layer_drop_audit:
+        payload["layer_drop_audit_enabled"] = True
+        payload["layer_drop_examples"] = layer_drop_examples
+        payload["layer_drop_step_trace"] = step_trace
+    return payload

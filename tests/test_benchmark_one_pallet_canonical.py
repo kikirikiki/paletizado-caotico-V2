@@ -156,6 +156,7 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                     {"step_index": 0, "z_mm": 0, "layer_id": 0, "orientation_family": "planar"},
                     {"step_index": 1, "z_mm": 0, "layer_id": 0, "orientation_family": "stand_hw"},
                     {"step_index": 2, "z_mm": 200, "layer_id": 1, "orientation_family": "planar"},
+                    {"step_index": 3, "z_mm": 100, "layer_id": 1, "orientation_family": "planar"},
                 ]
             }
         }
@@ -189,6 +190,9 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
+    assert all(r["max_layer_drop"] == 1 for r in rows)
+    assert all(r["reentries_drop_ge_2_count"] == 0 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
 
@@ -212,3 +216,5 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "lower_layer_reentry_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+    assert "max_layer_drop" in csv_row
+    assert "reentries_drop_ge_2_count" in csv_row

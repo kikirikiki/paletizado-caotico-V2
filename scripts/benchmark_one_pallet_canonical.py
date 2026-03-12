@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from palca.integration.layer_monotonicity import compute_layer_monotonicity_metrics
 from sim.run import run_simulation
 
 PROFILE_SCHEMA_VERSION = 1
@@ -80,6 +81,9 @@ class SeedSummary:
     lower_layer_reentry_total_drop_mm: int | None
     lower_layer_reentry_max_drop_mm: int | None
     lower_layer_reentry_mean_drop_mm: float | None
+    reentries_total: int | None
+    max_layer_drop: int | None
+    reentries_drop_ge_2_count: int | None
     monotonic_stack_rate: float | None
     placements_below_current_top_band_after_opening_next_band: int | None
     layer_closure_score: float | None
@@ -92,6 +96,9 @@ class SeedSummary:
     z_band_fill_share_json: str
     layer_fill_share_json: str
     step_trace_relevant_json: str
+    layer_drop_histogram_json: str
+    layer_drop_examples_json: str
+    layer_drop_audit_json: str
     output_json: str
     placements_json: str
     effective_config_hash: str
@@ -401,6 +408,7 @@ def run_seed(
     params: dict[str, Any],
     effective_config_hash: str,
     run_dir: Path,
+    layer_drop_audit: bool = False,
 ) -> SeedSummary:
     run_dir.mkdir(parents=True, exist_ok=True)
     out_json_path = run_dir / f"seed_{int(seed)}.json"
@@ -437,23 +445,70 @@ def run_seed(
         pallet_kpis if isinstance(pallet_kpis, dict) else {},
         forced_destination=forced_destination,
     )
+    seq = _extract_placement_sequence(placements_path, forced_destination=forced_destination)
+    recomputed_mono = compute_layer_monotonicity_metrics(
+        seq,
+        layer_band_mm=max(1, _safe_int(mono.get("layer_band_mm")) or 100),
+        layer_drop_audit=bool(layer_drop_audit),
+    )
+    metrics_source = recomputed_mono if seq else mono
 
-    max_z_series = mono.get("max_z_seen_so_far_by_step", [])
+    max_z_series = metrics_source.get("max_z_seen_so_far_by_step", [])
     max_z_seen_last_mm = None
     if isinstance(max_z_series, list) and max_z_series:
         max_z_seen_last_mm = _safe_int(max_z_series[-1])
 
-    active_layers_series = mono.get("active_layers_over_time", [])
+    active_layers_series = metrics_source.get("active_layers_over_time", [])
     active_layers_peak = None
     if isinstance(active_layers_series, list) and active_layers_series:
         active_layers_peak = max((_safe_int(v) or 0) for v in active_layers_series)
 
-    step_trace_relevant = mono.get("step_trace_relevant", [])
+    step_trace_relevant = metrics_source.get("step_trace_relevant", [])
     clean_trace = (
         [item for item in step_trace_relevant if isinstance(item, dict)]
         if isinstance(step_trace_relevant, list)
         else []
     )
+    layer_drop_histogram = metrics_source.get("layer_drop_histogram", {})
+    layer_drop_examples = metrics_source.get("layer_drop_examples", [])
+    if not isinstance(layer_drop_examples, list):
+        layer_drop_examples = []
+
+    layer_drop_audit_path = ""
+    if layer_drop_audit:
+        layer_drop_audit_path_obj = run_dir / f"seed_{int(seed)}_layer_drop_audit.json"
+        layer_drop_audit_payload = {
+            "schema_version": 1,
+            "run_label": str(run_label),
+            "seed": int(seed),
+            "layer_definition": {
+                "chosen_layer": "z_mm // layer_band_mm",
+                "reference_layer": "max seen chosen_layer before current placement",
+            },
+            "summary": {
+                "placements_count": _safe_int(metrics_source.get("placements_count")) or 0,
+                "reentries_total": _safe_int(metrics_source.get("reentries_total")) or 0,
+                "max_layer_drop": _safe_int(metrics_source.get("max_layer_drop")) or 0,
+                "reentries_drop_ge_2_count": _safe_int(metrics_source.get("reentries_drop_ge_2_count")) or 0,
+                "monotonic_stack_rate": _safe_float(metrics_source.get("monotonic_stack_rate")) or 0.0,
+                "layer_drop_histogram": layer_drop_histogram if isinstance(layer_drop_histogram, dict) else {},
+            },
+            "drop_examples": [item for item in layer_drop_examples if isinstance(item, dict)],
+            "placements_audit": [
+                item
+                for item in (metrics_source.get("layer_drop_step_trace") or [])
+                if isinstance(item, dict)
+            ],
+            "source": {
+                "placements_json": str(placements_path),
+                "simulation_output_json": str(out_json_path),
+            },
+        }
+        layer_drop_audit_path_obj.write_text(
+            json.dumps(layer_drop_audit_payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        layer_drop_audit_path = str(layer_drop_audit_path_obj)
 
     return SeedSummary(
         run_label=run_label,
@@ -464,27 +519,39 @@ def run_seed(
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
         max_z_seen_last_mm=max_z_seen_last_mm,
-        lower_layer_reentry_count=_safe_int(mono.get("lower_layer_reentry_count")),
-        lower_layer_reentry_total_drop_mm=_safe_int(mono.get("lower_layer_reentry_total_drop_mm")),
-        lower_layer_reentry_max_drop_mm=_safe_int(mono.get("lower_layer_reentry_max_drop_mm")),
-        lower_layer_reentry_mean_drop_mm=_safe_float(mono.get("lower_layer_reentry_mean_drop_mm")),
-        monotonic_stack_rate=_safe_float(mono.get("monotonic_stack_rate")),
+        lower_layer_reentry_count=_safe_int(metrics_source.get("lower_layer_reentry_count")),
+        lower_layer_reentry_total_drop_mm=_safe_int(metrics_source.get("lower_layer_reentry_total_drop_mm")),
+        lower_layer_reentry_max_drop_mm=_safe_int(metrics_source.get("lower_layer_reentry_max_drop_mm")),
+        lower_layer_reentry_mean_drop_mm=_safe_float(metrics_source.get("lower_layer_reentry_mean_drop_mm")),
+        reentries_total=_safe_int(metrics_source.get("reentries_total")),
+        max_layer_drop=_safe_int(metrics_source.get("max_layer_drop")),
+        reentries_drop_ge_2_count=_safe_int(metrics_source.get("reentries_drop_ge_2_count")),
+        monotonic_stack_rate=_safe_float(metrics_source.get("monotonic_stack_rate")),
         placements_below_current_top_band_after_opening_next_band=_safe_int(
-            mono.get("placements_below_current_top_band_after_opening_next_band")
+            metrics_source.get("placements_below_current_top_band_after_opening_next_band")
         ),
-        layer_closure_score=_safe_float(mono.get("layer_closure_score")),
-        layer_fill_homogeneity_score=_safe_float(mono.get("layer_fill_homogeneity_score")),
-        z_band_fill_homogeneity_score=_safe_float(mono.get("z_band_fill_homogeneity_score")),
+        layer_closure_score=_safe_float(metrics_source.get("layer_closure_score")),
+        layer_fill_homogeneity_score=_safe_float(metrics_source.get("layer_fill_homogeneity_score")),
+        z_band_fill_homogeneity_score=_safe_float(metrics_source.get("z_band_fill_homogeneity_score")),
         active_layers_peak=active_layers_peak,
-        layer_band_mm=_safe_int(mono.get("layer_band_mm")),
-        layer_band_fill_progress_json=json.dumps(mono.get("layer_band_fill_progress", []), ensure_ascii=True),
+        layer_band_mm=_safe_int(metrics_source.get("layer_band_mm")),
+        layer_band_fill_progress_json=json.dumps(metrics_source.get("layer_band_fill_progress", []), ensure_ascii=True),
         active_layers_over_time_json=json.dumps(
             active_layers_series if isinstance(active_layers_series, list) else [],
             ensure_ascii=True,
         ),
-        z_band_fill_share_json=json.dumps(mono.get("z_band_fill_share", {}), ensure_ascii=True),
-        layer_fill_share_json=json.dumps(mono.get("layer_fill_share", {}), ensure_ascii=True),
+        z_band_fill_share_json=json.dumps(metrics_source.get("z_band_fill_share", {}), ensure_ascii=True),
+        layer_fill_share_json=json.dumps(metrics_source.get("layer_fill_share", {}), ensure_ascii=True),
         step_trace_relevant_json=json.dumps(clean_trace, ensure_ascii=True),
+        layer_drop_histogram_json=json.dumps(
+            layer_drop_histogram if isinstance(layer_drop_histogram, dict) else {},
+            ensure_ascii=True,
+        ),
+        layer_drop_examples_json=json.dumps(
+            [item for item in layer_drop_examples if isinstance(item, dict)],
+            ensure_ascii=True,
+        ),
+        layer_drop_audit_json=layer_drop_audit_path,
         output_json=str(out_json_path),
         placements_json=str(placements_path),
         effective_config_hash=effective_config_hash,
@@ -496,6 +563,11 @@ def _mean(values: list[int | None]) -> float | None:
     if not nums:
         return None
     return sum(nums) / float(len(nums))
+
+
+def _sum(values: list[int | None]) -> int:
+    nums = [int(v) for v in values if v is not None]
+    return int(sum(nums))
 
 
 def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
@@ -519,6 +591,11 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             "lower_layer_reentry_count_mean": _mean([v.lower_layer_reentry_count for v in values_sorted]),
             "lower_layer_reentry_max_drop_mm_mean": _mean([v.lower_layer_reentry_max_drop_mm for v in values_sorted]),
             "lower_layer_reentry_mean_drop_mm_mean": _mean([v.lower_layer_reentry_mean_drop_mm for v in values_sorted]),
+            "reentries_total_sum": _sum([v.reentries_total for v in values_sorted]),
+            "max_layer_drop_max": max(v.max_layer_drop for v in values_sorted if v.max_layer_drop is not None)
+            if any(v.max_layer_drop is not None for v in values_sorted)
+            else None,
+            "reentries_drop_ge_2_count_sum": _sum([v.reentries_drop_ge_2_count for v in values_sorted]),
             "monotonic_stack_rate_mean": _mean([v.monotonic_stack_rate for v in values_sorted]),
             "placements_below_current_top_band_after_opening_next_band_mean": _mean(
                 [v.placements_below_current_top_band_after_opening_next_band for v in values_sorted]
@@ -610,6 +687,7 @@ def run_benchmark(
     set_overrides: list[str] | None = None,
     seeds_override: list[int] | None = None,
     variant_name: str = "variant",
+    layer_drop_audit: bool = False,
 ) -> dict[str, Any]:
     profile = load_profile(profile_path)
 
@@ -685,6 +763,7 @@ def run_benchmark(
                 params=params,
                 effective_config_hash=str(effective_hash),
                 run_dir=run_output_dir / run_label,
+                layer_drop_audit=bool(layer_drop_audit),
             )
             rows.append(row)
 
@@ -719,6 +798,7 @@ def run_benchmark(
         "schema_version": 1,
         "profile_name": profile["profile_name"],
         "profile_description": profile.get("description", ""),
+        "layer_drop_audit_enabled": bool(layer_drop_audit),
         "fingerprint": fingerprint,
         "runs": {
             "baseline": {
@@ -750,6 +830,9 @@ def run_benchmark(
         "files": {
             "summary_csv": str(csv_path),
             "summary_json": str(run_output_dir / "summary.json"),
+            "layer_drop_audits": [
+                row.layer_drop_audit_json for row in rows_sorted if row.layer_drop_audit_json
+            ],
         },
     }
 
@@ -808,6 +891,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional seed override list. Defaults to profile seeds.",
     )
+    parser.add_argument(
+        "--layer-drop-audit",
+        action="store_true",
+        help="Emit per-seed JSON audit with layer-drop step trace and semantic summary.",
+    )
     return parser
 
 
@@ -820,6 +908,7 @@ def main(argv: list[str] | None = None) -> int:
         set_overrides=list(args.set or []),
         seeds_override=(list(args.seeds) if args.seeds else None),
         variant_name=str(args.variant_name),
+        layer_drop_audit=bool(args.layer_drop_audit),
     )
     return 0
 
