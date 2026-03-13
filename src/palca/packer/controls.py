@@ -72,6 +72,7 @@ class PlacementControl(Protocol):
 class StabilityConfig:
     mode: str = "ratio+corners"
     min_support_ratio: float = 0.75
+    require_corner_support: bool | None = None
     eps_mm: float = 1.0
     settle_snap_grid: bool = False
     grid_mm: int | None = None
@@ -82,7 +83,12 @@ class StabilityConfig:
         return self.mode in ("ratio", "ratio+corners", "ratio+corners+settle")
 
     def enable_corners(self) -> bool:
-        return self.mode in ("ratio+corners", "ratio+corners+settle")
+        mode_has_corner_check = self.mode in ("ratio+corners", "ratio+corners+settle")
+        if not mode_has_corner_check:
+            return False
+        if self.require_corner_support is None:
+            return True
+        return bool(self.require_corner_support)
 
     def enable_settle(self) -> bool:
         return self.mode in ("ratio+corners+settle",)
@@ -176,6 +182,8 @@ class StabilityPlacementControl:
 
         ratio_failed = False
         corners_failed = False
+        corners_required = bool(cfg.enable_corners())
+        debug["corner_support_required"] = corners_required
 
         # 1) SUPPORT RATIO (primero)
         if cfg.enable_ratio():
@@ -196,7 +204,7 @@ class StabilityPlacementControl:
                 ratio_failed = True
 
         # 2) CORNERS SUPPORT (después del ratio)
-        if cfg.enable_corners():
+        if corners_required:
             pallet.stats.corner_checks += 1
             com_supported, overlaps = pallet.com_support_info(adjusted, eps_mm=eps)
             corners_ok = pallet.corners_supported(adjusted, eps_mm=eps)
@@ -206,6 +214,11 @@ class StabilityPlacementControl:
             if not com_supported:
                 pallet.stats.corner_rejects += 1
                 corners_failed = True
+        elif cfg.mode in ("ratio+corners", "ratio+corners+settle"):
+            # Instrumentation when corner requirement is explicitly relaxed.
+            com_supported_relaxed, overlaps_relaxed = pallet.com_support_info(adjusted, eps_mm=eps)
+            debug["com_supported_relaxed"] = bool(com_supported_relaxed)
+            debug["supported_overlaps_count_relaxed"] = int(overlaps_relaxed)
 
         if corners_failed:
             return PlacementControlResult(

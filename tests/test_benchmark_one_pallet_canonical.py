@@ -15,6 +15,16 @@ def test_load_profile_canonical_has_required_shape() -> None:
     assert profile["profile_name"] == "one_pallet_canonical"
     assert profile["excel"] == "data/Flujo rampas - Editado.xlsx"
     assert profile["seeds"] == [50021, 50022, 50023, 50024, 50025]
+    assert bool(profile["params"]["use_early_layer_pattern_planner"]) is False
+    assert int(profile["params"]["layer_pattern_prefix_depth"]) == 3
+    assert int(profile["params"]["layer_pattern_beam_width"]) == 4
+    assert int(profile["params"]["layer_pattern_candidate_cap"]) == 8
+    assert float(profile["params"]["stability_min_support_ratio"]) == float(profile["params"]["min_support"])
+    assert bool(profile["params"]["stability_require_corner_support"]) is True
+    assert bool(profile["params"]["use_layer_template_planner"]) is False
+    assert bool(profile["params"]["two_layer_frontier"]) is False
+    assert int(profile["params"]["opening_span_moves"]) == 2
+    assert int(profile["params"]["repair_burst_max"]) == 2
     assert set(profile["params"].keys()) == set(bench.REQUIRED_PARAM_KEYS)
 
 
@@ -57,12 +67,25 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
         "k=10",
         "micro-width=60",
         "score_mode=\"gain_frag\"",
+        "use_active_layer_commit=true",
+        "use_layer_template_planner=true",
+        "layer_template_candidate_cap=9",
+        "layer_template_plan_cap=6",
+        "two_layer_frontier=true",
+        "opening_span_moves=2",
+        "repair_burst_max=2",
     ])
 
     merged = bench.apply_param_overrides(base, overrides)
     assert merged["lookahead_k"] == 10
     assert merged["micro_width"] == 60
     assert merged["score_mode"] == "gain_frag"
+    assert bool(merged["use_layer_template_planner"]) is True
+    assert int(merged["layer_template_candidate_cap"]) == 9
+    assert int(merged["layer_template_plan_cap"]) == 6
+    assert bool(merged["two_layer_frontier"]) is True
+    assert int(merged["opening_span_moves"]) == 2
+    assert int(merged["repair_burst_max"]) == 2
 
 
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
@@ -79,6 +102,22 @@ def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
     assert "k" not in kwargs
     assert kwargs["episode_seed"] == 50021
     assert kwargs["excel_path"] == profile["excel"]
+
+
+def test_with_two_layer_frontier_overrides_appends_traceable_flags() -> None:
+    overrides = bench._with_two_layer_frontier_overrides(
+        overrides=["lookahead_k=10"],
+        enabled=True,
+        opening_span_moves=2,
+        repair_burst_max=2,
+    )
+
+    assert overrides == [
+        "lookahead_k=10",
+        "two_layer_frontier=true",
+        "opening_span_moves=2",
+        "repair_burst_max=2",
+    ]
 
 
 def test_build_run_simulation_kwargs_fails_on_orphan_param() -> None:
@@ -111,6 +150,46 @@ def test_run_benchmark_generates_summary_with_expected_structure(
             "metrics": {
                 "processed_boxes": seed + lookahead_k,
                 "pallet_kpis": {
+                    "planner_invocations": 2,
+                    "planner_abstains": 1,
+                    "planned_prefix_len_mean": 3.0,
+                    "planned_prefix_executed_mean": 2.0,
+                    "active_layer_commit_replans_total": 4,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 1,
+                    "template_selected_total": 3,
+                    "template_abstains_total": 1,
+                    "template_rebuilds_total": 2,
+                    "committed_layer_plan_len_mean": 3.5,
+                    "template_area_fill_mean": 0.42,
+                    "template_type_histogram": {"Rows-X": 2, "Split-Left-Right": 1},
+                    "deadlock_count": 0,
+                    "max_backstep_depth": 1,
+                    "frontier_width_max": 2,
+                    "two_layer_frontier_violations": 0,
+                    "repair_moves_total": 2,
+                    "layer_reopen_events_total": 0,
+                    "repair_candidates_available_total": 3,
+                    "repair_candidates_selected_total": 1,
+                    "repair_candidates_blocked_total": 2,
+                    "repair_candidates_blocked_by_state_total": 1,
+                    "repair_candidates_blocked_by_closure_total": 1,
+                    "repair_candidates_blocked_by_frontier_total": 0,
+                    "frontier_violation_closed_reopen_total": 0,
+                    "frontier_violation_width_overflow_total": 0,
+                    "frontier_violation_below_frontier_total": 0,
+                    "frontier_decision_trace": [
+                        {
+                            "decision_index": 1,
+                            "active_layer": 1,
+                            "repair_layer": 0,
+                            "selected_layer": 1,
+                            "num_candidates_active_layer": 2,
+                            "num_candidates_repair_layer": 1,
+                            "reason_selected_layer": "opening_window_active",
+                            "repair_not_selected_reason": "opening_window_active",
+                        }
+                    ],
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
                     "layer_monotonicity_first_pallet_by_dest": {
@@ -121,6 +200,7 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                             "lower_layer_reentry_total_drop_mm": 100,
                             "lower_layer_reentry_max_drop_mm": 100,
                             "lower_layer_reentry_mean_drop_mm": 100.0,
+                            "reentries_total": 1,
                             "monotonic_stack_rate": 0.75,
                             "placements_below_current_top_band_after_opening_next_band": 1,
                             "layer_closure_score": 0.5,
@@ -187,10 +267,40 @@ def test_run_benchmark_generates_summary_with_expected_structure(
 
     assert all(r["first_stack_step"] == 2 for r in rows)
     assert all(r["first_stand_hw_step"] == 1 for r in rows)
+    assert all(r["planner_invocations"] == 2 for r in rows)
+    assert all(r["planner_abstains"] == 1 for r in rows)
+    assert all(abs(float(r["planned_prefix_len_mean"]) - 3.0) < 1e-9 for r in rows)
+    assert all(abs(float(r["planned_prefix_executed_mean"]) - 2.0) < 1e-9 for r in rows)
+    assert all(r["active_layer_commit_replans_total"] == 4 for r in rows)
+    assert all(r["active_layer_commit_fallback_same_layer_total"] == 2 for r in rows)
+    assert all(r["active_layer_commit_closures_total"] == 1 for r in rows)
+    assert all(r["template_selected_total"] == 3 for r in rows)
+    assert all(r["template_abstains_total"] == 1 for r in rows)
+    assert all(r["template_rebuilds_total"] == 2 for r in rows)
+    assert all(abs(float(r["committed_layer_plan_len_mean"]) - 3.5) < 1e-9 for r in rows)
+    assert all(abs(float(r["template_area_fill_mean"]) - 0.42) < 1e-9 for r in rows)
+    assert all("Rows-X" in r["template_type_histogram_json"] for r in rows)
+    assert all(r["deadlock_count"] == 0 for r in rows)
+    assert all(r["max_backstep_depth"] == 1 for r in rows)
+    assert all(r["frontier_width_max"] == 2 for r in rows)
+    assert all(r["two_layer_frontier_violations"] == 0 for r in rows)
+    assert all(r["repair_moves_total"] == 2 for r in rows)
+    assert all(r["layer_reopen_events_total"] == 0 for r in rows)
+    assert all(r["repair_candidates_available_total"] == 3 for r in rows)
+    assert all(r["repair_candidates_selected_total"] == 1 for r in rows)
+    assert all(r["repair_candidates_blocked_total"] == 2 for r in rows)
+    assert all(r["repair_candidates_blocked_by_state_total"] == 1 for r in rows)
+    assert all(r["repair_candidates_blocked_by_closure_total"] == 1 for r in rows)
+    assert all(r["repair_candidates_blocked_by_frontier_total"] == 0 for r in rows)
+    assert all(r["frontier_violation_closed_reopen_total"] == 0 for r in rows)
+    assert all(r["frontier_violation_width_overflow_total"] == 0 for r in rows)
+    assert all(r["frontier_violation_below_frontier_total"] == 0 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
+    assert all(r["reentries_total"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
+    assert all("opening_window_active" in r["frontier_decision_trace_json"] for r in rows)
 
     assert summary["runs"]["variant"]["overrides"]["lookahead_k"] == 10
     assert summary["runs"]["baseline"]["effective_config_hash"] != summary["runs"]["variant"]["effective_config_hash"]
@@ -210,5 +320,238 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     with summary_csv.open("r", encoding="utf-8") as handle:
         csv_row = next(csv.DictReader(handle))
     assert "lower_layer_reentry_count" in csv_row
+    assert "planner_invocations" in csv_row
+    assert "planned_prefix_executed_mean" in csv_row
+    assert "active_layer_commit_replans_total" in csv_row
+    assert "active_layer_commit_fallback_same_layer_total" in csv_row
+    assert "max_backstep_depth" in csv_row
+    assert "frontier_width_max" in csv_row
+    assert "two_layer_frontier_violations" in csv_row
+    assert "active_layer_commit_closures_total" in csv_row
+    assert "template_selected_total" in csv_row
+    assert "template_abstains_total" in csv_row
+    assert "template_rebuilds_total" in csv_row
+    assert "committed_layer_plan_len_mean" in csv_row
+    assert "template_type_histogram_json" in csv_row
+    assert "template_area_fill_mean" in csv_row
+    assert "reentries_total" in csv_row
+    assert "deadlock_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+    assert "repair_candidates_available_total" in csv_row
+    assert "repair_candidates_selected_total" in csv_row
+    assert "repair_candidates_blocked_total" in csv_row
+    assert "repair_candidates_blocked_by_state_total" in csv_row
+    assert "repair_candidates_blocked_by_closure_total" in csv_row
+    assert "repair_candidates_blocked_by_frontier_total" in csv_row
+    assert "frontier_violation_closed_reopen_total" in csv_row
+    assert "frontier_violation_width_overflow_total" in csv_row
+    assert "frontier_violation_below_frontier_total" in csv_row
+    assert "frontier_decision_trace_json" in csv_row
+
+
+def test_run_benchmark_feature_on_keeps_strict_monotonicity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_simulation(**kwargs):
+        payload = {
+            "metrics": {
+                "processed_boxes": 18,
+                "stop_reason": None,
+                "pallet_kpis": {
+                    "planner_invocations": 3,
+                    "planner_abstains": 0,
+                    "planned_prefix_len_mean": 3.0,
+                    "planned_prefix_executed_mean": 3.0,
+                    "active_layer_commit_replans_total": 6,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 3,
+                    "template_selected_total": 4,
+                    "template_abstains_total": 0,
+                    "template_rebuilds_total": 3,
+                    "committed_layer_plan_len_mean": 3.2,
+                    "template_area_fill_mean": 0.5,
+                    "template_type_histogram": {"Rows-Y": 4},
+                    "deadlock_count": 0,
+                    "layer_monotonicity_first_pallet_by_dest": {
+                        "1": {
+                            "lower_layer_reentry_count": 0,
+                            "lower_layer_reentry_total_drop_mm": 0,
+                            "lower_layer_reentry_max_drop_mm": 0,
+                            "lower_layer_reentry_mean_drop_mm": 0.0,
+                            "monotonic_stack_rate": 1.0,
+                            "placements_below_current_top_band_after_opening_next_band": 0,
+                            "layer_closure_score": 1.0,
+                            "layer_fill_homogeneity_score": 1.0,
+                            "z_band_fill_homogeneity_score": 1.0,
+                            "layer_band_mm": 100,
+                            "layer_band_fill_progress": [],
+                            "active_layers_over_time": [1, 1, 2, 2],
+                            "z_band_fill_share": {},
+                            "layer_fill_share": {},
+                            "step_trace_relevant": [],
+                            "max_z_seen_so_far_by_step": [0, 100],
+                        }
+                    },
+                },
+            }
+        }
+        out_path = Path(str(kwargs["out_path"]))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps({"pallets": {"1": []}}), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+    summary = bench.run_benchmark(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_out_feature_on",
+        set_overrides=[
+            "use_early_layer_pattern_planner=true",
+            "use_active_layer_commit=true",
+            "use_layer_template_planner=true",
+            "layer_pattern_prefix_depth=3",
+            "layer_pattern_beam_width=4",
+            "layer_pattern_candidate_cap=8",
+            "layer_template_candidate_cap=8",
+            "layer_template_plan_cap=6",
+        ],
+        seeds_override=[50021],
+        variant_name="feature_on",
+    )
+
+    rows = [row for row in summary["rows"] if row["run_label"] == "feature_on"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["planner_invocations"] == 3
+    assert row["planner_abstains"] == 0
+    assert row["active_layer_commit_replans_total"] == 6
+    assert row["active_layer_commit_fallback_same_layer_total"] == 2
+    assert row["active_layer_commit_closures_total"] == 3
+    assert row["template_selected_total"] == 4
+    assert row["template_abstains_total"] == 0
+    assert row["template_rebuilds_total"] == 3
+    assert abs(float(row["committed_layer_plan_len_mean"]) - 3.2) < 1e-9
+    assert abs(float(row["template_area_fill_mean"]) - 0.5) < 1e-9
+    assert "Rows-Y" in row["template_type_histogram_json"]
+    assert abs(float(row["monotonic_stack_rate"]) - 1.0) < 1e-9
+    assert int(row["reentries_total"]) == 0
+    assert int(row["deadlock_count"]) == 0
+
+
+def test_run_stability_sensitivity_2x2_executes_expected_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_simulation(**kwargs):
+        support = float(kwargs["stability_min_support_ratio"])
+        corners = kwargs["stability_require_corner_support"]
+        out_path = Path(str(kwargs["out_path"]))
+        dump_path = Path(str(kwargs["dump_placements_path"]))
+        run_label = out_path.parent.name
+
+        processed_by_variant = {
+            "control": 14,
+            "support75": 15,
+            "no_corners": 14,
+            "support75_no_corners": 16,
+        }
+        payload = {
+            "metrics": {
+                "processed_boxes": processed_by_variant[run_label],
+                "pallet_kpis": {
+                    "planner_invocations": 3,
+                    "planner_abstains": 0,
+                    "planned_prefix_len_mean": 3.0,
+                    "planned_prefix_executed_mean": 3.0,
+                    "active_layer_commit_replans_total": 6,
+                    "active_layer_commit_fallback_same_layer_total": 2,
+                    "active_layer_commit_closures_total": 3,
+                    "template_selected_total": 4,
+                    "template_abstains_total": 0,
+                    "template_rebuilds_total": 3,
+                    "committed_layer_plan_len_mean": 3.2,
+                    "template_area_fill_mean": 0.5,
+                    "template_type_histogram": {"Rows-Y": 4},
+                    "deadlock_count": 0,
+                    "placements_low_support_total": 2 if support <= 0.75 else 0,
+                    "placements_with_corner_relaxed_total": 3 if corners is False else 0,
+                    "placements_without_corner_support_total": 1 if corners is False else 0,
+                    "support_ratio_min_observed": 0.76 if support <= 0.75 else 0.86,
+                    "layer_monotonicity_first_pallet_by_dest": {
+                        "1": {
+                            "lower_layer_reentry_count": 0,
+                            "lower_layer_reentry_total_drop_mm": 0,
+                            "lower_layer_reentry_max_drop_mm": 0,
+                            "lower_layer_reentry_mean_drop_mm": 0.0,
+                            "monotonic_stack_rate": 1.0,
+                            "placements_below_current_top_band_after_opening_next_band": 0,
+                            "layer_closure_score": 1.0,
+                            "layer_fill_homogeneity_score": 1.0,
+                            "z_band_fill_homogeneity_score": 1.0,
+                            "layer_band_mm": 100,
+                            "layer_band_fill_progress": [],
+                            "active_layers_over_time": [1, 2, 2],
+                            "z_band_fill_share": {},
+                            "layer_fill_share": {},
+                            "step_trace_relevant": [],
+                            "max_z_seen_so_far_by_step": [0, 100],
+                        }
+                    },
+                },
+            }
+        }
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_path.write_text(json.dumps({"pallets": {"1": []}}), encoding="utf-8")
+        calls.append(
+            {
+                "run_label": run_label,
+                "support": support,
+                "corners": corners,
+                "use_layer_template_planner": bool(kwargs["use_layer_template_planner"]),
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(bench, "run_simulation", fake_run_simulation)
+    summary = bench.run_stability_sensitivity_2x2(
+        profile_path="configs/benchmarks/one_pallet_canonical.json",
+        outdir=tmp_path / "bench_out_2x2",
+        seeds_override=[50021],
+    )
+
+    assert len(calls) == 4
+    by_label = {str(call["run_label"]): call for call in calls}
+    assert set(by_label.keys()) == set(bench.STABILITY_SENSITIVITY_VARIANT_NAMES)
+    assert by_label["control"]["support"] == pytest.approx(0.85)
+    assert by_label["control"]["corners"] is True
+    assert by_label["support75"]["support"] == pytest.approx(0.75)
+    assert by_label["support75"]["corners"] is True
+    assert by_label["no_corners"]["support"] == pytest.approx(0.85)
+    assert by_label["no_corners"]["corners"] is False
+    assert by_label["support75_no_corners"]["support"] == pytest.approx(0.75)
+    assert by_label["support75_no_corners"]["corners"] is False
+    assert all(bool(call["use_layer_template_planner"]) is True for call in calls)
+
+    assert set(summary["variants"].keys()) == set(bench.STABILITY_SENSITIVITY_VARIANT_NAMES)
+    assert Path(summary["files"]["summary_json"]).exists()
+    assert Path(summary["files"]["comparison_csv"]).exists()
+    for variant_name in bench.STABILITY_SENSITIVITY_VARIANT_NAMES:
+        variant_files = summary["variants"][variant_name]["files"]
+        assert Path(variant_files["summary_csv"]).exists()
+        assert Path(variant_files["summary_json"]).exists()
+
+    comparison = {row["variant_name"]: row for row in summary["comparison"]}
+    assert comparison["support75"]["delta_vs_control"] == pytest.approx(1.0)
+    assert comparison["support75_no_corners"]["processed_boxes_mean"] == pytest.approx(16.0)
+    assert comparison["support75_no_corners"]["monotonic_stack_rate_mean"] == pytest.approx(1.0)
+    assert comparison["support75_no_corners"]["deadlock_count_mean"] == pytest.approx(0.0)
+    assert comparison["support75_no_corners"]["reentries_total_mean"] == pytest.approx(0.0)
