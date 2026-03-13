@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from statistics import mean
-from typing import Iterable
+from typing import Any, Iterable
 
 from ..packer.pallet_model import PalletModel
 from .layer_monotonicity import compute_layer_monotonicity_metrics
@@ -69,6 +69,31 @@ def volume_utilization(pallet: PalletModel) -> float:
     return used / max_volume
 
 
+def default_frontier_kpis() -> dict[str, Any]:
+    return {
+        "reentries_total": 0,
+        "max_backstep_depth": 0,
+        "frontier_width_max": 0,
+        "two_layer_frontier_violations": 0,
+        "repair_moves_total": 0,
+        "layer_reopen_events_total": 0,
+        "layer_closure_score": 1.0,
+    }
+
+
+def merge_frontier_kpis(
+    base_kpis: dict[str, Any],
+    frontier_kpis: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(base_kpis)
+    payload = default_frontier_kpis()
+    if isinstance(frontier_kpis, dict):
+        payload.update(frontier_kpis)
+    for key, value in payload.items():
+        merged[key] = value
+    return merged
+
+
 def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> dict[str, object]:
     volume_by_dest: dict[int, float] = {}
     layer_util_by_dest: dict[int, dict[int, float]] = {}
@@ -97,6 +122,11 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
     stand_hw_gate_blocks_total = 0
     stand_hw_gate_allows_total = 0
     stand_hw_rejected_support_total = 0
+    committed_support_ratio_checks_total = 0
+    support_ratio_min_observed_values: list[float] = []
+    placements_low_support_total = 0
+    placements_with_corner_relaxed_total = 0
+    placements_without_corner_support_total = 0
     layer_monotonicity_first_pallet_by_dest: dict[int, dict[str, object]] = {}
 
     for dest, pallets in pallets_by_dest.items():
@@ -144,6 +174,19 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             stand_hw_gate_blocks_total += int(getattr(pallet.stats, "stand_hw_gate_blocks_total", 0))
             stand_hw_gate_allows_total += int(getattr(pallet.stats, "stand_hw_gate_allows_total", 0))
             stand_hw_rejected_support_total += int(getattr(pallet.stats, "stand_hw_rejected_support_total", 0))
+            committed_support_ratio_checks_total += int(
+                getattr(pallet.stats, "committed_support_ratio_checks", 0)
+            )
+            support_ratio_min = getattr(pallet.stats, "support_ratio_min_observed", None)
+            if isinstance(support_ratio_min, (int, float)):
+                support_ratio_min_observed_values.append(float(support_ratio_min))
+            placements_low_support_total += int(getattr(pallet.stats, "placements_low_support_total", 0))
+            placements_with_corner_relaxed_total += int(
+                getattr(pallet.stats, "placements_with_corner_relaxed_total", 0)
+            )
+            placements_without_corner_support_total += int(
+                getattr(pallet.stats, "placements_without_corner_support_total", 0)
+            )
 
             metrics = pallet.balance_metrics()
             for i, val in enumerate(metrics.quadrant_weights):
@@ -179,7 +222,7 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
 
     first_dest = min(layer_monotonicity_first_pallet_by_dest) if layer_monotonicity_first_pallet_by_dest else None
 
-    return {
+    return merge_frontier_kpis({
         "pallets_count": pallets_count,
         "pallet_volume_utilization": volume_by_dest,
         "pallet_layer_utilization": layer_util_by_dest,
@@ -215,6 +258,15 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         "stand_hw_gate_blocks_total": int(stand_hw_gate_blocks_total),
         "stand_hw_gate_allows_total": int(stand_hw_gate_allows_total),
         "stand_hw_rejected_support_total": int(stand_hw_rejected_support_total),
+        "committed_support_ratio_checks_total": int(committed_support_ratio_checks_total),
+        "support_ratio_min_observed": (
+            float(min(support_ratio_min_observed_values))
+            if support_ratio_min_observed_values
+            else None
+        ),
+        "placements_low_support_total": int(placements_low_support_total),
+        "placements_with_corner_relaxed_total": int(placements_with_corner_relaxed_total),
+        "placements_without_corner_support_total": int(placements_without_corner_support_total),
         "layer_monotonicity_first_pallet_by_dest": {
             int(dest): dict(values) for dest, values in layer_monotonicity_first_pallet_by_dest.items()
         },
@@ -226,4 +278,4 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             if first_dest is not None
             else {}
         ),
-    }
+    }, frontier_kpis=None)

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from collections import deque
 import copy
 from dataclasses import dataclass, field, replace
 import inspect
 import logging
 import time
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
+from ..integration.two_layer_frontier import resolve_frontier_layer
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -17,6 +19,14 @@ from ..scoring.height_slack import (
     rank_for_expansion_with_height_slack,
 )
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
+
+if TYPE_CHECKING:
+    from ..integration.layer_template_planner import (
+        LayerOpeningPlan,
+        LayerTemplatePlanner,
+        PlannedLayerPlacement,
+    )
+    from ..integration.two_layer_frontier import FrontierPalletState, TwoLayerFrontierController
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
@@ -59,6 +69,16 @@ class SchedulerConfig:
     batchfill_starters_max: int = 6
     batchfill_budget_ms: int = 150
     batchfill_greedy_topk: int = 12
+    use_early_layer_pattern_planner: bool = False
+    use_layer_template_planner: bool = False
+    layer_pattern_prefix_depth: int = 3
+    layer_pattern_beam_width: int = 4
+    layer_pattern_candidate_cap: int = 8
+    layer_template_candidate_cap: int = 8
+    layer_template_plan_cap: int = 6
+    two_layer_frontier: bool = False
+    opening_span_moves: int = 2
+    repair_burst_max: int = 2
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -80,6 +100,34 @@ class SchedulerConfig:
         object.__setattr__(self, "batchfill_starters_max", max(1, int(self.batchfill_starters_max)))
         object.__setattr__(self, "batchfill_budget_ms", max(0, int(self.batchfill_budget_ms)))
         object.__setattr__(self, "batchfill_greedy_topk", max(1, int(self.batchfill_greedy_topk)))
+        object.__setattr__(
+            self,
+            "layer_pattern_prefix_depth",
+            max(1, int(self.layer_pattern_prefix_depth)),
+        )
+        object.__setattr__(
+            self,
+            "layer_pattern_beam_width",
+            max(1, int(self.layer_pattern_beam_width)),
+        )
+        object.__setattr__(
+            self,
+            "layer_pattern_candidate_cap",
+            max(1, int(self.layer_pattern_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "layer_template_candidate_cap",
+            max(1, int(self.layer_template_candidate_cap)),
+        )
+        object.__setattr__(
+            self,
+            "layer_template_plan_cap",
+            max(1, int(self.layer_template_plan_cap)),
+        )
+        object.__setattr__(self, "two_layer_frontier", bool(self.two_layer_frontier))
+        object.__setattr__(self, "opening_span_moves", max(1, int(self.opening_span_moves)))
+        object.__setattr__(self, "repair_burst_max", max(1, int(self.repair_burst_max)))
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -166,6 +214,7 @@ class _ScoreTerms:
 class _BeamNode:
     ramps: dict[int, _BeamRampState]
     pallets: dict[int | str, PalletModel]
+    frontier_snapshot: dict[int | str, FrontierPalletState] | None = None
     score_sum: float = 0.0
     gain_sum: float = 0.0
     fragmentation_sum: float = 0.0
@@ -262,6 +311,43 @@ class SchedulerV1:
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
+        self.pending_layer_plan: deque[PlannedLayerPlacement] = deque()
+        self._pending_layer_plan_pallet_id: int | str | None = None
+        self._pending_layer_plan_layer_id: int | None = None
+        self._pending_layer_plan_planned_len = 0
+        self._pending_layer_plan_executed = 0
+        self.planner_invocations = 0
+        self.planner_abstains = 0
+        self.planned_prefix_len_sum = 0
+        self.planned_prefix_len_count = 0
+        self.planned_prefix_executed_sum = 0
+        self.planned_prefix_executed_count = 0
+        self.active_committed_layer_index: int | None = None
+        self._active_committed_layer_z_mm: int | None = None
+        self._active_committed_pallet_id: int | str | None = None
+        self._active_layer_commit_started = False
+        self._active_layer_commit_min_layer_index: int | None = None
+        self.active_layer_commit_replans_total = 0
+        self.active_layer_commit_fallback_same_layer_total = 0
+        self.active_layer_commit_closures_total = 0
+        self._layer_template_planner: LayerTemplatePlanner | None = None
+        self._layer_template_signature: tuple[int, int] | None = None
+        self.template_selected_total = 0
+        self.template_abstains_total = 0
+        self.template_rebuilds_total = 0
+        self.committed_layer_plan_len_sum = 0
+        self.committed_layer_plan_len_count = 0
+        self._active_layer_committed_moves = 0
+        self.template_area_fill_sum = 0.0
+        self.template_area_fill_count = 0
+        self.template_type_histogram: dict[str, int] = {}
+        self._two_layer_frontier: TwoLayerFrontierController | None = None
+
+    def set_two_layer_frontier(self, frontier: TwoLayerFrontierController | None) -> None:
+        self._two_layer_frontier = frontier
+
+    def _two_layer_frontier_enabled(self) -> bool:
+        return bool(self._two_layer_frontier is not None and getattr(self._two_layer_frontier, "enabled", False))
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -278,7 +364,29 @@ class SchedulerV1:
         if self.config.time_budget_ms and self.config.time_budget_ms > 0:
             deadline = time.perf_counter() + (float(self.config.time_budget_ms) / 1000.0)
 
+        planned_action = self._try_layer_opening_plan(sim_state)
+        if planned_action is not None:
+            self._record_selected_spatial_tower_penalty(planned_action)
+            self._update_spatial_state_from_selected_plan(planned_action)
+            selected_height = self._resolve_height_after_mm(planned_action.preview)
+            self._record_height_decision(
+                selected_height=selected_height,
+                min_feasible_height=selected_height,
+            )
+            self.last_eval_stats = {
+                "items_evaluated": 0,
+                "items_feasible": 0,
+                "cutoff": False,
+                "cutoff_reason": "",
+                "mode": "layer_template_planner",
+                "planner_invocations": int(self.planner_invocations),
+                "planner_abstains": int(self.planner_abstains),
+            }
+            return planned_action
+
         micro_enabled = bool(self.config.micro_plan_enabled)
+        if self._active_layer_commit_enabled() and self._active_layer_commit_started:
+            micro_enabled = False
         micro_stats: dict[str, Any] = {}
         if micro_enabled:
             self.micro_plan_calls += 1
@@ -300,6 +408,7 @@ class SchedulerV1:
             ) + 1
 
             if micro_plan is not None:
+                self._maybe_activate_committed_layer_from_plan(micro_plan)
                 self._record_selected_spatial_tower_penalty(micro_plan)
                 self._update_spatial_state_from_selected_plan(micro_plan)
                 self._record_height_decision(
@@ -328,9 +437,516 @@ class SchedulerV1:
             details["micro_plan_feasible_first_candidates"] = int(self.last_micro_feasible_first_candidates)
             self.last_deadlock_item = details
         if plan is not None:
+            self._maybe_activate_committed_layer_from_plan(plan)
             self._record_selected_spatial_tower_penalty(plan)
             self._update_spatial_state_from_selected_plan(plan)
         return plan
+
+    def _template_planner_enabled(self) -> bool:
+        # Compat backward-compatible: el flag legacy activa monotonicidad y planner de capa.
+        return bool(
+            getattr(self.config, "use_layer_template_planner", False)
+            or getattr(self.config, "use_early_layer_pattern_planner", False)
+        )
+
+    def _ensure_layer_template_planner(self) -> LayerTemplatePlanner | None:
+        if not self._template_planner_enabled():
+            self._layer_template_planner = None
+            self._layer_template_signature = None
+            return None
+
+        candidate_cap = int(
+            getattr(
+                self.config,
+                "layer_template_candidate_cap",
+                getattr(self.config, "layer_pattern_candidate_cap", 8),
+            )
+            or 8
+        )
+        plan_cap = int(
+            getattr(
+                self.config,
+                "layer_template_plan_cap",
+                getattr(self.config, "layer_pattern_prefix_depth", 6),
+            )
+            or 6
+        )
+        signature = (max(1, int(candidate_cap)), max(1, int(plan_cap)))
+        if self._layer_template_planner is None or self._layer_template_signature != signature:
+            from ..integration.layer_template_planner import LayerTemplatePlanner
+
+            self._layer_template_planner = LayerTemplatePlanner(
+                candidate_cap=int(signature[0]),
+                plan_cap=int(signature[1]),
+            )
+            self._layer_template_signature = signature
+        return self._layer_template_planner
+
+    # Compatibilidad para tests existentes y monkeypatching.
+    def _ensure_early_layer_pattern_planner(self) -> LayerTemplatePlanner | None:
+        return self._ensure_layer_template_planner()
+
+    @staticmethod
+    def _box_id_matches(lhs: int | str | None, rhs: int | str | None) -> bool:
+        if lhs == rhs:
+            return True
+        return str(lhs) == str(rhs)
+
+    def _active_layer_commit_enabled(self) -> bool:
+        return self._template_planner_enabled() and not self._two_layer_frontier_enabled()
+
+    def _reset_active_layer_commit_state(self) -> None:
+        self.active_committed_layer_index = None
+        self._active_committed_layer_z_mm = None
+        self._active_committed_pallet_id = None
+        self._active_layer_commit_started = False
+        self._active_layer_commit_min_layer_index = None
+        self._active_layer_committed_moves = 0
+
+    def _activate_committed_layer(self, *, pallet_id: int | str, layer_id: int, z_mm: int) -> None:
+        self._active_committed_pallet_id = pallet_id
+        self.active_committed_layer_index = int(layer_id)
+        self._active_committed_layer_z_mm = int(z_mm)
+        self._active_layer_commit_started = True
+        self._active_layer_committed_moves = 0
+        if self._active_layer_commit_min_layer_index is None:
+            self._active_layer_commit_min_layer_index = int(layer_id)
+        else:
+            self._active_layer_commit_min_layer_index = max(
+                int(self._active_layer_commit_min_layer_index),
+                int(layer_id),
+            )
+
+    def _record_active_layer_move(self) -> None:
+        if not self._active_layer_commit_enabled():
+            return
+        if self.active_committed_layer_index is None:
+            return
+        self._active_layer_committed_moves += 1
+
+    def _maybe_activate_committed_layer_from_plan(self, plan: PickPlan | None) -> None:
+        if plan is None:
+            return
+        if not self._active_layer_commit_enabled():
+            return
+        if self.active_committed_layer_index is not None:
+            return
+        layer_id = self._preview_layer_id(plan.preview)
+        z_mm = self._preview_z_mm(plan.preview)
+        if layer_id is None or z_mm is None:
+            return
+        if int(layer_id) <= 0:
+            return
+        self._activate_committed_layer(
+            pallet_id=plan.pallet_id,
+            layer_id=int(layer_id),
+            z_mm=int(z_mm),
+        )
+
+    def _release_active_committed_layer(self, *, closed: bool) -> None:
+        layer_id = self.active_committed_layer_index
+        if layer_id is not None and int(self._active_layer_committed_moves) > 0:
+            self.committed_layer_plan_len_sum += int(self._active_layer_committed_moves)
+            self.committed_layer_plan_len_count += 1
+        if closed and layer_id is not None:
+            self.active_layer_commit_closures_total += 1
+            # Evita endurecer min_layer por cierres degenerados (singleton terminal),
+            # que en benchmark real puede inducir deadlocks prematuros.
+            if int(layer_id) > 0 and int(self._active_layer_committed_moves) >= 2:
+                next_layer = int(layer_id) + 1
+                if self._active_layer_commit_min_layer_index is None:
+                    self._active_layer_commit_min_layer_index = int(next_layer)
+                else:
+                    self._active_layer_commit_min_layer_index = max(
+                        int(self._active_layer_commit_min_layer_index),
+                        int(next_layer),
+                    )
+        self.active_committed_layer_index = None
+        self._active_committed_layer_z_mm = None
+        self._active_layer_committed_moves = 0
+        self._finalize_pending_layer_plan_metrics(reset_plan=True)
+
+    def _active_layer_commit_allows_preview(
+        self,
+        *,
+        pallet_id: int | str,
+        preview: PlacementPreview,
+    ) -> bool:
+        if self._two_layer_frontier_enabled():
+            return True
+        if not self._active_layer_commit_enabled():
+            return True
+        if not self._active_layer_commit_started:
+            return True
+
+        preview_layer_id = self._preview_layer_id(preview)
+        if preview_layer_id is None:
+            return False
+
+        active_pallet_id = self._active_committed_pallet_id
+        active_layer_id = self.active_committed_layer_index
+
+        if active_layer_id is not None:
+            if active_pallet_id != pallet_id or int(preview_layer_id) != int(active_layer_id):
+                return False
+            active_z_mm = self._active_committed_layer_z_mm
+            if active_z_mm is None:
+                return True
+            preview_z_mm = self._preview_z_mm(preview)
+            if preview_z_mm is None:
+                return False
+            return int(preview_z_mm) >= int(active_z_mm)
+
+        if active_pallet_id is not None and active_pallet_id != pallet_id:
+            return False
+
+        min_layer = self._active_layer_commit_min_layer_index
+        if min_layer is None:
+            return True
+        return int(preview_layer_id) >= int(min_layer)
+
+    def _finalize_pending_layer_plan_metrics(self, *, reset_plan: bool) -> None:
+        if self._pending_layer_plan_planned_len > 0:
+            self.planned_prefix_executed_sum += int(self._pending_layer_plan_executed)
+            self.planned_prefix_executed_count += 1
+        if reset_plan:
+            self.pending_layer_plan.clear()
+            self._pending_layer_plan_pallet_id = None
+            self._pending_layer_plan_layer_id = None
+            self._pending_layer_plan_planned_len = 0
+            self._pending_layer_plan_executed = 0
+
+    def _set_pending_layer_plan(self, plan: LayerOpeningPlan) -> None:
+        self._finalize_pending_layer_plan_metrics(reset_plan=True)
+        self.pending_layer_plan = deque(plan.placements)
+        self._pending_layer_plan_pallet_id = plan.pallet_id
+        self._pending_layer_plan_layer_id = int(plan.layer_id)
+        self._pending_layer_plan_planned_len = int(len(plan.placements))
+        self._pending_layer_plan_executed = 0
+        self.planned_prefix_len_sum += int(len(plan.placements))
+        self.planned_prefix_len_count += 1
+        self.committed_layer_plan_len_sum += int(len(plan.placements))
+        self.committed_layer_plan_len_count += 1
+        self.template_selected_total += 1
+        template_name = str(getattr(plan, "template_name", "") or "")
+        if template_name:
+            self.template_type_histogram[template_name] = int(self.template_type_histogram.get(template_name, 0)) + 1
+        template_area_fill = getattr(plan, "template_area_fill", None)
+        if template_area_fill is not None:
+            self.template_area_fill_sum += float(template_area_fill)
+            self.template_area_fill_count += 1
+
+    @staticmethod
+    def _is_actionable_layer_plan(plan: LayerOpeningPlan | None) -> bool:
+        if plan is None:
+            return False
+        plan_len = int(len(getattr(plan, "placements", ()) or ()))
+        if plan_len >= 2:
+            return True
+        return bool(getattr(plan, "terminal_case", False))
+
+    def _consume_pending_layer_plan(self, sim_state: SchedulerSimState) -> PickPlan | None:
+        if not self.pending_layer_plan:
+            return None
+        planned = self.pending_layer_plan[0]
+        if self._active_layer_commit_enabled() and self.active_committed_layer_index is not None:
+            if (
+                planned.pallet_id != self._active_committed_pallet_id
+                or int(planned.layer_id) != int(self.active_committed_layer_index)
+            ):
+                self._finalize_pending_layer_plan_metrics(reset_plan=True)
+                return None
+        pallet = sim_state.pallets.get(planned.pallet_id)
+        if pallet is None or planned.pallet_id in sim_state.pallet_blocked:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+
+        ramp_items = list(sim_state.ramps.get(int(planned.ramp_id), []) or [])
+        selected_idx = -1
+        selected_box: Box | None = None
+        for idx, box in enumerate(ramp_items):
+            if getattr(box, "destination", None) != planned.pallet_id:
+                continue
+            if self._box_id_matches(getattr(box, "box_id", None), planned.box_id):
+                selected_idx = int(idx)
+                selected_box = box
+                break
+
+        if selected_box is None:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+
+        preview = self._preview_place(pallet, selected_box)
+        if not preview.feasible:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+        preview_layer_id = self._preview_layer_id(preview)
+        preview_z_mm = self._preview_z_mm(preview)
+        if (
+            preview_layer_id is None
+            or preview_z_mm is None
+            or int(preview_layer_id) != int(planned.layer_id)
+            or int(preview_z_mm) != int(planned.z_mm)
+        ):
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            return None
+        if self._active_layer_commit_enabled() and self.active_committed_layer_index is not None:
+            active_z_mm = self._active_committed_layer_z_mm
+            if active_z_mm is not None and int(preview_z_mm) < int(active_z_mm):
+                self._finalize_pending_layer_plan_metrics(reset_plan=True)
+                return None
+
+        terms = self._score_candidate(
+            now=float(sim_state.now),
+            box=selected_box,
+            idx=int(selected_idx),
+            preview=preview,
+            max_priority=self._max_priority(ramp_items),
+            height_after_mm=self._resolve_height_after_mm(preview, pallet),
+        )
+        self.pending_layer_plan.popleft()
+        self._pending_layer_plan_executed += 1
+        if not self.pending_layer_plan:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+        if self._active_layer_commit_enabled() and self.active_committed_layer_index is not None:
+            active_z_mm = self._active_committed_layer_z_mm
+            if active_z_mm is None:
+                self._active_committed_layer_z_mm = int(preview_z_mm)
+            else:
+                self._active_committed_layer_z_mm = max(int(active_z_mm), int(preview_z_mm))
+            self._record_active_layer_move()
+
+        return PickPlan(
+            ramp_id=int(planned.ramp_id),
+            buffer_index=int(selected_idx),
+            box_id=selected_box.box_id,
+            pallet_id=planned.pallet_id,
+            preview=preview,
+            score=float(terms.scalar_score),
+            dt_extra=float(terms.dt_extra),
+        )
+
+    def _has_layer_opening_transition(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        pallet_id: int | str,
+        pallet: PalletModel,
+    ) -> bool:
+        top_z_mm = 0
+        for placement in list(getattr(pallet, "placements", []) or []):
+            try:
+                top_z_mm = max(int(top_z_mm), int(getattr(placement, "z_mm", 0) or 0))
+            except Exception:
+                continue
+        has_active = False
+        has_opening = False
+
+        for ramp_id in sorted(sim_state.ramps):
+            for box in list(sim_state.ramps.get(ramp_id, []) or []):
+                if getattr(box, "destination", None) != pallet_id:
+                    continue
+                preview = self._preview_place(pallet, box)
+                if not preview.feasible:
+                    continue
+                z_mm = self._preview_z_mm(preview)
+                if z_mm is None:
+                    continue
+                if int(z_mm) == int(top_z_mm):
+                    has_active = True
+                if int(z_mm) > int(top_z_mm):
+                    has_opening = True
+                if has_active and has_opening:
+                    break
+            if has_active and has_opening:
+                break
+        return bool(has_opening and not has_active)
+
+    def _try_layer_opening_plan(self, sim_state: SchedulerSimState) -> PickPlan | None:
+        planner = self._ensure_early_layer_pattern_planner()
+        if planner is None:
+            self._finalize_pending_layer_plan_metrics(reset_plan=True)
+            self._reset_active_layer_commit_state()
+            return None
+
+        if not self._active_layer_commit_enabled():
+            pending = self._consume_pending_layer_plan(sim_state)
+            if pending is not None:
+                return pending
+            return self._try_open_next_layer_plan(
+                sim_state=sim_state,
+                planner=planner,
+            )
+
+        if self.active_committed_layer_index is not None:
+            pending = self._consume_pending_layer_plan(sim_state)
+            if pending is not None:
+                return pending
+
+            active_pallet_id = self._active_committed_pallet_id
+            active_layer_id = self.active_committed_layer_index
+            active_pallet = sim_state.pallets.get(active_pallet_id) if active_pallet_id is not None else None
+            if (
+                active_pallet_id is None
+                or active_layer_id is None
+                or active_pallet is None
+                or active_pallet_id in sim_state.pallet_blocked
+            ):
+                self._release_active_committed_layer(closed=False)
+            else:
+                self.planner_invocations += 1
+                self.active_layer_commit_replans_total += 1
+                self.template_rebuilds_total += 1
+                plan = planner.plan_for_layer(
+                    pallet_id=active_pallet_id,
+                    pallet=active_pallet,
+                    ramp_queues=sim_state.ramps,
+                    target_layer_id=int(active_layer_id),
+                    target_z_mm=None,
+                    preview_place_fn=self._preview_place,
+                )
+                if not self._is_actionable_layer_plan(plan):
+                    self.planner_abstains += 1
+                    self.template_abstains_total += 1
+                else:
+                    self._set_pending_layer_plan(plan)
+                    pending = self._consume_pending_layer_plan(sim_state)
+                    if pending is not None:
+                        return pending
+
+                fallback = self._try_same_layer_fallback_greedy(
+                    sim_state=sim_state,
+                    pallet_id=active_pallet_id,
+                    layer_id=int(active_layer_id),
+                )
+                if fallback is not None:
+                    fallback_z_mm = self._preview_z_mm(fallback.preview)
+                    if fallback_z_mm is not None:
+                        active_z_mm = self._active_committed_layer_z_mm
+                        if active_z_mm is None:
+                            self._active_committed_layer_z_mm = int(fallback_z_mm)
+                        else:
+                            self._active_committed_layer_z_mm = max(int(active_z_mm), int(fallback_z_mm))
+                    self.active_layer_commit_fallback_same_layer_total += 1
+                    self._record_active_layer_move()
+                    return fallback
+
+                self._release_active_committed_layer(closed=True)
+
+        pending = self._consume_pending_layer_plan(sim_state)
+        if pending is not None:
+            return pending
+        return self._try_open_next_layer_plan(
+            sim_state=sim_state,
+            planner=planner,
+        )
+
+    def _try_open_next_layer_plan(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        planner: LayerTemplatePlanner,
+    ) -> PickPlan | None:
+        for pallet_id, pallet in sorted(sim_state.pallets.items(), key=lambda item: str(item[0])):
+            if pallet_id in sim_state.pallet_blocked:
+                continue
+            if self._active_layer_commit_started and self._active_committed_pallet_id is not None:
+                if pallet_id != self._active_committed_pallet_id:
+                    continue
+            if not self._has_layer_opening_transition(sim_state=sim_state, pallet_id=pallet_id, pallet=pallet):
+                continue
+            self.planner_invocations += 1
+            plan = planner.plan_opening(
+                pallet_id=pallet_id,
+                pallet=pallet,
+                ramp_queues=sim_state.ramps,
+                preview_place_fn=self._preview_place,
+            )
+            if not self._is_actionable_layer_plan(plan):
+                self.planner_abstains += 1
+                self.template_abstains_total += 1
+                continue
+            if self._active_layer_commit_enabled() and self._active_layer_commit_started:
+                min_layer = self._active_layer_commit_min_layer_index
+                if min_layer is not None and int(plan.layer_id) < int(min_layer):
+                    self.planner_abstains += 1
+                    self.template_abstains_total += 1
+                    continue
+            self._set_pending_layer_plan(plan)
+            if self._active_layer_commit_enabled():
+                self._activate_committed_layer(
+                    pallet_id=plan.pallet_id,
+                    layer_id=int(plan.layer_id),
+                    z_mm=int(plan.z_mm),
+                )
+            pending = self._consume_pending_layer_plan(sim_state)
+            if pending is not None:
+                return pending
+        return None
+
+    def _try_same_layer_fallback_greedy(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        pallet_id: int | str,
+        layer_id: int,
+    ) -> PickPlan | None:
+        pallet = sim_state.pallets.get(pallet_id)
+        if pallet is None or pallet_id in sim_state.pallet_blocked:
+            return None
+
+        mode = str(getattr(self.config, "score_mode", ScoreMode.GAIN_FRAG.value) or ScoreMode.GAIN_FRAG.value)
+        best_max: tuple[tuple[Any, ...], PickPlan] | None = None
+        best_min: tuple[tuple[Any, ...], PickPlan] | None = None
+
+        for ramp_id in sorted(sim_state.ramps):
+            ramp_items = list(sim_state.ramps.get(ramp_id, []) or [])
+            max_priority = self._max_priority(ramp_items)
+            for idx, box in enumerate(ramp_items):
+                if getattr(box, "destination", None) != pallet_id:
+                    continue
+                preview = self._preview_place(pallet, box)
+                if not preview.feasible:
+                    continue
+                preview_layer_id = self._preview_layer_id(preview)
+                preview_z_mm = self._preview_z_mm(preview)
+                if preview_layer_id is None or preview_z_mm is None:
+                    continue
+                if int(preview_layer_id) != int(layer_id):
+                    continue
+                active_z_mm = self._active_committed_layer_z_mm
+                if active_z_mm is not None and int(preview_z_mm) < int(active_z_mm):
+                    continue
+
+                terms = self._score_candidate(
+                    now=float(sim_state.now),
+                    box=box,
+                    idx=int(idx),
+                    preview=preview,
+                    max_priority=max_priority,
+                    height_after_mm=self._resolve_height_after_mm(preview, pallet),
+                )
+                plan = PickPlan(
+                    ramp_id=int(ramp_id),
+                    buffer_index=int(idx),
+                    box_id=box.box_id,
+                    pallet_id=pallet_id,
+                    preview=preview,
+                    score=float(terms.scalar_score),
+                    dt_extra=float(terms.dt_extra),
+                )
+                if mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                    key = self._min_height_then_gain_key(terms=terms, box=box)
+                    if best_min is None or key < best_min[0]:
+                        best_min = (key, plan)
+                else:
+                    key = self._gain_frag_sort_key(terms=terms, box=box)
+                    if best_max is None or key > best_max[0]:
+                        best_max = (key, plan)
+
+        if mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return best_min[1] if best_min is not None else None
+        return best_max[1] if best_max is not None else None
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
         elapsed = max(0.0, float(elapsed_ms))
@@ -463,6 +1079,8 @@ class SchedulerV1:
                                 ),
                             }
                     continue
+                if not self._active_layer_commit_allows_preview(pallet_id=pallet_id, preview=preview):
+                    continue
                 items_feasible += 1
 
                 height_after_mm = self._resolve_height_after_mm(preview, pallet)
@@ -515,6 +1133,7 @@ class SchedulerV1:
                 window_boxes_by_pallet_id=window_boxes_by_pallet_id,
                 deadline=deadline,
             )
+        feasible_candidates = self._apply_two_layer_frontier_scored_candidates(feasible_candidates)
 
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
@@ -605,6 +1224,11 @@ class SchedulerV1:
         root = _BeamNode(
             ramps=self._build_beam_ramps(sim_state),
             pallets=dict(sim_state.pallets),
+            frontier_snapshot=(
+                self._two_layer_frontier.snapshot()
+                if self._two_layer_frontier_enabled() and self._two_layer_frontier is not None
+                else None
+            ),
             score_sum=0.0,
             gain_sum=0.0,
             fragmentation_sum=0.0,
@@ -682,6 +1306,11 @@ class SchedulerV1:
                     batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
                     batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
+
+                expansions = self._apply_two_layer_frontier_beam_expansions(
+                    expansions=expansions,
+                    snapshot=node.frontier_snapshot,
+                )
 
                 if depth == 0 and node.first_plan is None and expansions:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
@@ -984,10 +1613,12 @@ class SchedulerV1:
 
         new_ramps = dict(node.ramps)
         new_ramps[action.ramp_id] = self._beam_pick_and_refill(ramp, idx)
+        next_snapshot = self._updated_frontier_snapshot_for_plan(snapshot=node.frontier_snapshot, plan=first_plan)
 
         child = _BeamNode(
             ramps=new_ramps,
             pallets=new_pallets,
+            frontier_snapshot=next_snapshot,
             score_sum=float(node.score_sum) + float(terms.scalar_score),
             gain_sum=float(node.gain_sum) + float(terms.packing_gain),
             fragmentation_sum=float(node.fragmentation_sum) + float(terms.fragmentation),
@@ -1025,6 +1656,146 @@ class SchedulerV1:
             return int(getattr(placement, "layer_id"))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _preview_z_mm(preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        try:
+            return int(getattr(placement, "z_mm"))
+        except (TypeError, ValueError):
+            return None
+
+    def _frontier_layer_for_preview(self, preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        stacking_mode = str(getattr(self, "_frontier_stacking_mode", "layers") or "layers")
+        z_band_mm = getattr(self, "_frontier_z_band_mm", None)
+        return resolve_frontier_layer(
+            layer_id=getattr(placement, "layer_id", None),
+            z_mm=getattr(placement, "z_mm", None),
+            stacking_mode=stacking_mode,
+            z_band_mm=z_band_mm,
+        )
+
+    def _frontier_layer_for_plan(self, plan: PickPlan | None) -> int | None:
+        if plan is None:
+            return None
+        preview = getattr(plan, "preview", None)
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        stacking_mode = str(getattr(self, "_frontier_stacking_mode", "layers") or "layers")
+        z_band_mm = getattr(self, "_frontier_z_band_mm", None)
+        return resolve_frontier_layer(
+            layer_id=getattr(placement, "layer_id", None),
+            z_mm=getattr(placement, "z_mm", None),
+            stacking_mode=stacking_mode,
+            z_band_mm=z_band_mm,
+        )
+
+    def _frontier_best_scored_candidate(self, candidates: Sequence[_ScoredCandidate]) -> _ScoredCandidate:
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(
+                candidates,
+                key=lambda candidate: self._min_height_then_gain_key(candidate.terms, candidate.box),
+            )
+        return max(candidates, key=self._gain_frag_candidate_key)
+
+    def _frontier_best_beam_expansion(self, candidates: Sequence[_BeamExpansion]) -> _BeamExpansion:
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(
+                candidates,
+                key=lambda candidate: self._min_height_then_gain_key(candidate.terms, candidate.box),
+            )
+        return max(candidates, key=self._beam_expansion_gain_frag_key)
+
+    def _apply_two_layer_frontier_scored_candidates(
+        self,
+        candidates: list[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        if not self._two_layer_frontier_enabled() or not candidates or self._two_layer_frontier is None:
+            return candidates
+
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        pallet_order: list[int | str] = []
+        for candidate in candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        filtered: list[_ScoredCandidate] = []
+        for pallet_id in pallet_order:
+            filtered.extend(
+                self._two_layer_frontier.select_candidates(
+                    pallet_id=pallet_id,
+                    candidates=grouped.get(pallet_id, []),
+                    layer_fn=lambda candidate: self._frontier_layer_for_plan(candidate.plan),
+                    best_candidate_fn=self._frontier_best_scored_candidate,
+                )
+            )
+        return filtered
+
+    def _apply_two_layer_frontier_beam_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        snapshot: dict[int | str, FrontierPalletState] | None,
+    ) -> list[_BeamExpansion]:
+        if not self._two_layer_frontier_enabled() or not expansions or self._two_layer_frontier is None:
+            return expansions
+
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        pallet_order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        filtered: list[_BeamExpansion] = []
+        for pallet_id in pallet_order:
+            filtered.extend(
+                self._two_layer_frontier.select_candidates(
+                    pallet_id=pallet_id,
+                    candidates=grouped.get(pallet_id, []),
+                    layer_fn=lambda candidate: self._frontier_layer_for_plan(candidate.node.first_plan),
+                    best_candidate_fn=self._frontier_best_beam_expansion,
+                    snapshot=snapshot,
+                    mutate_metrics=False,
+                )
+            )
+        return filtered
+
+    def _updated_frontier_snapshot_for_plan(
+        self,
+        *,
+        snapshot: dict[int | str, FrontierPalletState] | None,
+        plan: PickPlan | None,
+    ) -> dict[int | str, FrontierPalletState] | None:
+        if not self._two_layer_frontier_enabled() or self._two_layer_frontier is None or plan is None:
+            return snapshot
+        next_snapshot = self._two_layer_frontier.clone_snapshot(snapshot)
+        self._two_layer_frontier.register_selection(
+            pallet_id=plan.pallet_id,
+            layer=self._frontier_layer_for_plan(plan),
+            snapshot=next_snapshot,
+            mutate_metrics=False,
+        )
+        return next_snapshot
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))
