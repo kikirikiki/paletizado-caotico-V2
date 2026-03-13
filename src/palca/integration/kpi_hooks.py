@@ -77,6 +77,16 @@ def default_frontier_kpis() -> dict[str, Any]:
         "two_layer_frontier_violations": 0,
         "repair_moves_total": 0,
         "layer_reopen_events_total": 0,
+        "repair_candidates_available_total": 0,
+        "repair_candidates_selected_total": 0,
+        "repair_candidates_blocked_total": 0,
+        "repair_candidates_blocked_by_state_total": 0,
+        "repair_candidates_blocked_by_closure_total": 0,
+        "repair_candidates_blocked_by_frontier_total": 0,
+        "frontier_violation_closed_reopen_total": 0,
+        "frontier_violation_width_overflow_total": 0,
+        "frontier_violation_below_frontier_total": 0,
+        "frontier_decision_trace": [],
         "layer_closure_score": 1.0,
     }
 

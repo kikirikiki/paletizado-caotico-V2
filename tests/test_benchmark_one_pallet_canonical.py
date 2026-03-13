@@ -169,6 +169,27 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                     "two_layer_frontier_violations": 0,
                     "repair_moves_total": 2,
                     "layer_reopen_events_total": 0,
+                    "repair_candidates_available_total": 3,
+                    "repair_candidates_selected_total": 1,
+                    "repair_candidates_blocked_total": 2,
+                    "repair_candidates_blocked_by_state_total": 1,
+                    "repair_candidates_blocked_by_closure_total": 1,
+                    "repair_candidates_blocked_by_frontier_total": 0,
+                    "frontier_violation_closed_reopen_total": 0,
+                    "frontier_violation_width_overflow_total": 0,
+                    "frontier_violation_below_frontier_total": 0,
+                    "frontier_decision_trace": [
+                        {
+                            "decision_index": 1,
+                            "active_layer": 1,
+                            "repair_layer": 0,
+                            "selected_layer": 1,
+                            "num_candidates_active_layer": 2,
+                            "num_candidates_repair_layer": 1,
+                            "reason_selected_layer": "opening_window_active",
+                            "repair_not_selected_reason": "opening_window_active",
+                        }
+                    ],
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
                     "layer_monotonicity_first_pallet_by_dest": {
@@ -265,11 +286,21 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(r["two_layer_frontier_violations"] == 0 for r in rows)
     assert all(r["repair_moves_total"] == 2 for r in rows)
     assert all(r["layer_reopen_events_total"] == 0 for r in rows)
+    assert all(r["repair_candidates_available_total"] == 3 for r in rows)
+    assert all(r["repair_candidates_selected_total"] == 1 for r in rows)
+    assert all(r["repair_candidates_blocked_total"] == 2 for r in rows)
+    assert all(r["repair_candidates_blocked_by_state_total"] == 1 for r in rows)
+    assert all(r["repair_candidates_blocked_by_closure_total"] == 1 for r in rows)
+    assert all(r["repair_candidates_blocked_by_frontier_total"] == 0 for r in rows)
+    assert all(r["frontier_violation_closed_reopen_total"] == 0 for r in rows)
+    assert all(r["frontier_violation_width_overflow_total"] == 0 for r in rows)
+    assert all(r["frontier_violation_below_frontier_total"] == 0 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(r["reentries_total"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
     assert all(r["layer_band_mm"] == 100 for r in rows)
     assert all("band_id" in r["layer_band_fill_progress_json"] for r in rows)
+    assert all("opening_window_active" in r["frontier_decision_trace_json"] for r in rows)
 
     assert summary["runs"]["variant"]["overrides"]["lookahead_k"] == 10
     assert summary["runs"]["baseline"]["effective_config_hash"] != summary["runs"]["variant"]["effective_config_hash"]
@@ -307,6 +338,16 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "deadlock_count" in csv_row
     assert "monotonic_stack_rate" in csv_row
     assert "step_trace_relevant_json" in csv_row
+    assert "repair_candidates_available_total" in csv_row
+    assert "repair_candidates_selected_total" in csv_row
+    assert "repair_candidates_blocked_total" in csv_row
+    assert "repair_candidates_blocked_by_state_total" in csv_row
+    assert "repair_candidates_blocked_by_closure_total" in csv_row
+    assert "repair_candidates_blocked_by_frontier_total" in csv_row
+    assert "frontier_violation_closed_reopen_total" in csv_row
+    assert "frontier_violation_width_overflow_total" in csv_row
+    assert "frontier_violation_below_frontier_total" in csv_row
+    assert "frontier_decision_trace_json" in csv_row
 
 
 def test_run_benchmark_feature_on_keeps_strict_monotonicity(

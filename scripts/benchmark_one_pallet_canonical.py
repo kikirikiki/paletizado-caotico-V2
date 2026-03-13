@@ -103,6 +103,15 @@ class SeedSummary:
     two_layer_frontier_violations: int | None
     repair_moves_total: int | None
     layer_reopen_events_total: int | None
+    repair_candidates_available_total: int | None
+    repair_candidates_selected_total: int | None
+    repair_candidates_blocked_total: int | None
+    repair_candidates_blocked_by_state_total: int | None
+    repair_candidates_blocked_by_closure_total: int | None
+    repair_candidates_blocked_by_frontier_total: int | None
+    frontier_violation_closed_reopen_total: int | None
+    frontier_violation_width_overflow_total: int | None
+    frontier_violation_below_frontier_total: int | None
     placements_low_support_total: int | None
     placements_with_corner_relaxed_total: int | None
     placements_without_corner_support_total: int | None
@@ -123,6 +132,7 @@ class SeedSummary:
     z_band_fill_share_json: str
     layer_fill_share_json: str
     step_trace_relevant_json: str
+    frontier_decision_trace_json: str
     output_json: str
     placements_json: str
     effective_config_hash: str
@@ -590,6 +600,50 @@ def run_seed(
     layer_reopen_events_total = (
         _safe_int(pallet_kpis.get("layer_reopen_events_total")) if isinstance(pallet_kpis, dict) else None
     )
+    repair_candidates_available_total = (
+        _safe_int(pallet_kpis.get("repair_candidates_available_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    repair_candidates_selected_total = (
+        _safe_int(pallet_kpis.get("repair_candidates_selected_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    repair_candidates_blocked_total = (
+        _safe_int(pallet_kpis.get("repair_candidates_blocked_total")) if isinstance(pallet_kpis, dict) else None
+    )
+    repair_candidates_blocked_by_state_total = (
+        _safe_int(pallet_kpis.get("repair_candidates_blocked_by_state_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    repair_candidates_blocked_by_closure_total = (
+        _safe_int(pallet_kpis.get("repair_candidates_blocked_by_closure_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    repair_candidates_blocked_by_frontier_total = (
+        _safe_int(pallet_kpis.get("repair_candidates_blocked_by_frontier_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    frontier_violation_closed_reopen_total = (
+        _safe_int(pallet_kpis.get("frontier_violation_closed_reopen_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    frontier_violation_width_overflow_total = (
+        _safe_int(pallet_kpis.get("frontier_violation_width_overflow_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    frontier_violation_below_frontier_total = (
+        _safe_int(pallet_kpis.get("frontier_violation_below_frontier_total"))
+        if isinstance(pallet_kpis, dict)
+        else None
+    )
+    frontier_decision_trace_json = (
+        json.dumps(pallet_kpis.get("frontier_decision_trace", []), ensure_ascii=True)
+        if isinstance(pallet_kpis, dict)
+        else "[]"
+    )
     if deadlock_count is None:
         deadlock_samples = pallet_kpis.get("deadlock_samples", []) if isinstance(pallet_kpis, dict) else []
         if isinstance(deadlock_samples, list):
@@ -642,6 +696,15 @@ def run_seed(
         two_layer_frontier_violations=two_layer_frontier_violations,
         repair_moves_total=repair_moves_total,
         layer_reopen_events_total=layer_reopen_events_total,
+        repair_candidates_available_total=repair_candidates_available_total,
+        repair_candidates_selected_total=repair_candidates_selected_total,
+        repair_candidates_blocked_total=repair_candidates_blocked_total,
+        repair_candidates_blocked_by_state_total=repair_candidates_blocked_by_state_total,
+        repair_candidates_blocked_by_closure_total=repair_candidates_blocked_by_closure_total,
+        repair_candidates_blocked_by_frontier_total=repair_candidates_blocked_by_frontier_total,
+        frontier_violation_closed_reopen_total=frontier_violation_closed_reopen_total,
+        frontier_violation_width_overflow_total=frontier_violation_width_overflow_total,
+        frontier_violation_below_frontier_total=frontier_violation_below_frontier_total,
         placements_low_support_total=placements_low_support_total,
         placements_with_corner_relaxed_total=placements_with_corner_relaxed_total,
         placements_without_corner_support_total=placements_without_corner_support_total,
@@ -667,6 +730,7 @@ def run_seed(
         z_band_fill_share_json=json.dumps(mono.get("z_band_fill_share", {}), ensure_ascii=True),
         layer_fill_share_json=json.dumps(mono.get("layer_fill_share", {}), ensure_ascii=True),
         step_trace_relevant_json=json.dumps(clean_trace, ensure_ascii=True),
+        frontier_decision_trace_json=frontier_decision_trace_json,
         output_json=str(out_json_path),
         placements_json=str(placements_path),
         effective_config_hash=effective_config_hash,
@@ -728,6 +792,33 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             ),
             "repair_moves_total_mean": _mean([v.repair_moves_total for v in values_sorted]),
             "layer_reopen_events_total_mean": _mean([v.layer_reopen_events_total for v in values_sorted]),
+            "repair_candidates_available_total_mean": _mean(
+                [v.repair_candidates_available_total for v in values_sorted]
+            ),
+            "repair_candidates_selected_total_mean": _mean(
+                [v.repair_candidates_selected_total for v in values_sorted]
+            ),
+            "repair_candidates_blocked_total_mean": _mean(
+                [v.repair_candidates_blocked_total for v in values_sorted]
+            ),
+            "repair_candidates_blocked_by_state_total_mean": _mean(
+                [v.repair_candidates_blocked_by_state_total for v in values_sorted]
+            ),
+            "repair_candidates_blocked_by_closure_total_mean": _mean(
+                [v.repair_candidates_blocked_by_closure_total for v in values_sorted]
+            ),
+            "repair_candidates_blocked_by_frontier_total_mean": _mean(
+                [v.repair_candidates_blocked_by_frontier_total for v in values_sorted]
+            ),
+            "frontier_violation_closed_reopen_total_mean": _mean(
+                [v.frontier_violation_closed_reopen_total for v in values_sorted]
+            ),
+            "frontier_violation_width_overflow_total_mean": _mean(
+                [v.frontier_violation_width_overflow_total for v in values_sorted]
+            ),
+            "frontier_violation_below_frontier_total_mean": _mean(
+                [v.frontier_violation_below_frontier_total for v in values_sorted]
+            ),
             "placements_low_support_total_mean": _mean([v.placements_low_support_total for v in values_sorted]),
             "placements_with_corner_relaxed_total_mean": _mean(
                 [v.placements_with_corner_relaxed_total for v in values_sorted]

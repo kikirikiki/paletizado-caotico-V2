@@ -8,6 +8,8 @@ from typing import Any, Callable, Literal, Sequence, TypeVar
 
 LayerPhase = Literal["opening", "filling", "repair", "closed"]
 CandidateT = TypeVar("CandidateT")
+ViolationCause = Literal["closed_reopen", "width_overflow", "below_frontier"]
+BlockedCause = Literal["state", "closure", "frontier"]
 
 
 @dataclass
@@ -84,6 +86,18 @@ class TwoLayerFrontierController:
         self.two_layer_frontier_violations = 0
         self.repair_moves_total = 0
         self.layer_reopen_events_total = 0
+        self.repair_candidates_available_total = 0
+        self.repair_candidates_selected_total = 0
+        self.repair_candidates_blocked_total = 0
+        self.repair_candidates_blocked_by_state_total = 0
+        self.repair_candidates_blocked_by_closure_total = 0
+        self.repair_candidates_blocked_by_frontier_total = 0
+        self.frontier_violation_closed_reopen_total = 0
+        self.frontier_violation_width_overflow_total = 0
+        self.frontier_violation_below_frontier_total = 0
+        self._decision_index = 0
+        self._decision_trace_limit = 256
+        self._decision_trace: list[dict[str, object]] = []
         self._layer_closure_scores: list[float] = []
 
     def reset_pallet(self, pallet_id: int | str) -> None:
@@ -105,6 +119,16 @@ class TwoLayerFrontierController:
             "two_layer_frontier_violations": int(self.two_layer_frontier_violations),
             "repair_moves_total": int(self.repair_moves_total),
             "layer_reopen_events_total": int(self.layer_reopen_events_total),
+            "repair_candidates_available_total": int(self.repair_candidates_available_total),
+            "repair_candidates_selected_total": int(self.repair_candidates_selected_total),
+            "repair_candidates_blocked_total": int(self.repair_candidates_blocked_total),
+            "repair_candidates_blocked_by_state_total": int(self.repair_candidates_blocked_by_state_total),
+            "repair_candidates_blocked_by_closure_total": int(self.repair_candidates_blocked_by_closure_total),
+            "repair_candidates_blocked_by_frontier_total": int(self.repair_candidates_blocked_by_frontier_total),
+            "frontier_violation_closed_reopen_total": int(self.frontier_violation_closed_reopen_total),
+            "frontier_violation_width_overflow_total": int(self.frontier_violation_width_overflow_total),
+            "frontier_violation_below_frontier_total": int(self.frontier_violation_below_frontier_total),
+            "frontier_decision_trace": list(self._decision_trace),
             "layer_closure_score": (
                 float(mean(self._layer_closure_scores)) if self._layer_closure_scores else 1.0
             ),
@@ -166,10 +190,38 @@ class TwoLayerFrontierController:
         if not available_layers:
             return []
 
+        active_layer = int(state.active_layer) if state.active_layer is not None else None
+        repair_layer = int(state.repair_layer) if state.repair_layer is not None else None
+        active_candidates = by_layer.get(active_layer, []) if active_layer is not None else []
+        repair_candidates = by_layer.get(repair_layer, []) if repair_layer is not None else []
+        closed_lower_layers = self._closed_lower_layers(
+            state=state,
+            available_layers=available_layers,
+        )
+        below_frontier_layers = self._below_frontier_layers(
+            state=state,
+            available_layers=available_layers,
+        )
+        repair_available = bool(repair_layer is not None and repair_candidates)
+
         if state.active_layer is None:
             chosen_layer = int(min(available_layers))
             self._update_frontier_width(1, mutate_metrics=mutate_metrics)
-            return list(by_layer[chosen_layer])
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=chosen_layer,
+                selected_candidates=by_layer[chosen_layer],
+                active_layer=None,
+                repair_layer=None,
+                num_candidates_active_layer=0,
+                num_candidates_repair_layer=0,
+                reason_selected_layer="initial_active_layer",
+                repair_not_selected_reason=None,
+                repair_available=False,
+                blocked_cause=None,
+                mutate_metrics=mutate_metrics,
+            )
 
         legal_layers = self._candidate_legal_layers(
             state=state,
@@ -177,32 +229,167 @@ class TwoLayerFrontierController:
             mutate_metrics=mutate_metrics,
         )
         if not legal_layers:
-            if mutate_metrics:
-                self.two_layer_frontier_violations += 1
-            return []
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=None,
+                selected_candidates=[],
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=len(active_candidates),
+                num_candidates_repair_layer=len(repair_candidates),
+                reason_selected_layer="no_legal_layer",
+                repair_not_selected_reason=(
+                    "repair_layer_closed"
+                    if closed_lower_layers
+                    else "below_frontier_candidate_only"
+                    if below_frontier_layers
+                    else None
+                ),
+                repair_available=repair_available,
+                blocked_cause=(
+                    "state"
+                    if repair_available
+                    else "closure"
+                    if closed_lower_layers
+                    else "frontier"
+                    if below_frontier_layers
+                    else None
+                ),
+                mutate_metrics=mutate_metrics,
+            )
 
         if len(legal_layers) == 1:
-            return list(by_layer[int(legal_layers[0])])
-
-        active_layer = int(legal_layers[0])
-        repair_layer = int(legal_layers[1])
-        active_candidates = by_layer.get(active_layer, [])
-        repair_candidates = by_layer.get(repair_layer, [])
+            chosen_layer = int(legal_layers[0])
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=chosen_layer,
+                selected_candidates=by_layer[chosen_layer],
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=len(active_candidates),
+                num_candidates_repair_layer=len(repair_candidates),
+                reason_selected_layer=(
+                    "repair_only"
+                    if repair_layer is not None and chosen_layer == repair_layer
+                    else "active_only"
+                    if active_layer is not None and chosen_layer == active_layer
+                    else "next_active_layer"
+                ),
+                repair_not_selected_reason=(
+                    "repair_layer_closed"
+                    if chosen_layer != repair_layer and closed_lower_layers
+                    else "below_frontier_candidate_only"
+                    if chosen_layer != repair_layer and below_frontier_layers
+                    else None
+                ),
+                repair_available=repair_available,
+                blocked_cause=(
+                    "state"
+                    if repair_available and chosen_layer != repair_layer
+                    else "closure"
+                    if chosen_layer != repair_layer and closed_lower_layers
+                    else "frontier"
+                    if chosen_layer != repair_layer and below_frontier_layers
+                    else None
+                ),
+                mutate_metrics=mutate_metrics,
+            )
 
         if not active_candidates:
-            return list(repair_candidates)
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=repair_layer,
+                selected_candidates=repair_candidates,
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=0,
+                num_candidates_repair_layer=len(repair_candidates),
+                reason_selected_layer="repair_only",
+                repair_not_selected_reason=None,
+                repair_available=repair_available,
+                blocked_cause=None,
+                mutate_metrics=mutate_metrics,
+            )
         if not repair_candidates:
-            return list(active_candidates)
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=active_layer,
+                selected_candidates=active_candidates,
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=len(active_candidates),
+                num_candidates_repair_layer=0,
+                reason_selected_layer="active_only",
+                repair_not_selected_reason=(
+                    "repair_layer_closed"
+                    if closed_lower_layers
+                    else "below_frontier_candidate_only"
+                    if below_frontier_layers
+                    else None
+                ),
+                repair_available=False,
+                blocked_cause=(
+                    "closure" if closed_lower_layers else "frontier" if below_frontier_layers else None
+                ),
+                mutate_metrics=mutate_metrics,
+            )
 
         if int(state.opening_moves_remaining) > 0:
-            return list(active_candidates)
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=active_layer,
+                selected_candidates=active_candidates,
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=len(active_candidates),
+                num_candidates_repair_layer=len(repair_candidates),
+                reason_selected_layer="opening_window_active",
+                repair_not_selected_reason="opening_window_active",
+                repair_available=repair_available,
+                blocked_cause="state",
+                mutate_metrics=mutate_metrics,
+            )
         if int(state.repair_burst_used) >= int(self.repair_burst_max):
-            return list(active_candidates)
+            return self._finalize_selection(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=active_layer,
+                selected_candidates=active_candidates,
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=len(active_candidates),
+                num_candidates_repair_layer=len(repair_candidates),
+                reason_selected_layer="repair_burst_exhausted_active",
+                repair_not_selected_reason="repair_burst_exhausted",
+                repair_available=repair_available,
+                blocked_cause="state",
+                mutate_metrics=mutate_metrics,
+            )
 
         best_active = best_candidate_fn(active_candidates)
         best_repair = best_candidate_fn(repair_candidates)
         chosen = repair_candidates if best_candidate_fn([best_active, best_repair]) is best_repair else active_candidates
-        return list(chosen)
+        chosen_layer = repair_layer if chosen is repair_candidates else active_layer
+        return self._finalize_selection(
+            pallet_id=pallet_id,
+            state=state,
+            chosen_layer=chosen_layer,
+            selected_candidates=chosen,
+            active_layer=active_layer,
+            repair_layer=repair_layer,
+            num_candidates_active_layer=len(active_candidates),
+            num_candidates_repair_layer=len(repair_candidates),
+            reason_selected_layer="best_score_repair" if chosen is repair_candidates else "best_score_active",
+            repair_not_selected_reason=None if chosen is repair_candidates else "best_score_active",
+            repair_available=repair_available,
+            blocked_cause=None if chosen is repair_candidates else "state",
+            mutate_metrics=mutate_metrics,
+        )
 
     def register_selection(
         self,
@@ -230,7 +417,7 @@ class TwoLayerFrontierController:
 
         if self._is_closed(state, chosen_layer):
             if mutate_metrics:
-                self.two_layer_frontier_violations += 1
+                self._record_violation("closed_reopen")
                 self.layer_reopen_events_total += 1
             return
 
@@ -267,7 +454,7 @@ class TwoLayerFrontierController:
             return
 
         if mutate_metrics:
-            self.two_layer_frontier_violations += 1
+            self._record_violation("below_frontier")
         self._validate_invariants(state=state, mutate_metrics=mutate_metrics)
 
     def _open_initial_layer(self, *, state: FrontierPalletState, layer: int) -> None:
@@ -312,7 +499,7 @@ class TwoLayerFrontierController:
         active_state = self._ensure_layer_state(state=state, layer=int(new_active_layer), phase="opening")
         if active_state.phase == "closed":
             if mutate_metrics:
-                self.two_layer_frontier_violations += 1
+                self._record_violation("closed_reopen")
                 self.layer_reopen_events_total += 1
             return
         active_state.moves += 1
@@ -357,6 +544,14 @@ class TwoLayerFrontierController:
 
         if legal:
             self._update_frontier_width(len(legal), mutate_metrics=mutate_metrics)
+            illegal_lower = [
+                layer
+                for layer in available_layers
+                if layer < int(active_layer if active_layer is not None else layer + 1)
+                and int(layer) not in set(legal)
+            ]
+            if illegal_lower and mutate_metrics:
+                self._record_violation("below_frontier")
             return tuple(legal)
 
         if active_layer is not None:
@@ -371,7 +566,7 @@ class TwoLayerFrontierController:
             if repair_layer is None or int(layer) < int(repair_layer)
         ]
         if illegal_lower and mutate_metrics:
-            self.two_layer_frontier_violations += 1
+            self._record_violation("below_frontier")
         return ()
 
     def _validate_invariants(self, *, state: FrontierPalletState, mutate_metrics: bool) -> bool:
@@ -397,7 +592,10 @@ class TwoLayerFrontierController:
                     layer_state.phase = "closed"
 
         if not ok and mutate_metrics:
-            self.two_layer_frontier_violations += 1
+            if active_count + repair_count > 2:
+                self._record_violation("width_overflow")
+            else:
+                self._record_violation("below_frontier")
         return ok
 
     def _update_backstep_depth(self, *, state: FrontierPalletState, layer: int, mutate_metrics: bool) -> None:
@@ -409,14 +607,14 @@ class TwoLayerFrontierController:
         if mutate_metrics:
             self.max_backstep_depth = max(int(self.max_backstep_depth), int(depth))
             if int(depth) > int(self.allowed_backstep_depth):
-                self.two_layer_frontier_violations += 1
+                self._record_violation("below_frontier")
 
     def _update_frontier_width(self, width: int, *, mutate_metrics: bool) -> None:
         if not mutate_metrics:
             return
         self.frontier_width_max = max(int(self.frontier_width_max), int(width))
         if int(width) > 2:
-            self.two_layer_frontier_violations += 1
+            self._record_violation("width_overflow")
 
     @staticmethod
     def _phase_for_active(state: FrontierPalletState) -> LayerPhase:
@@ -460,3 +658,124 @@ class TwoLayerFrontierController:
         )
         state.layers[int(layer)] = created
         return created
+
+    def _record_violation(self, cause: ViolationCause) -> None:
+        self.two_layer_frontier_violations += 1
+        if cause == "closed_reopen":
+            self.frontier_violation_closed_reopen_total += 1
+            return
+        if cause == "width_overflow":
+            self.frontier_violation_width_overflow_total += 1
+            return
+        self.frontier_violation_below_frontier_total += 1
+
+    def _record_blocked_repair(self, cause: BlockedCause) -> None:
+        self.repair_candidates_blocked_total += 1
+        if cause == "state":
+            self.repair_candidates_blocked_by_state_total += 1
+            return
+        if cause == "closure":
+            self.repair_candidates_blocked_by_closure_total += 1
+            return
+        self.repair_candidates_blocked_by_frontier_total += 1
+
+    def _finalize_selection(
+        self,
+        *,
+        pallet_id: int | str,
+        state: FrontierPalletState,
+        chosen_layer: int | None,
+        selected_candidates: Sequence[CandidateT],
+        active_layer: int | None,
+        repair_layer: int | None,
+        num_candidates_active_layer: int,
+        num_candidates_repair_layer: int,
+        reason_selected_layer: str,
+        repair_not_selected_reason: str | None,
+        repair_available: bool,
+        blocked_cause: BlockedCause | None,
+        mutate_metrics: bool,
+    ) -> list[CandidateT]:
+        if mutate_metrics:
+            if repair_available:
+                self.repair_candidates_available_total += 1
+            if repair_available and repair_layer is not None and chosen_layer == int(repair_layer):
+                self.repair_candidates_selected_total += 1
+            elif blocked_cause is not None:
+                self._record_blocked_repair(blocked_cause)
+            self._record_decision_trace(
+                pallet_id=pallet_id,
+                state=state,
+                chosen_layer=chosen_layer,
+                active_layer=active_layer,
+                repair_layer=repair_layer,
+                num_candidates_active_layer=num_candidates_active_layer,
+                num_candidates_repair_layer=num_candidates_repair_layer,
+                reason_selected_layer=reason_selected_layer,
+                repair_not_selected_reason=repair_not_selected_reason,
+            )
+        return list(selected_candidates)
+
+    def _record_decision_trace(
+        self,
+        *,
+        pallet_id: int | str,
+        state: FrontierPalletState,
+        chosen_layer: int | None,
+        active_layer: int | None,
+        repair_layer: int | None,
+        num_candidates_active_layer: int,
+        num_candidates_repair_layer: int,
+        reason_selected_layer: str,
+        repair_not_selected_reason: str | None,
+    ) -> None:
+        self._decision_index += 1
+        if len(self._decision_trace) >= int(self._decision_trace_limit):
+            return
+        self._decision_trace.append(
+            {
+                "decision_index": int(self._decision_index),
+                "pallet_id": pallet_id,
+                "active_layer": active_layer,
+                "repair_layer": repair_layer,
+                "selected_layer": chosen_layer,
+                "num_candidates_active_layer": int(num_candidates_active_layer),
+                "num_candidates_repair_layer": int(num_candidates_repair_layer),
+                "reason_selected_layer": str(reason_selected_layer),
+                "repair_not_selected_reason": repair_not_selected_reason,
+                "opening_moves_remaining": int(state.opening_moves_remaining),
+                "repair_burst_used": int(state.repair_burst_used),
+            }
+        )
+
+    def _closed_lower_layers(
+        self,
+        *,
+        state: FrontierPalletState,
+        available_layers: Sequence[int],
+    ) -> tuple[int, ...]:
+        if state.active_layer is None:
+            return ()
+        return tuple(
+            int(layer)
+            for layer in available_layers
+            if int(layer) < int(state.active_layer) and self._is_closed(state, int(layer))
+        )
+
+    def _below_frontier_layers(
+        self,
+        *,
+        state: FrontierPalletState,
+        available_layers: Sequence[int],
+    ) -> tuple[int, ...]:
+        if state.active_layer is None:
+            return ()
+        repair_layer = state.repair_layer
+        closed_layers = set(self._closed_lower_layers(state=state, available_layers=available_layers))
+        return tuple(
+            int(layer)
+            for layer in available_layers
+            if int(layer) < int(state.active_layer)
+            and int(layer) not in closed_layers
+            and (repair_layer is None or int(layer) < int(repair_layer))
+        )
