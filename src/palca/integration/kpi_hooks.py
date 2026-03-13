@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from statistics import mean
-from typing import Iterable
+from typing import Any, Iterable
 
 from ..packer.pallet_model import PalletModel
 from .layer_monotonicity import compute_layer_monotonicity_metrics
@@ -67,6 +67,31 @@ def volume_utilization(pallet: PalletModel) -> float:
     for placement in pallet.placements:
         used += float(placement.length_mm) * float(placement.width_mm) * float(placement.height_mm)
     return used / max_volume
+
+
+def default_frontier_kpis() -> dict[str, Any]:
+    return {
+        "reentries_total": 0,
+        "max_backstep_depth": 0,
+        "frontier_width_max": 0,
+        "two_layer_frontier_violations": 0,
+        "repair_moves_total": 0,
+        "layer_reopen_events_total": 0,
+        "layer_closure_score": 1.0,
+    }
+
+
+def merge_frontier_kpis(
+    base_kpis: dict[str, Any],
+    frontier_kpis: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(base_kpis)
+    payload = default_frontier_kpis()
+    if isinstance(frontier_kpis, dict):
+        payload.update(frontier_kpis)
+    for key, value in payload.items():
+        merged[key] = value
+    return merged
 
 
 def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> dict[str, object]:
@@ -197,7 +222,7 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
 
     first_dest = min(layer_monotonicity_first_pallet_by_dest) if layer_monotonicity_first_pallet_by_dest else None
 
-    return {
+    return merge_frontier_kpis({
         "pallets_count": pallets_count,
         "pallet_volume_utilization": volume_by_dest,
         "pallet_layer_utilization": layer_util_by_dest,
@@ -253,4 +278,4 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
             if first_dest is not None
             else {}
         ),
-    }
+    }, frontier_kpis=None)

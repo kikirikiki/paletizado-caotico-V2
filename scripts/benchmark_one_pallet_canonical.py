@@ -98,6 +98,11 @@ class SeedSummary:
     max_z_seen_last_mm: int | None
     reentries_total: int | None
     deadlock_count: int | None
+    max_backstep_depth: int | None
+    frontier_width_max: int | None
+    two_layer_frontier_violations: int | None
+    repair_moves_total: int | None
+    layer_reopen_events_total: int | None
     placements_low_support_total: int | None
     placements_with_corner_relaxed_total: int | None
     placements_without_corner_support_total: int | None
@@ -215,6 +220,26 @@ def _parse_set_overrides(items: list[str]) -> dict[str, Any]:
         key = _normalize_param_key(raw_key)
         out[key] = _coerce_override_value(raw_value)
     return out
+
+
+def _with_two_layer_frontier_overrides(
+    *,
+    overrides: list[str],
+    enabled: bool,
+    opening_span_moves: int,
+    repair_burst_max: int,
+) -> list[str]:
+    merged = list(overrides)
+    if not enabled:
+        return merged
+    merged.extend(
+        [
+            "two_layer_frontier=true",
+            f"opening_span_moves={int(opening_span_moves)}",
+            f"repair_burst_max={int(repair_burst_max)}",
+        ]
+    )
+    return merged
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
@@ -556,6 +581,15 @@ def run_seed(
     if reentries_total is None and isinstance(pallet_kpis, dict):
         reentries_total = _safe_int(pallet_kpis.get("reentries_total"))
     deadlock_count = _safe_int(pallet_kpis.get("deadlock_count")) if isinstance(pallet_kpis, dict) else None
+    max_backstep_depth = _safe_int(pallet_kpis.get("max_backstep_depth")) if isinstance(pallet_kpis, dict) else None
+    frontier_width_max = _safe_int(pallet_kpis.get("frontier_width_max")) if isinstance(pallet_kpis, dict) else None
+    two_layer_frontier_violations = (
+        _safe_int(pallet_kpis.get("two_layer_frontier_violations")) if isinstance(pallet_kpis, dict) else None
+    )
+    repair_moves_total = _safe_int(pallet_kpis.get("repair_moves_total")) if isinstance(pallet_kpis, dict) else None
+    layer_reopen_events_total = (
+        _safe_int(pallet_kpis.get("layer_reopen_events_total")) if isinstance(pallet_kpis, dict) else None
+    )
     if deadlock_count is None:
         deadlock_samples = pallet_kpis.get("deadlock_samples", []) if isinstance(pallet_kpis, dict) else []
         if isinstance(deadlock_samples, list):
@@ -603,6 +637,11 @@ def run_seed(
         max_z_seen_last_mm=max_z_seen_last_mm,
         reentries_total=reentries_total,
         deadlock_count=deadlock_count,
+        max_backstep_depth=max_backstep_depth,
+        frontier_width_max=frontier_width_max,
+        two_layer_frontier_violations=two_layer_frontier_violations,
+        repair_moves_total=repair_moves_total,
+        layer_reopen_events_total=layer_reopen_events_total,
         placements_low_support_total=placements_low_support_total,
         placements_with_corner_relaxed_total=placements_with_corner_relaxed_total,
         placements_without_corner_support_total=placements_without_corner_support_total,
@@ -682,6 +721,13 @@ def _aggregate_rows(rows: list[SeedSummary]) -> dict[str, dict[str, Any]]:
             ),
             "reentries_total_mean": _mean([v.reentries_total for v in values_sorted]),
             "deadlock_count_mean": _mean([v.deadlock_count for v in values_sorted]),
+            "max_backstep_depth_mean": _mean([v.max_backstep_depth for v in values_sorted]),
+            "frontier_width_max_mean": _mean([v.frontier_width_max for v in values_sorted]),
+            "two_layer_frontier_violations_mean": _mean(
+                [v.two_layer_frontier_violations for v in values_sorted]
+            ),
+            "repair_moves_total_mean": _mean([v.repair_moves_total for v in values_sorted]),
+            "layer_reopen_events_total_mean": _mean([v.layer_reopen_events_total for v in values_sorted]),
             "placements_low_support_total_mean": _mean([v.placements_low_support_total for v in values_sorted]),
             "placements_with_corner_relaxed_total_mean": _mean(
                 [v.placements_with_corner_relaxed_total for v in values_sorted]
@@ -1231,6 +1277,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Label used in summary for the variant run.",
     )
     parser.add_argument(
+        "--two-layer-frontier",
+        action="store_true",
+        help="Aplica overrides de Opcion C sobre la variante benchmark.",
+    )
+    parser.add_argument(
+        "--opening-span-moves",
+        type=int,
+        default=2,
+        help="Override trazable para opening_span_moves cuando se activa two-layer-frontier.",
+    )
+    parser.add_argument(
+        "--repair-burst-max",
+        type=int,
+        default=2,
+        help="Override trazable para repair_burst_max cuando se activa two-layer-frontier.",
+    )
+    parser.add_argument(
         "--seeds",
         nargs="*",
         type=int,
@@ -1254,11 +1317,17 @@ def main(argv: list[str] | None = None) -> int:
             seeds_override=(list(args.seeds) if args.seeds else None),
         )
     else:
+        merged_overrides = _with_two_layer_frontier_overrides(
+            overrides=list(args.set or []),
+            enabled=bool(args.two_layer_frontier),
+            opening_span_moves=int(args.opening_span_moves),
+            repair_burst_max=int(args.repair_burst_max),
+        )
         run_benchmark(
             profile_path=args.profile,
             outdir=args.outdir,
             variant_config_path=args.variant_config,
-            set_overrides=list(args.set or []),
+            set_overrides=merged_overrides,
             seeds_override=(list(args.seeds) if args.seeds else None),
             variant_name=str(args.variant_name),
         )

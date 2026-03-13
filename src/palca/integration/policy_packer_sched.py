@@ -14,7 +14,8 @@ from ..packer.scoring import ScoringWeights
 from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerRampState, SchedulerSimState, SchedulerV1
 from ..control.controller import OnlineController
 from ..control.types import ControllerEvent, ControllerMode, DecisionContext, Overrides
-from .kpi_hooks import aggregate_pallet_kpis
+from .kpi_hooks import aggregate_pallet_kpis, merge_frontier_kpis
+from .two_layer_frontier import TwoLayerFrontierController, resolve_frontier_layer
 
 
 SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15)
@@ -82,6 +83,9 @@ class PolicyConfig:
     layer_pattern_candidate_cap: int = 8
     layer_template_candidate_cap: int = 8
     layer_template_plan_cap: int = 6
+    two_layer_frontier: bool = False
+    opening_span_moves: int = 2
+    repair_burst_max: int = 2
     online_controller: bool = False
     controller_debug: bool = False
 
@@ -120,6 +124,16 @@ class PolicyPackerScheduler:
         self.dt_extra_total = 0.0
         self.dt_extra_non_head_total = 0.0
         self._deadlock_count = 0
+        self._two_layer_frontier = TwoLayerFrontierController(
+            enabled=bool(getattr(self.config.scheduler, "two_layer_frontier", False)),
+            opening_span_moves=int(getattr(self.config.scheduler, "opening_span_moves", 2) or 2),
+            repair_burst_max=int(getattr(self.config.scheduler, "repair_burst_max", 2) or 2),
+            max_backstep_depth=1,
+        )
+        self._scheduler._frontier_stacking_mode = str(self.config.stacking_mode or "layers")  # type: ignore[attr-defined]
+        self._scheduler._frontier_z_band_mm = self.config.z_band_mm  # type: ignore[attr-defined]
+        if hasattr(self._scheduler, "set_two_layer_frontier"):
+            self._scheduler.set_two_layer_frontier(self._two_layer_frontier)
 
         scheduler_cfg = self.config.scheduler
         self._online_controller_enabled = bool(self.config.online_controller)
@@ -216,6 +230,9 @@ class PolicyPackerScheduler:
         layer_pattern_candidate_cap: int = 8,
         layer_template_candidate_cap: int = 8,
         layer_template_plan_cap: int = 6,
+        two_layer_frontier: bool = False,
+        opening_span_moves: int = 2,
+        repair_burst_max: int = 2,
         batchfill_layer_starter: bool = False,
         batchfill_starters_max: int = 6,
         batchfill_budget_ms: int = 150,
@@ -262,6 +279,9 @@ class PolicyPackerScheduler:
             layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
             layer_template_candidate_cap=max(1, int(layer_template_candidate_cap)),
             layer_template_plan_cap=max(1, int(layer_template_plan_cap)),
+            two_layer_frontier=bool(two_layer_frontier),
+            opening_span_moves=max(1, int(opening_span_moves)),
+            repair_burst_max=max(1, int(repair_burst_max)),
             batchfill_layer_starter=batchfill_layer_starter,
             batchfill_starters_max=batchfill_starters_max,
             batchfill_budget_ms=batchfill_budget_ms,
@@ -333,6 +353,9 @@ class PolicyPackerScheduler:
             layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
             layer_template_candidate_cap=max(1, int(layer_template_candidate_cap)),
             layer_template_plan_cap=max(1, int(layer_template_plan_cap)),
+            two_layer_frontier=bool(two_layer_frontier),
+            opening_span_moves=max(1, int(opening_span_moves)),
+            repair_burst_max=max(1, int(repair_burst_max)),
             online_controller=online_controller,
             controller_debug=controller_debug,
         )
@@ -534,6 +557,18 @@ class PolicyPackerScheduler:
         if placement is None:
             return
 
+        if bool(self._two_layer_frontier.enabled):
+            frontier_layer = resolve_frontier_layer(
+                layer_id=getattr(placement, "layer_id", None),
+                z_mm=getattr(placement, "z_mm", None),
+                stacking_mode=str(self.config.stacking_mode or "layers"),
+                z_band_mm=self.config.z_band_mm,
+            )
+            self._two_layer_frontier.register_selection(
+                pallet_id=plan.pallet_id,
+                layer=frontier_layer,
+            )
+
         # Record the *committed* placement sequence (not previews) for offline analysis.
         # Best-effort: must never affect packing decisions.
         pid = getattr(plan, "pallet_id", None)
@@ -675,6 +710,7 @@ class PolicyPackerScheduler:
             self._pallets[destination] = self._new_pallet()
         else:
             self._pallets.pop(destination, None)
+        self._two_layer_frontier.reset_pallet(destination)
 
     def collect_kpis(self) -> dict[str, object]:
         pallets_by_dest: dict[int | str, Iterable[PalletModel]] = {}
@@ -684,6 +720,7 @@ class PolicyPackerScheduler:
             pallets_by_dest.setdefault(dest_id, []).append(pallet)
 
         kpis = aggregate_pallet_kpis({int(k): v for k, v in pallets_by_dest.items() if str(k).isdigit()})
+        kpis = merge_frontier_kpis(kpis, self._two_layer_frontier.frontier_kpis())
 
         kpis["closures_by_reason"] = dict(self._closures_by_reason)
         kpis["pallets_closed_early"] = dict(self._closed_early)
@@ -802,6 +839,9 @@ class PolicyPackerScheduler:
             )
             or 6
         )
+        kpis["two_layer_frontier_enabled"] = bool(getattr(self._scheduler.config, "two_layer_frontier", False))
+        kpis["opening_span_moves"] = int(getattr(self._scheduler.config, "opening_span_moves", 2) or 2)
+        kpis["repair_burst_max"] = int(getattr(self._scheduler.config, "repair_burst_max", 2) or 2)
         kpis["deadlock_count"] = int(self._deadlock_count)
         score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
         height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
@@ -946,8 +986,9 @@ class PolicyPackerScheduler:
         first_pallet_mono = kpis.get("layer_monotonicity_first_pallet", {})
         if isinstance(first_pallet_mono, dict):
             kpis["monotonic_stack_rate"] = float(first_pallet_mono.get("monotonic_stack_rate", 1.0) or 1.0)
-            kpis["reentries_total"] = int(first_pallet_mono.get("lower_layer_reentry_count", 0) or 0)
-            kpis["layer_closure_score"] = float(first_pallet_mono.get("layer_closure_score", 1.0) or 1.0)
+            if not bool(getattr(self._scheduler.config, "two_layer_frontier", False)):
+                kpis["reentries_total"] = int(first_pallet_mono.get("lower_layer_reentry_count", 0) or 0)
+                kpis["layer_closure_score"] = float(first_pallet_mono.get("layer_closure_score", 1.0) or 1.0)
         return kpis
 
     def collect_controller_metrics(self) -> dict[str, object]:

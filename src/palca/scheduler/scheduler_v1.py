@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
+from ..integration.two_layer_frontier import resolve_frontier_layer
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
         LayerTemplatePlanner,
         PlannedLayerPlacement,
     )
+    from ..integration.two_layer_frontier import FrontierPalletState, TwoLayerFrontierController
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
@@ -74,6 +76,9 @@ class SchedulerConfig:
     layer_pattern_candidate_cap: int = 8
     layer_template_candidate_cap: int = 8
     layer_template_plan_cap: int = 6
+    two_layer_frontier: bool = False
+    opening_span_moves: int = 2
+    repair_burst_max: int = 2
 
     def __post_init__(self) -> None:
         lookahead = max(1, int(self.lookahead_k))
@@ -120,6 +125,9 @@ class SchedulerConfig:
             "layer_template_plan_cap",
             max(1, int(self.layer_template_plan_cap)),
         )
+        object.__setattr__(self, "two_layer_frontier", bool(self.two_layer_frontier))
+        object.__setattr__(self, "opening_span_moves", max(1, int(self.opening_span_moves)))
+        object.__setattr__(self, "repair_burst_max", max(1, int(self.repair_burst_max)))
         mode = str(self.score_mode or "gain_frag").strip().lower()
         if mode not in ALLOWED_SCORE_MODES:
             raise ValueError(f"SchedulerConfig invalid score_mode: {self.score_mode}")
@@ -206,6 +214,7 @@ class _ScoreTerms:
 class _BeamNode:
     ramps: dict[int, _BeamRampState]
     pallets: dict[int | str, PalletModel]
+    frontier_snapshot: dict[int | str, FrontierPalletState] | None = None
     score_sum: float = 0.0
     gain_sum: float = 0.0
     fragmentation_sum: float = 0.0
@@ -332,6 +341,13 @@ class SchedulerV1:
         self.template_area_fill_sum = 0.0
         self.template_area_fill_count = 0
         self.template_type_histogram: dict[str, int] = {}
+        self._two_layer_frontier: TwoLayerFrontierController | None = None
+
+    def set_two_layer_frontier(self, frontier: TwoLayerFrontierController | None) -> None:
+        self._two_layer_frontier = frontier
+
+    def _two_layer_frontier_enabled(self) -> bool:
+        return bool(self._two_layer_frontier is not None and getattr(self._two_layer_frontier, "enabled", False))
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
         self.last_blocked_pallets = {}
@@ -477,7 +493,7 @@ class SchedulerV1:
         return str(lhs) == str(rhs)
 
     def _active_layer_commit_enabled(self) -> bool:
-        return self._template_planner_enabled()
+        return self._template_planner_enabled() and not self._two_layer_frontier_enabled()
 
     def _reset_active_layer_commit_state(self) -> None:
         self.active_committed_layer_index = None
@@ -556,6 +572,8 @@ class SchedulerV1:
         pallet_id: int | str,
         preview: PlacementPreview,
     ) -> bool:
+        if self._two_layer_frontier_enabled():
+            return True
         if not self._active_layer_commit_enabled():
             return True
         if not self._active_layer_commit_started:
@@ -1115,6 +1133,7 @@ class SchedulerV1:
                 window_boxes_by_pallet_id=window_boxes_by_pallet_id,
                 deadline=deadline,
             )
+        feasible_candidates = self._apply_two_layer_frontier_scored_candidates(feasible_candidates)
 
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
@@ -1205,6 +1224,11 @@ class SchedulerV1:
         root = _BeamNode(
             ramps=self._build_beam_ramps(sim_state),
             pallets=dict(sim_state.pallets),
+            frontier_snapshot=(
+                self._two_layer_frontier.snapshot()
+                if self._two_layer_frontier_enabled() and self._two_layer_frontier is not None
+                else None
+            ),
             score_sum=0.0,
             gain_sum=0.0,
             fragmentation_sum=0.0,
@@ -1282,6 +1306,11 @@ class SchedulerV1:
                     batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
                     batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
+
+                expansions = self._apply_two_layer_frontier_beam_expansions(
+                    expansions=expansions,
+                    snapshot=node.frontier_snapshot,
+                )
 
                 if depth == 0 and node.first_plan is None and expansions:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
@@ -1584,10 +1613,12 @@ class SchedulerV1:
 
         new_ramps = dict(node.ramps)
         new_ramps[action.ramp_id] = self._beam_pick_and_refill(ramp, idx)
+        next_snapshot = self._updated_frontier_snapshot_for_plan(snapshot=node.frontier_snapshot, plan=first_plan)
 
         child = _BeamNode(
             ramps=new_ramps,
             pallets=new_pallets,
+            frontier_snapshot=next_snapshot,
             score_sum=float(node.score_sum) + float(terms.scalar_score),
             gain_sum=float(node.gain_sum) + float(terms.packing_gain),
             fragmentation_sum=float(node.fragmentation_sum) + float(terms.fragmentation),
@@ -1637,6 +1668,134 @@ class SchedulerV1:
             return int(getattr(placement, "z_mm"))
         except (TypeError, ValueError):
             return None
+
+    def _frontier_layer_for_preview(self, preview: PlacementPreview | None) -> int | None:
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        stacking_mode = str(getattr(self, "_frontier_stacking_mode", "layers") or "layers")
+        z_band_mm = getattr(self, "_frontier_z_band_mm", None)
+        return resolve_frontier_layer(
+            layer_id=getattr(placement, "layer_id", None),
+            z_mm=getattr(placement, "z_mm", None),
+            stacking_mode=stacking_mode,
+            z_band_mm=z_band_mm,
+        )
+
+    def _frontier_layer_for_plan(self, plan: PickPlan | None) -> int | None:
+        if plan is None:
+            return None
+        preview = getattr(plan, "preview", None)
+        if preview is None:
+            return None
+        placement = getattr(preview, "placement", None)
+        if placement is None:
+            return None
+        stacking_mode = str(getattr(self, "_frontier_stacking_mode", "layers") or "layers")
+        z_band_mm = getattr(self, "_frontier_z_band_mm", None)
+        return resolve_frontier_layer(
+            layer_id=getattr(placement, "layer_id", None),
+            z_mm=getattr(placement, "z_mm", None),
+            stacking_mode=stacking_mode,
+            z_band_mm=z_band_mm,
+        )
+
+    def _frontier_best_scored_candidate(self, candidates: Sequence[_ScoredCandidate]) -> _ScoredCandidate:
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(
+                candidates,
+                key=lambda candidate: self._min_height_then_gain_key(candidate.terms, candidate.box),
+            )
+        return max(candidates, key=self._gain_frag_candidate_key)
+
+    def _frontier_best_beam_expansion(self, candidates: Sequence[_BeamExpansion]) -> _BeamExpansion:
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            return min(
+                candidates,
+                key=lambda candidate: self._min_height_then_gain_key(candidate.terms, candidate.box),
+            )
+        return max(candidates, key=self._beam_expansion_gain_frag_key)
+
+    def _apply_two_layer_frontier_scored_candidates(
+        self,
+        candidates: list[_ScoredCandidate],
+    ) -> list[_ScoredCandidate]:
+        if not self._two_layer_frontier_enabled() or not candidates or self._two_layer_frontier is None:
+            return candidates
+
+        grouped: dict[int | str, list[_ScoredCandidate]] = {}
+        pallet_order: list[int | str] = []
+        for candidate in candidates:
+            pallet_id = candidate.plan.pallet_id
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(candidate)
+
+        filtered: list[_ScoredCandidate] = []
+        for pallet_id in pallet_order:
+            filtered.extend(
+                self._two_layer_frontier.select_candidates(
+                    pallet_id=pallet_id,
+                    candidates=grouped.get(pallet_id, []),
+                    layer_fn=lambda candidate: self._frontier_layer_for_plan(candidate.plan),
+                    best_candidate_fn=self._frontier_best_scored_candidate,
+                )
+            )
+        return filtered
+
+    def _apply_two_layer_frontier_beam_expansions(
+        self,
+        *,
+        expansions: list[_BeamExpansion],
+        snapshot: dict[int | str, FrontierPalletState] | None,
+    ) -> list[_BeamExpansion]:
+        if not self._two_layer_frontier_enabled() or not expansions or self._two_layer_frontier is None:
+            return expansions
+
+        grouped: dict[int | str, list[_BeamExpansion]] = {}
+        pallet_order: list[int | str] = []
+        for expansion in expansions:
+            pallet_id = expansion.box.destination
+            if pallet_id is None:
+                continue
+            if pallet_id not in grouped:
+                grouped[pallet_id] = []
+                pallet_order.append(pallet_id)
+            grouped[pallet_id].append(expansion)
+
+        filtered: list[_BeamExpansion] = []
+        for pallet_id in pallet_order:
+            filtered.extend(
+                self._two_layer_frontier.select_candidates(
+                    pallet_id=pallet_id,
+                    candidates=grouped.get(pallet_id, []),
+                    layer_fn=lambda candidate: self._frontier_layer_for_plan(candidate.node.first_plan),
+                    best_candidate_fn=self._frontier_best_beam_expansion,
+                    snapshot=snapshot,
+                    mutate_metrics=False,
+                )
+            )
+        return filtered
+
+    def _updated_frontier_snapshot_for_plan(
+        self,
+        *,
+        snapshot: dict[int | str, FrontierPalletState] | None,
+        plan: PickPlan | None,
+    ) -> dict[int | str, FrontierPalletState] | None:
+        if not self._two_layer_frontier_enabled() or self._two_layer_frontier is None or plan is None:
+            return snapshot
+        next_snapshot = self._two_layer_frontier.clone_snapshot(snapshot)
+        self._two_layer_frontier.register_selection(
+            pallet_id=plan.pallet_id,
+            layer=self._frontier_layer_for_plan(plan),
+            snapshot=next_snapshot,
+            mutate_metrics=False,
+        )
+        return next_snapshot
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
         budget_ms = max(0, int(self.config.batchfill_budget_ms))

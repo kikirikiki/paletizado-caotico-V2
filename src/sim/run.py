@@ -302,6 +302,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Longitud maxima del plan de capa para layer template planner.",
     )
     parser.add_argument(
+        "--two-layer-frontier",
+        action="store_true",
+        help="Activa frontera acotada de dos capas (L activa, L-1 reparable).",
+    )
+    parser.add_argument(
+        "--opening-span-moves",
+        type=int,
+        default=2,
+        help="Movimientos minimos preferidos en capa activa tras abrir una capa.",
+    )
+    parser.add_argument(
+        "--repair-burst-max",
+        type=int,
+        default=2,
+        help="Rafaga maxima consecutiva permitida en capa reparable.",
+    )
+    parser.add_argument(
         "--batchfill-layer-starter",
         action="store_true",
         help="Activa BatchFill para elegir mejor starter al abrir capa nueva",
@@ -534,6 +551,9 @@ def run_simulation(
     layer_pattern_candidate_cap: int = 8,
     layer_template_candidate_cap: int = 8,
     layer_template_plan_cap: int = 6,
+    two_layer_frontier: bool = False,
+    opening_span_moves: int = 2,
+    repair_burst_max: int = 2,
     batchfill_layer_starter: bool = False,
     batchfill_starters_max: int = 6,
     batchfill_budget_ms: int = 150,
@@ -696,6 +716,9 @@ def run_simulation(
             layer_pattern_candidate_cap=max(1, int(layer_pattern_candidate_cap)),
             layer_template_candidate_cap=max(1, int(layer_template_candidate_cap)),
             layer_template_plan_cap=max(1, int(layer_template_plan_cap)),
+            two_layer_frontier=bool(two_layer_frontier),
+            opening_span_moves=max(1, int(opening_span_moves)),
+            repair_burst_max=max(1, int(repair_burst_max)),
             batchfill_layer_starter=bool(batchfill_layer_starter),
             batchfill_starters_max=int(batchfill_starters_max),
             batchfill_budget_ms=int(batchfill_budget_ms),
@@ -864,6 +887,9 @@ def run_simulation(
             "layer_pattern_candidate_cap": int(max(1, int(layer_pattern_candidate_cap))),
             "layer_template_candidate_cap": int(max(1, int(layer_template_candidate_cap))),
             "layer_template_plan_cap": int(max(1, int(layer_template_plan_cap))),
+            "two_layer_frontier": bool(two_layer_frontier),
+            "opening_span_moves": int(max(1, int(opening_span_moves))),
+            "repair_burst_max": int(max(1, int(repair_burst_max))),
             "batchfill_layer_starter": bool(batchfill_layer_starter),
             "batchfill_starters_max": int(batchfill_starters_max),
             "batchfill_budget_ms": int(batchfill_budget_ms),
@@ -977,6 +1003,9 @@ def main() -> None:
         layer_pattern_candidate_cap=int(args.layer_pattern_candidate_cap),
         layer_template_candidate_cap=int(args.layer_template_candidate_cap),
         layer_template_plan_cap=int(args.layer_template_plan_cap),
+        two_layer_frontier=bool(args.two_layer_frontier),
+        opening_span_moves=int(args.opening_span_moves),
+        repair_burst_max=int(args.repair_burst_max),
         batchfill_layer_starter=bool(args.batchfill_layer_starter),
         batchfill_starters_max=int(args.batchfill_starters_max),
         batchfill_budget_ms=int(args.batchfill_budget_ms),

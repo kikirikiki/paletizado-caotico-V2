@@ -22,6 +22,9 @@ def test_load_profile_canonical_has_required_shape() -> None:
     assert float(profile["params"]["stability_min_support_ratio"]) == float(profile["params"]["min_support"])
     assert bool(profile["params"]["stability_require_corner_support"]) is True
     assert bool(profile["params"]["use_layer_template_planner"]) is False
+    assert bool(profile["params"]["two_layer_frontier"]) is False
+    assert int(profile["params"]["opening_span_moves"]) == 2
+    assert int(profile["params"]["repair_burst_max"]) == 2
     assert set(profile["params"].keys()) == set(bench.REQUIRED_PARAM_KEYS)
 
 
@@ -68,6 +71,9 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
         "use_layer_template_planner=true",
         "layer_template_candidate_cap=9",
         "layer_template_plan_cap=6",
+        "two_layer_frontier=true",
+        "opening_span_moves=2",
+        "repair_burst_max=2",
     ])
 
     merged = bench.apply_param_overrides(base, overrides)
@@ -77,6 +83,9 @@ def test_parse_set_overrides_and_apply_aliases() -> None:
     assert bool(merged["use_layer_template_planner"]) is True
     assert int(merged["layer_template_candidate_cap"]) == 9
     assert int(merged["layer_template_plan_cap"]) == 6
+    assert bool(merged["two_layer_frontier"]) is True
+    assert int(merged["opening_span_moves"]) == 2
+    assert int(merged["repair_burst_max"]) == 2
 
 
 def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
@@ -93,6 +102,22 @@ def test_build_run_simulation_kwargs_maps_profile_to_signature() -> None:
     assert "k" not in kwargs
     assert kwargs["episode_seed"] == 50021
     assert kwargs["excel_path"] == profile["excel"]
+
+
+def test_with_two_layer_frontier_overrides_appends_traceable_flags() -> None:
+    overrides = bench._with_two_layer_frontier_overrides(
+        overrides=["lookahead_k=10"],
+        enabled=True,
+        opening_span_moves=2,
+        repair_burst_max=2,
+    )
+
+    assert overrides == [
+        "lookahead_k=10",
+        "two_layer_frontier=true",
+        "opening_span_moves=2",
+        "repair_burst_max=2",
+    ]
 
 
 def test_build_run_simulation_kwargs_fails_on_orphan_param() -> None:
@@ -139,6 +164,11 @@ def test_run_benchmark_generates_summary_with_expected_structure(
                     "template_area_fill_mean": 0.42,
                     "template_type_histogram": {"Rows-X": 2, "Split-Left-Right": 1},
                     "deadlock_count": 0,
+                    "max_backstep_depth": 1,
+                    "frontier_width_max": 2,
+                    "two_layer_frontier_violations": 0,
+                    "repair_moves_total": 2,
+                    "layer_reopen_events_total": 0,
                     "stand_hw_used_total": lookahead_k,
                     "hard_floor_phase_stand_hw_chosen_total": 1,
                     "layer_monotonicity_first_pallet_by_dest": {
@@ -230,6 +260,11 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert all(abs(float(r["template_area_fill_mean"]) - 0.42) < 1e-9 for r in rows)
     assert all("Rows-X" in r["template_type_histogram_json"] for r in rows)
     assert all(r["deadlock_count"] == 0 for r in rows)
+    assert all(r["max_backstep_depth"] == 1 for r in rows)
+    assert all(r["frontier_width_max"] == 2 for r in rows)
+    assert all(r["two_layer_frontier_violations"] == 0 for r in rows)
+    assert all(r["repair_moves_total"] == 2 for r in rows)
+    assert all(r["layer_reopen_events_total"] == 0 for r in rows)
     assert all(r["lower_layer_reentry_count"] == 1 for r in rows)
     assert all(r["reentries_total"] == 1 for r in rows)
     assert all(abs(float(r["monotonic_stack_rate"]) - 0.75) < 1e-9 for r in rows)
@@ -258,6 +293,9 @@ def test_run_benchmark_generates_summary_with_expected_structure(
     assert "planned_prefix_executed_mean" in csv_row
     assert "active_layer_commit_replans_total" in csv_row
     assert "active_layer_commit_fallback_same_layer_total" in csv_row
+    assert "max_backstep_depth" in csv_row
+    assert "frontier_width_max" in csv_row
+    assert "two_layer_frontier_violations" in csv_row
     assert "active_layer_commit_closures_total" in csv_row
     assert "template_selected_total" in csv_row
     assert "template_abstains_total" in csv_row
