@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from palca.domain.placement import Placement
-from palca.packer.controls import AccessibilityConfig, RobotAccessibilityControl
+from palca.packer.controls import AccessibilityConfig, ControlConfig, RobotAccessibilityControl
+from palca.packer.pallet_model import PalletModel
 
 
 def _make_placement(x_mm: int, y_mm: int, z_mm: int, length_mm: int, width_mm: int, height_mm: int) -> Placement:
@@ -114,3 +115,48 @@ class TestRobotAccessibilityControl:
         result = ctrl.evaluate(pallet=pallet, box=box, placement=candidate)  # type: ignore[arg-type]
         assert result.feasible is True
         assert result.reason is None
+
+
+class TestAccessibilityHeightPenalty:
+    def _make_model(self, accessibility_delta_mm: int) -> PalletModel:
+        """Construye un PalletModel mínimo con el delta de accesibilidad dado."""
+        control_config = ControlConfig(
+            accessibility=AccessibilityConfig(accessibility_delta_mm=accessibility_delta_mm)
+        )
+        return PalletModel(control_config=control_config)
+
+    def test_excess_above_delta_returns_negative(self) -> None:
+        """Test A: placement.z_mm > min_top + delta → retorna valor negativo.
+
+        Caja ya colocada: z=0, height=200 → top=200.
+        Delta=400 → umbral = 200 + 400 = 600.
+        Nueva caja: z=800 → exceso = 800 - 200 - 400 = 200 > 0 → penalización < 0.
+        """
+        model = self._make_model(accessibility_delta_mm=400)
+        # Añadir una caja existente con top=200
+        existing = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
+        model.placements.append(existing)
+
+        # Nueva caja a z=800 (excede min_top(200) + delta(400) = 600)
+        new_placement = _make_placement(x_mm=0, y_mm=0, z_mm=800, length_mm=400, width_mm=300, height_mm=200)
+        penalty = model._accessibility_height_penalty(new_placement, packing_gain=1.0, accessibility_delta_mm=400)
+
+        assert penalty < 0.0
+
+    def test_within_delta_returns_zero(self) -> None:
+        """Test B: placement.z_mm <= min_top + delta → retorna 0.0.
+
+        Caja ya colocada: z=0, height=200 → top=200.
+        Delta=400 → umbral = 200 + 400 = 600.
+        Nueva caja: z=500 ≤ 600 → exceso ≤ 0 → penalización = 0.0.
+        """
+        model = self._make_model(accessibility_delta_mm=400)
+        # Añadir una caja existente con top=200
+        existing = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
+        model.placements.append(existing)
+
+        # Nueva caja a z=500 (≤ min_top(200) + delta(400) = 600)
+        new_placement = _make_placement(x_mm=0, y_mm=0, z_mm=500, length_mm=400, width_mm=300, height_mm=200)
+        penalty = model._accessibility_height_penalty(new_placement, packing_gain=1.0, accessibility_delta_mm=400)
+
+        assert penalty == 0.0
