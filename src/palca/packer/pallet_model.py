@@ -280,6 +280,12 @@ class PalletModel:
         self.coverage_weight = max(0.0, float(coverage_weight))
         self.dominant_free_rect_weight = max(0.0, float(dominant_free_rect_weight))
         self.dominant_free_rect_ratio_gate = max(0.0, float(dominant_free_rect_ratio_gate))
+        self.accessibility_delta_mm: int = (
+            int(control_config.accessibility.accessibility_delta_mm)
+            if control_config is not None
+            and getattr(control_config, "accessibility", None) is not None
+            else 0
+        )
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -681,6 +687,25 @@ class PalletModel:
                 return -float(self.scoring_weights.tower_penalty_ratio) * float(packing_gain)
         return 0.0
 
+    def _accessibility_height_penalty(
+        self,
+        placement: Placement,
+        packing_gain: float,
+        accessibility_delta_mm: int,
+    ) -> float:
+        if accessibility_delta_mm <= 0 or packing_gain <= 0:
+            return 0.0
+        if not self.placements:
+            return 0.0
+        min_top = min(int(p.z_mm) + int(p.height_mm) for p in self.placements)
+        excess = int(placement.z_mm) - min_top - accessibility_delta_mm
+        if excess <= 0:
+            return 0.0
+        # Penalización lineal: a partir del delta, penaliza proporcionalmente
+        # A 2x delta la penalización es máxima (1.0 * packing_gain)
+        ratio = min(1.0, float(excess) / float(accessibility_delta_mm))
+        return -ratio * float(packing_gain)
+
     def _preview_in_layer(
         self,
         layer: LayerState,
@@ -818,6 +843,17 @@ class PalletModel:
                         score_delta += tower_penalty
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
+
+                    if self.accessibility_delta_mm > 0:
+                        acc_penalty = self._accessibility_height_penalty(
+                            adjusted,
+                            weighted_gain,
+                            self.accessibility_delta_mm,
+                        )
+                        if acc_penalty:
+                            score_delta += acc_penalty
+                            objective += acc_penalty
+                            debug["accessibility_height_penalty"] = float(acc_penalty)
 
                     if coverage_enabled and zone_fill:
                         zone_id = self._coverage_zone_id(
@@ -1185,6 +1221,17 @@ class PalletModel:
                         score_delta += tower_penalty
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
+
+                    if self.accessibility_delta_mm > 0:
+                        acc_penalty = self._accessibility_height_penalty(
+                            adjusted,
+                            weighted_gain,
+                            self.accessibility_delta_mm,
+                        )
+                        if acc_penalty:
+                            score_delta += acc_penalty
+                            objective += acc_penalty
+                            debug["accessibility_height_penalty"] = float(acc_penalty)
 
                     is_floor = int(adjusted.z_mm) <= 0
                     if is_floor and coverage_enabled and zone_fill:
