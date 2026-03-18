@@ -336,6 +336,9 @@ def build_control_stack(config: ControlConfig | None = None) -> ControlStack:
     cfg = config or ControlConfig()
     placement_controls: list[PlacementControl] = []
 
+    if cfg.accessibility.accessibility_delta_mm > 0:
+        placement_controls.append(RobotAccessibilityControl(cfg.accessibility))
+
     if cfg.stability.mode != "off":
         placement_controls.append(StabilityPlacementControl(cfg.stability))
 
@@ -344,9 +347,6 @@ def build_control_stack(config: ControlConfig | None = None) -> ControlStack:
 
     if cfg.balance.balance_weight != 0.0:
         placement_controls.append(BalancePlacementControl(cfg.balance))
-
-    if cfg.accessibility.accessibility_delta_mm > 0:
-        placement_controls.append(RobotAccessibilityControl(cfg.accessibility))
 
     return ControlStack(
         manifest=DefaultManifestControl(),
