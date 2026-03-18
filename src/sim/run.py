@@ -124,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
+    parser.add_argument("--accessibility-delta-mm", type=int, default=0,
+                        help="Delta mm para RobotAccessibilityControl (0=desactivado)")
     parser.add_argument("--coverage-grid-x", type=int, default=0, help="Grid X para coverage control (0 deshabilita)")
     parser.add_argument("--coverage-grid-y", type=int, default=0, help="Grid Y para coverage control (0 deshabilita)")
     parser.add_argument("--coverage-weight", type=float, default=0.0, help="Peso coverage control (0 deshabilita)")
@@ -860,6 +862,7 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        accessibility_delta_mm=args.accessibility_delta_mm,
         coverage_grid_x=int(args.coverage_grid_x),
         coverage_grid_y=int(args.coverage_grid_y),
         coverage_weight=float(args.coverage_weight),
