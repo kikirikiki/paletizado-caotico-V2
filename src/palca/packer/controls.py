@@ -102,10 +102,16 @@ class BalanceConfig:
 
 
 @dataclass(frozen=True)
+class AccessibilityConfig:
+    accessibility_delta_mm: int = 400
+
+
+@dataclass(frozen=True)
 class ControlConfig:
     stability: StabilityConfig = StabilityConfig()
     loadbear: LoadBearConfig = LoadBearConfig()
     balance: BalanceConfig = BalanceConfig()
+    accessibility: AccessibilityConfig = field(default_factory=lambda: AccessibilityConfig(accessibility_delta_mm=0))
 
 
 @dataclass(frozen=True)
@@ -304,6 +310,28 @@ class BalancePlacementControl:
         )
 
 
+@dataclass(frozen=True)
+class RobotAccessibilityControl:
+    config: AccessibilityConfig = AccessibilityConfig()
+
+    def evaluate(
+        self,
+        *,
+        pallet: "PalletModel",
+        box: Box,
+        placement: Placement,
+    ) -> PlacementControlResult:
+        if self.config.accessibility_delta_mm == 0:
+            return PlacementControlResult(feasible=True, placement=placement)
+        for placed in (getattr(pallet, 'placements', None) or []):
+            overlap_x = max(0, min(placed.x_mm + placed.length_mm, placement.x_mm + placement.length_mm) - max(placed.x_mm, placement.x_mm))
+            overlap_y = max(0, min(placed.y_mm + placed.width_mm, placement.y_mm + placement.width_mm) - max(placed.y_mm, placement.y_mm))
+            if overlap_x > 0 and overlap_y > 0:
+                if placed.z_mm + placed.height_mm > placement.z_mm + self.config.accessibility_delta_mm:
+                    return PlacementControlResult(feasible=False, placement=placement, reason="ROBOT_ACCESS")
+        return PlacementControlResult(feasible=True, placement=placement)
+
+
 def build_control_stack(config: ControlConfig | None = None) -> ControlStack:
     cfg = config or ControlConfig()
     placement_controls: list[PlacementControl] = []
@@ -316,6 +344,9 @@ def build_control_stack(config: ControlConfig | None = None) -> ControlStack:
 
     if cfg.balance.balance_weight != 0.0:
         placement_controls.append(BalancePlacementControl(cfg.balance))
+
+    if cfg.accessibility.accessibility_delta_mm > 0:
+        placement_controls.append(RobotAccessibilityControl(cfg.accessibility))
 
     return ControlStack(
         manifest=DefaultManifestControl(),
