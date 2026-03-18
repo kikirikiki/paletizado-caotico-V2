@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
+from ..packer.scoring_coherencia import CoherenciaCapaScorer
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -569,6 +570,19 @@ class SchedulerV1:
                         feasible_candidates,
                         key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
                     )
+                elif self.config.score_mode == ScoreMode.COHERENCIA_CAPA.value:
+                    _coherencia_scorer = CoherenciaCapaScorer()
+                    selected = max(
+                        feasible_candidates,
+                        key=lambda c: _coherencia_scorer.score_placement(
+                            c.plan.preview.placement,
+                            colocadas=list(
+                                getattr(sim_state.pallets.get(c.plan.pallet_id), "placements", []) or []
+                            ),
+                        )
+                        if c.plan.preview.placement is not None
+                        else -1.0,
+                    )
                 else:
                     selected = best_by_slack
 
@@ -821,6 +835,10 @@ class SchedulerV1:
         return best_node.first_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
+        # NOTE: score_mode="coherencia_capa" no tiene rama explícita aquí.
+        # Con micro_plan_enabled=True, el beam rankea por (placed_count, score_sum)
+        # ignorando coherencia. Comportamiento degradado conocido, no un bug.
+        # Integración completa en beam search pendiente en issue separado.
         if self.config.score_mode == "min_height_then_gain":
             return (
                 int(node.placed_count),
