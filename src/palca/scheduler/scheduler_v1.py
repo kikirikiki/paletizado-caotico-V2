@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
+from ..packer.scoring_coherencia import CoherenciaCapaScorer
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -568,6 +569,19 @@ class SchedulerV1:
                     selected = min(
                         feasible_candidates,
                         key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
+                    )
+                elif self.config.score_mode == ScoreMode.COHERENCIA_CAPA.value:
+                    _coherencia_scorer = CoherenciaCapaScorer()
+                    selected = max(
+                        feasible_candidates,
+                        key=lambda c: _coherencia_scorer.score_placement(
+                            c.plan.preview.placement,
+                            colocadas=list(
+                                getattr(sim_state.pallets.get(c.plan.pallet_id), "placements", []) or []
+                            ),
+                        )
+                        if c.plan.preview.placement is not None
+                        else -1.0,
                     )
                 else:
                     selected = best_by_slack
