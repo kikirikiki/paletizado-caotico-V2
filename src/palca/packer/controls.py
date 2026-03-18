@@ -323,12 +323,44 @@ class RobotAccessibilityControl:
     ) -> PlacementControlResult:
         if self.config.accessibility_delta_mm == 0:
             return PlacementControlResult(feasible=True, placement=placement)
-        for placed in (getattr(pallet, 'placements', None) or []):
-            overlap_x = max(0, min(placed.x_mm + placed.length_mm, placement.x_mm + placement.length_mm) - max(placed.x_mm, placement.x_mm))
-            overlap_y = max(0, min(placed.y_mm + placed.width_mm, placement.y_mm + placement.width_mm) - max(placed.y_mm, placement.y_mm))
-            if overlap_x > 0 and overlap_y > 0:
-                if placed.z_mm + placed.height_mm > placement.z_mm + self.config.accessibility_delta_mm:
-                    return PlacementControlResult(feasible=False, placement=placement, reason="ROBOT_ACCESS")
+
+        placed_list = list(getattr(pallet, 'placements', None) or [])
+        if not placed_list:
+            return PlacementControlResult(feasible=True, placement=placement)
+
+        delta = int(self.config.accessibility_delta_mm)
+        cx0, cx1 = int(placement.x_mm), int(placement.x_mm) + int(placement.length_mm)
+        cy0, cy1 = int(placement.y_mm), int(placement.y_mm) + int(placement.width_mm)
+
+        # Paso 1: calcular altura local real bajo el candidato
+        local_z = 0
+        for p in placed_list:
+            px0, px1 = int(p.x_mm), int(p.x_mm) + int(p.length_mm)
+            py0, py1 = int(p.y_mm), int(p.y_mm) + int(p.width_mm)
+            ox = max(0, min(px1, cx1) - max(px0, cx0))
+            oy = max(0, min(py1, cy1) - max(py0, cy0))
+            if ox > 0 and oy > 0:
+                local_z = max(local_z, int(p.z_mm) + int(p.height_mm))
+
+        # Paso 2: comprobar cajas adyacentes (tocando footprint, gap <= 0)
+        # que bloquean el descenso del robot
+        for p in placed_list:
+            px0, px1 = int(p.x_mm), int(p.x_mm) + int(p.length_mm)
+            py0, py1 = int(p.y_mm), int(p.y_mm) + int(p.width_mm)
+            # Gap entre footprints (negativo = overlap, 0 = tocando, positivo = separados)
+            gap_x = max(px0, cx0) - min(px1, cx1)
+            gap_y = max(py0, cy0) - min(py1, cy1)
+            # Adyacente: toca o solapa en ambas dimensiones
+            if gap_x <= 0 and gap_y <= 0:
+                p_top = int(p.z_mm) + int(p.height_mm)
+                if p_top > local_z + delta:
+                    return PlacementControlResult(
+                        feasible=False,
+                        placement=placement,
+                        reason="ROBOT_ACCESS",
+                        debug={"blocking_top_mm": p_top, "local_z_mm": local_z, "delta_mm": delta},
+                    )
+
         return PlacementControlResult(feasible=True, placement=placement)
 
 

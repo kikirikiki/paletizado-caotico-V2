@@ -35,9 +35,7 @@ class TestRobotAccessibilityControl:
         """Test 1: accessibility_delta_mm=0 desactiva el control — siempre feasible."""
         ctrl = RobotAccessibilityControl(config=AccessibilityConfig(accessibility_delta_mm=0))
 
-        # Torre alta al lado de la candidata — con delta=0 debe ser ignored
         tall_tower = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=1500)
-        # Candidata justo encima con z_base=0 — inaccesible si delta>0
         candidate = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
         pallet = _make_pallet([tall_tower])
         box = _make_box()
@@ -47,15 +45,19 @@ class TestRobotAccessibilityControl:
         assert result.reason is None
 
     def test_blocked_by_tall_adjacent_tower(self) -> None:
-        """Test 2: caja bloqueada por torre adyacente con delta=400 → feasible=False, reason=ROBOT_ACCESS."""
+        """Test 2: caja adyacente alta (no soporte) → feasible=False, reason=ROBOT_ACCESS.
+
+        Candidata: x=400..800, y=0..300, z_base=0.
+        Torre adyacente: x=0..400, y=0..300, z=0, height=600 → techo=600.
+        local_z bajo la candidata = 0 (la torre no está debajo).
+        gap_x = max(0,400) - min(400,800) = 400 - 400 = 0 → adyacente.
+        gap_y = max(0,0) - min(300,300) = 0 - 300 = -300 ≤ 0 → adyacente.
+        p_top=600 > local_z(0) + delta(400) → ROBOT_ACCESS.
+        """
         ctrl = RobotAccessibilityControl(config=AccessibilityConfig(accessibility_delta_mm=400))
 
-        # Torre ya colocada: x=0, y=0, z=0, size=400x300, height=600
-        # Su techo está en z=600. La candidata tiene z_base=0. Delta=400.
-        # Condición: placed.z_mm + placed.height_mm > placement.z_mm + delta
-        #   => 0 + 600 > 0 + 400 => 600 > 400 => BLOCKED
         tower = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=600)
-        candidate = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
+        candidate = _make_placement(x_mm=400, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
         pallet = _make_pallet([tower])
         box = _make_box()
 
@@ -63,15 +65,38 @@ class TestRobotAccessibilityControl:
         assert result.feasible is False
         assert result.reason == "ROBOT_ACCESS"
 
-    def test_adjacent_tower_within_delta_is_feasible(self) -> None:
-        """Test 3: torre adyacente dentro del delta → feasible=True."""
+    def test_support_box_below_does_not_block(self) -> None:
+        """Test 3: caja debajo (soporte) alta → feasible=True.
+
+        Candidata: x=0..400, y=0..300, z_base=600.
+        Soporte: x=0..400, y=0..300, z=0, height=600 → techo=600 = local_z.
+        gap_x = max(0,0) - min(400,400) = 0 - 400 = -400 ≤ 0 → "adyacente" (solapa).
+        gap_y = -300 ≤ 0 → adyacente.
+        p_top=600 > local_z(600) + delta(400)? → 600 > 1000? → False → feasible.
+        """
         ctrl = RobotAccessibilityControl(config=AccessibilityConfig(accessibility_delta_mm=400))
 
-        # Torre: height=300, z=0 → techo en z=300. Candidata z_base=0, delta=400.
-        # 300 > 0 + 400 => False => no blocked
-        tower = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=300)
-        candidate = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
-        pallet = _make_pallet([tower])
+        support = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=600)
+        candidate = _make_placement(x_mm=0, y_mm=0, z_mm=600, length_mm=400, width_mm=300, height_mm=200)
+        pallet = _make_pallet([support])
+        box = _make_box()
+
+        result = ctrl.evaluate(pallet=pallet, box=box, placement=candidate)  # type: ignore[arg-type]
+        assert result.feasible is True
+        assert result.reason is None
+
+    def test_separated_tall_box_does_not_block(self) -> None:
+        """Test 4: caja separada (gap > 0) alta → feasible=True (no adyacente).
+
+        Candidata: x=500..900, y=0..300, z_base=0.
+        Caja separada: x=0..400, y=0..300, z=0, height=900 → techo=900.
+        gap_x = max(0,500) - min(400,900) = 500 - 400 = 100 > 0 → NO adyacente.
+        """
+        ctrl = RobotAccessibilityControl(config=AccessibilityConfig(accessibility_delta_mm=400))
+
+        far_box = _make_placement(x_mm=0, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=900)
+        candidate = _make_placement(x_mm=500, y_mm=0, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
+        pallet = _make_pallet([far_box])
         box = _make_box()
 
         result = ctrl.evaluate(pallet=pallet, box=box, placement=candidate)  # type: ignore[arg-type]
@@ -79,7 +104,7 @@ class TestRobotAccessibilityControl:
         assert result.reason is None
 
     def test_no_neighbors_is_feasible(self) -> None:
-        """Test 4: sin vecinos → feasible=True."""
+        """Test 5: sin vecinos → feasible=True."""
         ctrl = RobotAccessibilityControl(config=AccessibilityConfig(accessibility_delta_mm=400))
 
         candidate = _make_placement(x_mm=100, y_mm=100, z_mm=0, length_mm=400, width_mm=300, height_mm=200)
