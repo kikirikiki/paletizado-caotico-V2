@@ -42,6 +42,7 @@
     "priority_mode": "none",
     "priority_weight": 1.0,
     "balance_weight": 0.0,
+    "accessibility_delta_mm": 0,
     "coverage_grid_x": 3,
     "coverage_grid_y": 2,
     "coverage_weight": 4.0,
