@@ -2,32 +2,47 @@
 
 ## Fecha: Marzo 2026
 
-## Qué se ha hecho
-- Estudio de viabilidad FIFO completado (ver docs/ si existe el PDF)
-- Scorer de coherencia de capa implementado: src/palca/packer/scoring_coherencia.py
-- Clase CoherenciaCapaScorer: puntúa colocaciones según vecinos a la misma altura (radio 80mm, banda ±50mm)
-- Smoke test pasando en rama feat/fifo-scorer-coherencia
+## Decisión arquitectural
+Se ha decidido rediseñar el scheduler desde cero con enfoque de zonas sincronizadas.
+El sistema actual (heightfield + min_height_slack_then_gain) no puede construir torres
+en paralelo por limitaciones estructurales del algoritmo greedy.
 
-## Resultado del estudio de viabilidad
-- FIFO con scorer de coherencia: 81% del rendimiento humano con buffer=1 caja
-- Buffer de 15 cajas planificado es innecesario: con 1-3 cajas se obtiene el mismo resultado
-- Gap residual 19%: hueco estructural de ~355mm en X (800mm palet - 445mm caja típica)
-- Causa identificada: no rellenable con caja del mismo tipo → solución: detección activa del hueco
+## Conclusiones del estudio
+- Baseline actual: 21.4 cajas/palet (89.2% del target de 24)
+- El gap residual NO es de scorer ni de parámetros — es arquitectural
+- Simulación manual por zonas confirma: 24 cajas con rango final 245mm entre torres ES alcanzable
+- Condición: scheduler por zonas + buffer mínimo de 8 cajas + cajas pequeñas disponibles para zonas B/C
 
-## Próximo paso inmediato
-Integrar CoherenciaCapaScorer en el pipeline como score_mode="coherencia_capa" en:
-- src/palca/packer/scoring.py → añadir referencia al nuevo modo
-- src/palca/integration/policy_packer_sched.py → activar cuando score_mode=="coherencia_capa"
-Sin modificar el comportamiento actual de ningún otro score_mode.
+## Geometría del palet (crítica para el rediseño)
+- Palet: 1200x800mm, overhang 20mm
+- 4 zonas naturales dictadas por la caja dominante (605x445mm):
+  - Zona A: x=[-20..585], y=[-20..430] → 605x450mm
+  - Zona B: x=[585..1215], y=[-20..335] → 630x355mm (requiere cajas ≤355mm de ancho)
+  - Zona C: x=[-20..615], y=[430..780] → 635x350mm (requiere cajas ≤350mm de ancho)
+  - Zona D: x=[615..1220], y=[335..785] → 605x450mm
+- Zonas A y D: compatibles con 69.9% del flujo
+- Zonas B y C: compatibles con solo 7.5% del flujo (cajas ≤355mm de ancho)
+- 29% de cajas no caben en ninguna zona sin rotación
 
-## Arquitectura clave
-- PalletModel (src/palca/packer/pallet_model.py) → clase central, preview_place + commit_place
-- ScoringWeights (src/palca/packer/scoring.py) → pesos del scorer actual
-- score_mode → string que selecciona scorer: "gain_frag", "min_height_then_gain", etc.
-- CoherenciaCapaScorer (src/palca/packer/scoring_coherencia.py) → scorer nuevo, independiente
+## Arquitectura del nuevo sistema (a implementar en nueva rama/repo)
+Scheduler basado en zonas con restricción de sincronía de altura:
+1. Zonas fijas definidas en configuración
+2. En cada step: elegir zona de menor altura dentro de delta configurable
+3. Buscar en buffer la mejor caja para esa zona
+4. Solo avanzar franja cuando todas las zonas están dentro del delta
+5. Fallback: si ninguna zona tiene candidato, cerrar palet
 
-## Reglas de trabajo
-- Smoke test obligatorio antes de commit: ./scripts/smoke_offline.sh
-- Ramas: feat/<tema> o fix/<tema>, nunca directo a main
-- No commitear: out/, outputs/, logs/, .venv/, __pycache__/
-- PR por cada objetivo técnico acotado
+## Parámetros clave validados
+- delta_max_mm: 400 (diferencia máxima tolerable entre zonas)
+- buffer_size: 8 cajas mínimo
+- max_height_mm: 2400mm
+- Robot: FANUC R2000i (tentativo), acceso cenital, altura máxima 3000mm
+
+## Trabajo completado en esta rama (no tirar)
+- CoherenciaCapaScorer: implementado, descartado como scorer único (-22% vs baseline)
+- RobotAccessibilityControl: implementado, válido como filtro de feasibility
+- Infraestructura de benchmark: configs/benchmarks/one_pallet_canonical.json
+- PYTHONPATH correcto: src/ del repo actual, NO /home/ingen/code/Paletizador/09_Software/src
+
+## Próximo paso
+Nuevo chat, nueva rama o repo, arquitectura de scheduler por zonas desde cero.
