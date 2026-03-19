@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Tool: Read → Allow",
+      "Tool: Write → Allow",
+      "Tool: Bash → Allow"
+    ]
+  }
+}
