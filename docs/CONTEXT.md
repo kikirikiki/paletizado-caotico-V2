@@ -85,3 +85,49 @@ Usa el PolicyPackerScheduler existente con los parámetros de configuración val
 1. Investigar palets 5 y 6 — gestión del flujo adverso (cajas sin zona)
 2. Mejora del patrón de construcción para construcción uniforme en Y
 3. Extensión a flujo multi-palet con asignación dinámica de destino
+
+## ANÁLISIS DE MEJORAS — CONCLUSIONES
+
+### Métrica de evaluación corregida
+
+La métrica principal no debe ser cajas/palet sino eficiencia volumétrica:
+- vol_util% = vol_cajas / vol_palet_total (1240×820×2400mm) → 68.8% consistente
+- eff_real% = vol_cajas / (1240×820×altura_max) → 71-75%
+- h_fill% = altura_max / 2400mm → 88-96%
+
+Estas métricas son consistentes en todos los seeds y configuraciones probadas.
+
+### Alternativas de mejora probadas
+
+#### 1. Reducción de min_support_ratio (0.85 → 0.80 → 0.75)
+Resultado: sin impacto. Las tres configuraciones dan 18.6 cajas/palet de media.
+Conclusión: los DEADLOCK son por falta de posiciones físicamente estables,
+no por el umbral de soporte. Mantener 0.85 como valor más seguro físicamente.
+
+#### 2. Ampliación del buffer (ramp_cap: 15 → 20)
+Resultado: sin impacto. Buffer de 20 da exactamente 18.6 cajas/palet.
+Conclusión: los DEADLOCK son por STABILITY (palet lleno), no por falta
+de opciones en el buffer. Un buffer lateral físico de 5 cajas no se justifica
+— coste operativo alto, beneficio cero.
+
+#### 3. Análisis del 29% de cajas "sin zona"
+Resultado: todas las 186 cajas del flujo caben en el palet completo (100%).
+El concepto de "sin zona" era relativo a la geometría de 4 zonas fijas (A/B/C/D).
+El greedy sin restricción de zona ya coloca el 100% del flujo.
+Conclusión: el 29% sin zona no es un problema real del sistema actual.
+
+### Techo de densidad del sistema actual
+
+68.8% de vol_util es el techo natural de este flujo con este algoritmo.
+El limitante es el empaquetado geométrico con cajas heterogéneas, no el algoritmo.
+
+Para superar este techo, las únicas palancas reales son:
+1. Mayor lookahead (micro_depth, micro_width) — coste: tiempo de cómputo
+2. Pre-ordenación del flujo de entrada — decisión operativa, no algorítmica
+3. Aceptar 68.8% como resultado competitivo para paletizado caótico heterogéneo
+
+### Próximos pasos recomendados
+
+1. Evaluar impacto de aumentar micro_depth (4→6) y micro_width (40→60)
+2. Analizar si pre-ordenación parcial del flujo mejora la densidad
+3. Validar el sistema con flujo real de producción (no solo el Excel de prueba)
