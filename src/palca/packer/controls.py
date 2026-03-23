@@ -14,6 +14,22 @@ if TYPE_CHECKING:
     from .pallet_model import PalletModel
 
 
+STAND_HW_MIN_SUPPORT_RATIO = 0.92
+
+
+def is_stand_hw_orientation(placement: Placement) -> bool:
+    family = str(getattr(placement, "orientation_family", "") or "").strip().lower()
+    return family == "stand_hw"
+
+
+def required_support_for_orientation(*, is_stand_hw: bool, min_support_ratio: float) -> float:
+    required = float(min_support_ratio)
+    if is_stand_hw:
+        # Standing on the long axis is more sensitive to marginal supports.
+        required = max(required, STAND_HW_MIN_SUPPORT_RATIO)
+    return required
+
+
 class ManifestControl(Protocol):
     def is_eligible(self, box: Box, pallet: "PalletModel") -> bool:
         ...
@@ -165,10 +181,18 @@ class StabilityPlacementControl:
         if cfg.enable_ratio():
             pallet.stats.support_ratio_checks += 1
             ratio, support_area = pallet.support_surface_ratio(adjusted, eps_mm=eps)
+            stand_hw_orientation = is_stand_hw_orientation(adjusted)
+            required_support = required_support_for_orientation(
+                is_stand_hw=stand_hw_orientation,
+                min_support_ratio=float(cfg.min_support_ratio),
+            )
             debug["support_ratio"] = float(ratio)
             debug["support_area_mm2"] = float(support_area)
-            if ratio + 1e-9 < float(cfg.min_support_ratio):
+            debug["required_support_ratio"] = float(required_support)
+            if ratio + 1e-9 < float(required_support):
                 pallet.stats.support_ratio_rejects += 1
+                if stand_hw_orientation:
+                    pallet.stats.stand_hw_rejected_support_total += 1
                 ratio_failed = True
 
         # 2) CORNERS SUPPORT (después del ratio)

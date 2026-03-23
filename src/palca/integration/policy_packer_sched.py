@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 import logging
 import os
 from typing import Any, Iterable, Mapping
@@ -10,17 +11,22 @@ from ..domain.pallet_spec import PalletSpec
 from ..packer.controls import BalanceConfig, ControlConfig, LoadBearConfig, StabilityConfig
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring import ScoringWeights
-from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerSimState, SchedulerV1
+from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerRampState, SchedulerSimState, SchedulerV1
+from ..control.controller import OnlineController
+from ..control.types import ControllerEvent, ControllerMode, DecisionContext, Overrides
 from .kpi_hooks import aggregate_pallet_kpis
 
 
 SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15)
+RESCUE_RETRY_REASONS = {"STABILITY", "NO_FEASIBLE"}
 
 
 @dataclass(frozen=True)
 class PolicyConfig:
     pallet_spec: PalletSpec = PalletSpec()
     heuristic: str = "baf"
+    stacking_mode: str = "layers"
+    z_band_mm: int | None = None
     scoring_weights: ScoringWeights = ScoringWeights()
     scheduler: SchedulerConfig = SchedulerConfig()
     default_box_length_mm: int = 400
@@ -36,6 +42,26 @@ class PolicyConfig:
     loadbear_penalty_weight: float = 1.0
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
+    coverage_grid_x: int = 0
+    coverage_grid_y: int = 0
+    coverage_weight: float = 0.0
+    dominant_free_rect_weight: float = 0.0
+    dominant_free_rect_ratio_gate: float = 0.35
+    score_mode: str = "gain_frag"
+    height_slack_mm: int = 0
+    tower_z_band_mm: int = 0
+    tower_z_penalty_weight: float = 0.0
+    spatial_xy_bin_mm: int = 150
+    spatial_tower_penalty_weight: float = 0.0
+    spatial_tower_penalty_end_step: int = 0
+    spatial_tower_target_base: int = 2
+    spatial_tower_target_step_div: int = 6
+    hard_floor_phase_end_step: int = 0
+    hard_floor_phase_min_base_candidates: int = 1
+    hard_floor_phase_lookahead_items: int = 8
+    hard_floor_phase_stand_mix_bonus: float = 0.0
+    orientation_mode: str = "planar"
+    stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
     max_tries_per_item: int = 0
     max_candidates: int = 0
@@ -43,6 +69,12 @@ class PolicyConfig:
     heartbeat_sec: float = 1.0
     settle_max_iter: int = 0
     settle_timeout_ms: int = 0
+    micro_plan_enabled: bool = False
+    micro_plan_depth: int = 3
+    micro_plan_width: int = 8
+    micro_plan_topk_per_step: int = 15
+    online_controller: bool = False
+    controller_debug: bool = False
 
 
 class PolicyPackerScheduler:
@@ -54,6 +86,7 @@ class PolicyPackerScheduler:
         self._pallets: dict[int | str, PalletModel] = {}
         self._completed: dict[int | str, list[PalletModel]] = {}
         self._pending_closures: dict[int | str, str] = {}
+        self._committed_placements: dict[int | str, list[dict[str, object]]] = {}
         self._viewer = None
         self._viewer_rect_cls = None
         self._viewer_event_count = 0
@@ -78,6 +111,36 @@ class PolicyPackerScheduler:
         self.dt_extra_total = 0.0
         self.dt_extra_non_head_total = 0.0
 
+        scheduler_cfg = self.config.scheduler
+        self._online_controller_enabled = bool(self.config.online_controller)
+        self._controller_debug = bool(self.config.controller_debug)
+        self._controller_debug_max_events = 200
+        self._controller_debug_events: list[dict[str, object]] = []
+        self._controller_mode_counts: dict[str, int] = {mode.value: 0 for mode in ControllerMode}
+        self._controller_transitions: list[dict[str, object]] = []
+        self._controller_overrides_applied: dict[str, int] = {}
+        self._controller_retry_attempts_total = 0
+        self._controller_retry_success_total = 0
+        self._controller_retry_fail_total = 0
+        self._controller_retry_by_reason: dict[str, int] = {}
+        self._controller_retry_skipped_by_reason: dict[str, int] = {}
+        self._controller_consec_ok = 0
+        self._controller_consec_fail = 0
+        self._controller_consecutive_failures_max = 0
+        self._controller_last_ok = True
+        self._controller_last_fail_reason: str | None = None
+        self._controller_pick_index = 0
+        self._controller: OnlineController | None = None
+        if self._online_controller_enabled:
+            self._controller = OnlineController(
+                baseline_score_mode=str(scheduler_cfg.score_mode),
+                baseline_height_slack_mm=int(scheduler_cfg.height_slack_mm),
+                baseline_micro_depth=int(scheduler_cfg.micro_plan_depth),
+                baseline_micro_width=int(scheduler_cfg.micro_plan_width),
+                baseline_micro_topk=int(scheduler_cfg.micro_plan_topk_per_step),
+                baseline_time_budget_ms=int(scheduler_cfg.time_budget_ms),
+            )
+
     @classmethod
     def from_defaults(
         cls,
@@ -85,6 +148,8 @@ class PolicyPackerScheduler:
         lookahead_k: int = 1,
         overhang_mm: int = 0,
         heuristic: str = "baf",
+        stacking_mode: str = "layers",
+        z_band_mm: int | None = None,
         t_select_base: float = 0.0,
         t_select_step: float = 0.0,
         time_penalty_weight: float = 1.0,
@@ -101,6 +166,26 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        coverage_grid_x: int = 0,
+        coverage_grid_y: int = 0,
+        coverage_weight: float = 0.0,
+        dominant_free_rect_weight: float = 0.0,
+        dominant_free_rect_ratio_gate: float = 0.35,
+        score_mode: str = "gain_frag",
+        height_slack_mm: int = 0,
+        tower_z_band_mm: int = 0,
+        tower_z_penalty_weight: float = 0.0,
+        spatial_xy_bin_mm: int = 150,
+        spatial_tower_penalty_weight: float = 0.0,
+        spatial_tower_penalty_end_step: int = 0,
+        spatial_tower_target_base: int = 2,
+        spatial_tower_target_step_div: int = 6,
+        hard_floor_phase_end_step: int = 0,
+        hard_floor_phase_min_base_candidates: int = 1,
+        hard_floor_phase_lookahead_items: int = 8,
+        hard_floor_phase_stand_mix_bonus: float = 0.0,
+        orientation_mode: str = "planar",
+        stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
         max_tries_per_item: int = 0,
         max_candidates: int = 0,
@@ -108,6 +193,16 @@ class PolicyPackerScheduler:
         heartbeat_sec: float = 1.0,
         settle_max_iter: int = 0,
         settle_timeout_ms: int = 0,
+        micro_plan_enabled: bool = False,
+        micro_plan_depth: int = 3,
+        micro_plan_width: int = 8,
+        micro_plan_topk_per_step: int = 15,
+        batchfill_layer_starter: bool = False,
+        batchfill_starters_max: int = 6,
+        batchfill_budget_ms: int = 150,
+        batchfill_greedy_topk: int = 12,
+        online_controller: bool = False,
+        controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
             raise ValueError(f"K no soportado: {lookahead_k}")
@@ -120,14 +215,37 @@ class PolicyPackerScheduler:
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
             priority_weight=priority_weight,
+            score_mode=score_mode,
+            height_slack_mm=height_slack_mm,
+            tower_z_band_mm=tower_z_band_mm,
+            tower_z_penalty_weight=tower_z_penalty_weight,
+            spatial_xy_bin_mm=spatial_xy_bin_mm,
+            spatial_tower_penalty_weight=spatial_tower_penalty_weight,
+            spatial_tower_penalty_end_step=spatial_tower_penalty_end_step,
+            spatial_tower_target_base=spatial_tower_target_base,
+            spatial_tower_target_step_div=spatial_tower_target_step_div,
+            hard_floor_phase_end_step=hard_floor_phase_end_step,
+            hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
+            hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
+            hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
             heartbeat_sec=heartbeat_sec,
+            micro_plan_enabled=micro_plan_enabled,
+            micro_plan_depth=micro_plan_depth,
+            micro_plan_width=micro_plan_width,
+            micro_plan_topk_per_step=micro_plan_topk_per_step,
+            batchfill_layer_starter=batchfill_layer_starter,
+            batchfill_starters_max=batchfill_starters_max,
+            batchfill_budget_ms=batchfill_budget_ms,
+            batchfill_greedy_topk=batchfill_greedy_topk,
         )
         config = PolicyConfig(
             pallet_spec=pallet_spec,
             heuristic=heuristic,
+            stacking_mode=str(stacking_mode),
+            z_band_mm=(None if z_band_mm is None else max(0, int(z_band_mm))),
             scheduler=scheduler,
             stability_mode=stability_mode,
             min_support_ratio=min_support_ratio,
@@ -139,6 +257,26 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            coverage_grid_x=max(0, int(coverage_grid_x)),
+            coverage_grid_y=max(0, int(coverage_grid_y)),
+            coverage_weight=max(0.0, float(coverage_weight)),
+            dominant_free_rect_weight=max(0.0, float(dominant_free_rect_weight)),
+            dominant_free_rect_ratio_gate=max(0.0, float(dominant_free_rect_ratio_gate)),
+            score_mode=score_mode,
+            height_slack_mm=max(0, int(height_slack_mm)),
+            tower_z_band_mm=max(0, int(tower_z_band_mm)),
+            tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
+            spatial_xy_bin_mm=max(1, int(spatial_xy_bin_mm)),
+            spatial_tower_penalty_weight=max(0.0, float(spatial_tower_penalty_weight)),
+            spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
+            spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
+            spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            hard_floor_phase_end_step=max(0, int(hard_floor_phase_end_step)),
+            hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
+            hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
+            hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            orientation_mode=str(orientation_mode),
+            stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -146,6 +284,12 @@ class PolicyPackerScheduler:
             heartbeat_sec=heartbeat_sec,
             settle_max_iter=settle_max_iter,
             settle_timeout_ms=settle_timeout_ms,
+            micro_plan_enabled=micro_plan_enabled,
+            micro_plan_depth=micro_plan_depth,
+            micro_plan_width=micro_plan_width,
+            micro_plan_topk_per_step=micro_plan_topk_per_step,
+            online_controller=online_controller,
+            controller_debug=controller_debug,
         )
         return cls(config=config)
 
@@ -160,6 +304,7 @@ class PolicyPackerScheduler:
         self.stop_details = {}
         pallets = self._collect_pallets(ramps)
         ramp_boxes = self._collect_ramp_boxes(ramps)
+        ramp_states = self._collect_ramp_states(ramps)
         blocked = {
             dest_id
             for dest_id, state in destinations.items()
@@ -179,31 +324,133 @@ class PolicyPackerScheduler:
         sim_state = SchedulerSimState(
             now=float(now),
             ramps=ramp_boxes,
+            ramp_states=ramp_states,
             pallets=pallets,
             pallet_blocked=blocked,
             ramp_sizes=ramp_sizes,
             remaining_total=int(remaining_total),
         )
 
-        plan = self._scheduler.choose_action(sim_state)
+        overrides = Overrides()
+        override_attempts: list[Overrides] = []
+        controller_events: list[ControllerEvent] = []
+        if self._online_controller_enabled and self._controller is not None:
+            controller_ctx = DecisionContext(
+                last_ok=bool(self._controller_last_ok),
+                last_fail_reason=self._controller_last_fail_reason,
+                consec_ok=int(self._controller_consec_ok),
+                consec_fail=int(self._controller_consec_fail),
+                pick_index=int(self._controller_pick_index),
+            )
+            controller_overrides, controller_event = self._controller.step(controller_ctx)
+            overrides = controller_overrides
+            if controller_event is not None:
+                controller_events.append(controller_event)
+        override_attempts.append(overrides)
 
-        # reset pending closures (se rellenará si plan es None)
-        self._pending_closures = {}
-        if plan is None and self._scheduler.last_blocked_pallets:
-            self._pending_closures = dict(self._scheduler.last_blocked_pallets)
-            return None
+        plan, fail_reason, pending_closures, stop_reason, stop_details = self._run_scheduler_attempt(
+            sim_state=sim_state,
+            overrides=overrides,
+        )
+        self._record_controller_debug_attempt(
+            attempt_index=1,
+            mode=self._controller.mode if self._controller is not None else ControllerMode.NORMAL,
+            overrides=overrides,
+            plan=plan,
+            fail_reason=fail_reason,
+        )
 
-        if plan is None and self._scheduler.last_deadlock:
-            self.stop_reason = "DEADLOCK"
-            details = self._scheduler.last_deadlock_item or {}
-            self.stop_details = dict(details)
+        treat_fail_as_normal_close = False
+        if (
+            plan is None
+            and self._online_controller_enabled
+            and self._controller is not None
+        ):
+            retry_reason = self._normalize_retry_reason(fail_reason)
+            if retry_reason == "HEIGHT_LIMIT":
+                self._controller_retry_skipped_by_reason[retry_reason] = int(
+                    self._controller_retry_skipped_by_reason.get(retry_reason, 0)
+                ) + 1
+                treat_fail_as_normal_close = True
+            elif retry_reason in RESCUE_RETRY_REASONS:
+                self._controller_retry_attempts_total += 1
+                self._controller_retry_by_reason[retry_reason] = int(
+                    self._controller_retry_by_reason.get(retry_reason, 0)
+                ) + 1
+
+                retry_controller = deepcopy(self._controller)
+                retry_ctx = DecisionContext(
+                    last_ok=False,
+                    last_fail_reason=retry_reason,
+                    consec_ok=0,
+                    consec_fail=int(self._controller_consec_fail) + 1,
+                    pick_index=int(self._controller_pick_index),
+                )
+                _retry_ctx_overrides, retry_event = retry_controller.step(retry_ctx)
+                from_mode = retry_controller.mode
+                retry_controller.mode = ControllerMode.RESCUE
+                attempt1_effective_budget_ms = int(
+                    self._effective_scheduler_config(self._scheduler.config, overrides).time_budget_ms
+                )
+                rescue_overrides, retry_profile = self._build_retry_overrides(
+                    retry_reason=retry_reason,
+                    attempt1_effective_budget_ms=attempt1_effective_budget_ms,
+                    fallback_overrides=retry_controller.overrides_for_mode(ControllerMode.RESCUE),
+                )
+                override_attempts.append(rescue_overrides)
+                if from_mode != ControllerMode.RESCUE:
+                    retry_event = ControllerEvent(
+                        pick_index=int(self._controller_pick_index),
+                        from_mode=from_mode,
+                        to_mode=ControllerMode.RESCUE,
+                        trigger=f"retry_force_rescue:{retry_reason}",
+                        overrides=rescue_overrides.to_dict(),
+                        note="emergency_retry_attempt",
+                    )
+
+                retry_plan, retry_fail_reason, retry_pending, retry_stop_reason, retry_stop_details = (
+                    self._run_scheduler_attempt(
+                        sim_state=sim_state,
+                        overrides=rescue_overrides,
+                    )
+                )
+                self._record_controller_debug_attempt(
+                    attempt_index=2,
+                    mode=ControllerMode.RESCUE,
+                    overrides=rescue_overrides,
+                    plan=retry_plan,
+                    fail_reason=retry_fail_reason,
+                    note=f"retry_reason={retry_reason} retry_profile={retry_profile}",
+                )
+
+                if retry_plan is not None:
+                    self._controller = retry_controller
+                    if retry_event is not None:
+                        controller_events.append(retry_event)
+                    overrides = rescue_overrides
+                    plan = retry_plan
+                    fail_reason = retry_fail_reason
+                    pending_closures = retry_pending
+                    stop_reason = retry_stop_reason
+                    stop_details = retry_stop_details
+                    self._controller_retry_success_total += 1
+                else:
+                    self._controller_retry_fail_total += 1
+                    fail_reason = retry_fail_reason
+                    pending_closures = retry_pending
+                    stop_reason = retry_stop_reason
+                    stop_details = retry_stop_details
+
+        self._pending_closures = dict(pending_closures)
+        self.stop_reason = stop_reason
+        self.stop_details = dict(stop_details)
+        if plan is None and self.stop_reason == "DEADLOCK":
             self._logger.error(
                 "DEADLOCK: no feasible placement. item=%s dims=%s reason=%s",
-                details.get("box_id"),
-                details.get("dims"),
-                details.get("reason"),
+                self.stop_details.get("box_id"),
+                self.stop_details.get("dims"),
+                self.stop_details.get("reason"),
             )
-            return None
 
         # KPI: medir non-head picks + dt_extra
         if plan is not None:
@@ -218,6 +465,13 @@ class PolicyPackerScheduler:
                 self.non_head_picks += 1
                 self.dt_extra_non_head_total += dt_extra
 
+        self._update_controller_metrics(
+            plan=plan,
+            fail_reason=fail_reason,
+            treat_fail_as_normal_close=treat_fail_as_normal_close,
+            override_attempts=override_attempts,
+            controller_events=controller_events,
+        )
         return plan
 
     def commit_plan(self, plan: PickPlan, time: float | None = None) -> None:
@@ -233,6 +487,47 @@ class PolicyPackerScheduler:
 
         if placement is None:
             return
+
+        # Record the *committed* placement sequence (not previews) for offline analysis.
+        # Best-effort: must never affect packing decisions.
+        pid = getattr(plan, "pallet_id", None)
+        try:
+            if pid is not None:
+                seq = self._committed_placements.setdefault(pid, [])
+                step_index = int(len(seq))
+                entry: dict[str, object] = {
+                    "pallet_id": pid,
+                    "step_index": step_index,
+                    "box_id": getattr(placement, "box_id", None),
+                    "length_mm": int(getattr(placement, "length_mm", 0) or 0),
+                    "width_mm": int(getattr(placement, "width_mm", 0) or 0),
+                    "height_mm": int(getattr(placement, "height_mm", 0) or 0),
+                    "x_mm": int(getattr(placement, "x_mm", 0) or 0),
+                    "y_mm": int(getattr(placement, "y_mm", 0) or 0),
+                    "z_mm": int(getattr(placement, "z_mm", 0) or 0),
+                    "rot90": bool(getattr(placement, "rot90", False)),
+                    "layer_id": int(getattr(placement, "layer_id", 0) or 0),
+                    "orientation_family": getattr(placement, "orientation_family", None),
+                    "orientation_name": getattr(placement, "orientation_name", None),
+                }
+                if time is not None:
+                    entry["timestamp"] = float(time)
+
+                weight_kg = getattr(placement, "weight_kg", None)
+                if weight_kg is not None:
+                    entry["weight_kg"] = float(weight_kg)
+
+                loadbear = getattr(placement, "loadbear", None)
+                if loadbear is not None:
+                    entry["loadbear"] = float(loadbear)
+
+                priority = getattr(placement, "priority", None)
+                if priority is not None:
+                    entry["priority"] = float(priority)
+
+                seq.append(entry)
+        except Exception:
+            self._logger.exception("record committed placement failed pid=%s", pid)
 
         viewer = self._viewer
         if viewer is None:
@@ -308,7 +603,7 @@ class PolicyPackerScheduler:
         self._pending_closures = {}
         return closures
 
-    def on_changeover_start(self, destination: int, reason: str) -> None:
+    def on_changeover_start(self, destination: int, reason: str, open_next_pallet: bool = True) -> None:
         pallet = self._pallets.get(destination)
         if pallet is not None:
             self._completed.setdefault(destination, []).append(pallet)
@@ -330,7 +625,10 @@ class PolicyPackerScheduler:
             except Exception:
                 self._logger.exception("viewer on_close failed for dest=%s", destination)
 
-        self._pallets[destination] = self._new_pallet()
+        if open_next_pallet:
+            self._pallets[destination] = self._new_pallet()
+        else:
+            self._pallets.pop(destination, None)
 
     def collect_kpis(self) -> dict[str, object]:
         pallets_by_dest: dict[int | str, Iterable[PalletModel]] = {}
@@ -360,7 +658,414 @@ class PolicyPackerScheduler:
             "dt_extra_avg_non_head": float(self.dt_extra_non_head_total / max(1, non_head)),
             "deadline_cutoffs_count": deadline_cutoffs,
         }
+        micro_count = int(getattr(self._scheduler, "micro_plan_time_ms_count", 0) or 0)
+        micro_sum = float(getattr(self._scheduler, "micro_plan_time_ms_sum", 0.0) or 0.0)
+        micro_min_raw = getattr(self._scheduler, "micro_plan_time_ms_min", None)
+        micro_min = float(micro_min_raw) if micro_min_raw is not None else 0.0
+        micro_max = float(getattr(self._scheduler, "micro_plan_time_ms_max", 0.0) or 0.0)
+        kpis["micro_plan_calls"] = int(getattr(self._scheduler, "micro_plan_calls", 0) or 0)
+        kpis["micro_plan_fallback_greedy"] = int(getattr(self._scheduler, "micro_plan_fallback_greedy", 0) or 0)
+        kpis["micro_plan_time_ms_min"] = float(micro_min)
+        kpis["micro_plan_time_ms_mean"] = float(micro_sum / max(1, micro_count))
+        kpis["micro_plan_time_ms_max"] = float(micro_max)
+        kpis["micro_plan_nodes_expanded_total"] = int(
+            getattr(self._scheduler, "micro_plan_nodes_expanded_total", 0) or 0
+        )
+        depth_count = int(getattr(self._scheduler, "micro_plan_depth_effective_count", 0) or 0)
+        depth_sum = float(getattr(self._scheduler, "micro_plan_depth_effective_sum", 0.0) or 0.0)
+        kpis["micro_plan_depth_effective_mean"] = float(depth_sum / max(1, depth_count))
+        kpis["micro_plan_best_seq_len_hist"] = {
+            int(k): int(v)
+            for k, v in dict(getattr(self._scheduler, "micro_plan_best_seq_len_hist", {}) or {}).items()
+        }
+        batchfill_selected_boxes_sum = int(getattr(self._scheduler, "batchfill_selected_boxes_sum", 0) or 0)
+        batchfill_selected_boxes_count = int(getattr(self._scheduler, "batchfill_selected_boxes_count", 0) or 0)
+        kpis["batchfill_calls"] = int(getattr(self._scheduler, "batchfill_calls", 0) or 0)
+        kpis["batchfill_applied"] = int(getattr(self._scheduler, "batchfill_applied", 0) or 0)
+        kpis["batchfill_selected_layer_boxes_mean"] = float(
+            float(batchfill_selected_boxes_sum) / max(1, batchfill_selected_boxes_count)
+        )
+        score_mode = str(getattr(self._scheduler.config, "score_mode", "gain_frag") or "gain_frag")
+        height_hist = [int(v) for v in list(getattr(self._scheduler, "selected_height_after_mm_hist", []) or [])]
+        height_hist_sorted = sorted(height_hist)
+        height_count = len(height_hist_sorted)
+
+        def _percentile(values: list[int], q: float) -> float:
+            if not values:
+                return 0.0
+            if len(values) == 1:
+                return float(values[0])
+            pos = (len(values) - 1) * max(0.0, min(1.0, float(q)))
+            lo = int(pos)
+            hi = min(lo + 1, len(values) - 1)
+            if lo == hi:
+                return float(values[lo])
+            frac = pos - lo
+            return float(values[lo] + (values[hi] - values[lo]) * frac)
+
+        height_min = float(height_hist_sorted[0]) if height_hist_sorted else 0.0
+        height_max = float(height_hist_sorted[-1]) if height_hist_sorted else 0.0
+        height_mean = float(sum(height_hist_sorted) / max(1, height_count))
+        above_min_count = int(getattr(self._scheduler, "selected_height_above_min_feasible_count", 0) or 0)
+        choices_count = int(getattr(self._scheduler, "selected_height_choices_count", 0) or 0)
+        slack_decisions_count = int(getattr(self._scheduler, "selected_height_slack_decisions_count", 0) or 0)
+        slack_filtered_count = int(getattr(self._scheduler, "selected_height_slack_filtered_count", 0) or 0)
+        slack_set_size_sum = float(getattr(self._scheduler, "selected_height_slack_set_size_sum", 0.0) or 0.0)
+        height_slack_mm = int(getattr(self._scheduler.config, "height_slack_mm", 0) or 0)
+        tower_z_penalty_weight = float(getattr(self._scheduler.config, "tower_z_penalty_weight", 0.0) or 0.0)
+        tower_z_band_mm = int(getattr(self._scheduler.config, "tower_z_band_mm", 0) or 0)
+        tower_z_penalty_applied_count = int(getattr(self._scheduler, "tower_z_penalty_applied_count", 0) or 0)
+        tower_z_penalty_sum = float(getattr(self._scheduler, "tower_z_penalty_sum", 0.0) or 0.0)
+        tower_z_delta_mm_sum = float(getattr(self._scheduler, "tower_z_delta_mm_sum", 0.0) or 0.0)
+        tower_z_selected_count = int(getattr(self._scheduler, "tower_z_selected_count", 0) or 0)
+        tower_z_selected_delta_mm_sum = float(getattr(self._scheduler, "tower_z_selected_delta_mm_sum", 0.0) or 0.0)
+        spatial_xy_bin_mm = int(getattr(self._scheduler.config, "spatial_xy_bin_mm", 150) or 150)
+        spatial_tower_penalty_weight = float(
+            getattr(self._scheduler.config, "spatial_tower_penalty_weight", 0.0) or 0.0
+        )
+        spatial_tower_penalty_end_step = int(
+            getattr(self._scheduler.config, "spatial_tower_penalty_end_step", 0) or 0
+        )
+        spatial_tower_target_base = int(getattr(self._scheduler.config, "spatial_tower_target_base", 2) or 2)
+        spatial_tower_target_step_div = int(
+            getattr(self._scheduler.config, "spatial_tower_target_step_div", 6) or 6
+        )
+        spatial_tower_penalty_applied_count = int(
+            getattr(self._scheduler, "spatial_tower_penalty_applied_count", 0) or 0
+        )
+        spatial_tower_penalty_sum = float(getattr(self._scheduler, "spatial_tower_penalty_sum", 0.0) or 0.0)
+        spatial_tower_selected_penalty_count = int(
+            getattr(self._scheduler, "spatial_tower_selected_penalty_count", 0) or 0
+        )
+        spatial_tower_selected_penalty_sum = float(
+            getattr(self._scheduler, "spatial_tower_selected_penalty_sum", 0.0) or 0.0
+        )
+        hard_floor_phase_end_step = int(getattr(self._scheduler.config, "hard_floor_phase_end_step", 0) or 0)
+        hard_floor_phase_min_base_candidates = int(
+            getattr(self._scheduler.config, "hard_floor_phase_min_base_candidates", 1) or 1
+        )
+        hard_floor_phase_lookahead_items = int(
+            getattr(self._scheduler.config, "hard_floor_phase_lookahead_items", 8) or 8
+        )
+        hard_floor_phase_stand_mix_bonus = float(
+            getattr(self._scheduler.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0
+        )
+        hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
+        hard_floor_phase_floor_candidates_seen_total = int(
+            getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
+        )
+        hard_floor_phase_chosen_total = int(getattr(self._scheduler, "hard_floor_phase_chosen_total", 0) or 0)
+        hard_floor_phase_stand_hw_chosen_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_hw_chosen_total", 0) or 0
+        )
+        hard_floor_phase_exit_no_floor_total = int(
+            getattr(self._scheduler, "hard_floor_phase_exit_no_floor_total", 0) or 0
+        )
+        hard_floor_phase_exit_end_step_total = int(
+            getattr(self._scheduler, "hard_floor_phase_exit_end_step_total", 0) or 0
+        )
+        hard_floor_phase_score_sum = float(getattr(self._scheduler, "hard_floor_phase_score_sum", 0.0) or 0.0)
+        hard_floor_phase_stand_mix_bonus_applied_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_mix_bonus_applied_total", 0) or 0
+        )
+        hard_floor_phase_stand_mix_candidates_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_mix_candidates_total", 0) or 0
+        )
+        hard_floor_phase_stand_mix_chosen_total = int(
+            getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
+        )
+
+        kpis["score_mode"] = score_mode
+        kpis["height_slack_mm"] = int(height_slack_mm)
+        kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)
+        kpis["tower_z_band_mm"] = int(tower_z_band_mm)
+        kpis["tower_z_penalty_applied_count"] = int(tower_z_penalty_applied_count)
+        kpis["tower_z_penalty_sum"] = float(tower_z_penalty_sum)
+        kpis["tower_z_delta_mm_mean"] = float(tower_z_delta_mm_sum / max(1, tower_z_penalty_applied_count))
+        kpis["tower_z_selected_count"] = int(tower_z_selected_count)
+        kpis["tower_z_selected_delta_mm_mean"] = float(
+            tower_z_selected_delta_mm_sum / max(1, tower_z_selected_count)
+        )
+        kpis["spatial_xy_bin_mm"] = int(spatial_xy_bin_mm)
+        kpis["spatial_tower_penalty_weight"] = float(spatial_tower_penalty_weight)
+        kpis["spatial_tower_penalty_end_step"] = int(spatial_tower_penalty_end_step)
+        kpis["spatial_tower_target_base"] = int(spatial_tower_target_base)
+        kpis["spatial_tower_target_step_div"] = int(spatial_tower_target_step_div)
+        kpis["spatial_tower_penalty_applied_count"] = int(spatial_tower_penalty_applied_count)
+        kpis["spatial_tower_penalty_sum"] = float(spatial_tower_penalty_sum)
+        kpis["spatial_tower_selected_penalty_count"] = int(spatial_tower_selected_penalty_count)
+        kpis["spatial_tower_selected_penalty_mean"] = float(
+            spatial_tower_selected_penalty_sum / max(1, spatial_tower_selected_penalty_count)
+        )
+        kpis["hard_floor_phase_end_step"] = int(hard_floor_phase_end_step)
+        kpis["hard_floor_phase_min_base_candidates"] = int(hard_floor_phase_min_base_candidates)
+        kpis["hard_floor_phase_lookahead_items"] = int(hard_floor_phase_lookahead_items)
+        kpis["hard_floor_phase_stand_mix_bonus"] = float(hard_floor_phase_stand_mix_bonus)
+        kpis["hard_floor_phase_active_total"] = int(hard_floor_phase_active_total)
+        kpis["hard_floor_phase_floor_candidates_seen_total"] = int(hard_floor_phase_floor_candidates_seen_total)
+        kpis["hard_floor_phase_chosen_total"] = int(hard_floor_phase_chosen_total)
+        kpis["hard_floor_phase_stand_hw_chosen_total"] = int(hard_floor_phase_stand_hw_chosen_total)
+        kpis["hard_floor_phase_exit_no_floor_total"] = int(hard_floor_phase_exit_no_floor_total)
+        kpis["hard_floor_phase_exit_end_step_total"] = int(hard_floor_phase_exit_end_step_total)
+        kpis["hard_floor_phase_stand_mix_bonus_applied_total"] = int(hard_floor_phase_stand_mix_bonus_applied_total)
+        kpis["hard_floor_phase_stand_mix_candidates_total"] = int(hard_floor_phase_stand_mix_candidates_total)
+        kpis["hard_floor_phase_stand_mix_chosen_total"] = int(hard_floor_phase_stand_mix_chosen_total)
+        kpis["hard_floor_phase_score_mean"] = float(
+            hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
+        )
+        kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
+        kpis["selected_height_after_mm_count"] = int(height_count)
+        kpis["selected_height_after_mm_min"] = height_min
+        kpis["selected_height_after_mm_mean"] = height_mean
+        kpis["selected_height_after_mm_max"] = height_max
+        kpis["selected_height_after_mm_p50"] = _percentile(height_hist_sorted, 0.50)
+        kpis["selected_height_after_mm_p90"] = _percentile(height_hist_sorted, 0.90)
+        kpis["selected_height_after_mm_p99"] = _percentile(height_hist_sorted, 0.99)
+        kpis["selected_height_above_min_feasible_count"] = above_min_count
+        kpis["selected_height_above_min_feasible_rate"] = float(above_min_count / max(1, choices_count))
+        kpis["selected_height_slack_filtered_rate"] = float(slack_filtered_count / max(1, slack_decisions_count))
+        kpis["selected_height_slack_set_size_mean"] = float(slack_set_size_sum / max(1, slack_decisions_count))
         return kpis
+
+    def collect_controller_metrics(self) -> dict[str, object]:
+        mode_counts = {mode.value: int(self._controller_mode_counts.get(mode.value, 0)) for mode in ControllerMode}
+        metrics: dict[str, object] = {
+            "enabled": bool(self._online_controller_enabled),
+            "mode_counts": mode_counts,
+            "transitions": list(self._controller_transitions),
+            "overrides_applied": dict(self._controller_overrides_applied),
+            "retry_attempts_total": int(self._controller_retry_attempts_total),
+            "retry_success_total": int(self._controller_retry_success_total),
+            "retry_fail_total": int(self._controller_retry_fail_total),
+            "retry_by_reason": dict(self._controller_retry_by_reason),
+            "retry_skipped_by_reason": dict(self._controller_retry_skipped_by_reason),
+            "consecutive_failures_max": int(self._controller_consecutive_failures_max),
+        }
+        if self._controller_debug:
+            metrics["debug_events"] = list(self._controller_debug_events)
+        return metrics
+
+    def _choose_action_with_overrides(self, sim_state: SchedulerSimState, overrides: Overrides) -> PickPlan | None:
+        base_config = self._scheduler.config
+        effective_config = self._effective_scheduler_config(base_config, overrides)
+        if effective_config == base_config:
+            return self._scheduler.choose_action(sim_state)
+
+        # Cambio temporal: el scheduler consume la config en runtime y se restaura al finalizar.
+        self._scheduler.config = effective_config
+        try:
+            return self._scheduler.choose_action(sim_state)
+        finally:
+            self._scheduler.config = base_config
+
+    def _effective_scheduler_config(self, base_config: SchedulerConfig, overrides: Overrides) -> SchedulerConfig:
+        data = overrides.to_dict()
+        if not data:
+            return base_config
+
+        updates: dict[str, object] = {}
+        if "score_mode" in data:
+            updates["score_mode"] = str(data["score_mode"])
+        if "height_slack_mm" in data:
+            updates["height_slack_mm"] = max(0, int(data["height_slack_mm"]))
+        if "micro_depth" in data:
+            updates["micro_plan_depth"] = max(1, int(data["micro_depth"]))
+        if "micro_width" in data:
+            updates["micro_plan_width"] = max(1, int(data["micro_width"]))
+        if "micro_topk" in data:
+            updates["micro_plan_topk_per_step"] = max(1, int(data["micro_topk"]))
+        if "time_budget_ms" in data:
+            updates["time_budget_ms"] = int(data["time_budget_ms"])
+        if not updates:
+            return base_config
+        return replace(base_config, **updates)
+
+    def _infer_fail_reason(self) -> str | None:
+        details = self._scheduler.last_deadlock_item or {}
+        reason = details.get("reason")
+        if reason:
+            return str(reason)
+
+        blocked = dict(self._scheduler.last_blocked_pallets or {})
+        blocked_reasons = [str(val).upper().strip() for val in blocked.values() if val is not None]
+        if blocked_reasons:
+            if "STABILITY" in blocked_reasons:
+                return "STABILITY"
+            if "HEIGHT_LIMIT" in blocked_reasons:
+                return "HEIGHT_LIMIT"
+            return blocked_reasons[0]
+
+        eval_stats = dict(getattr(self._scheduler, "last_eval_stats", {}) or {})
+        cutoff_reason = eval_stats.get("cutoff_reason")
+        if cutoff_reason:
+            return str(cutoff_reason).upper().strip()
+        return "NO_PLAN"
+
+    def _update_controller_metrics(
+        self,
+        *,
+        plan: PickPlan | None,
+        fail_reason: str | None,
+        treat_fail_as_normal_close: bool,
+        override_attempts: Iterable[Overrides],
+        controller_events: Iterable[ControllerEvent] | None,
+    ) -> None:
+        if not self._online_controller_enabled or self._controller is None:
+            return
+
+        mode_name = self._controller.mode.value
+        self._controller_mode_counts[mode_name] = int(self._controller_mode_counts.get(mode_name, 0)) + 1
+        applied_override_keys: set[str] = set()
+        for attempt_overrides in override_attempts:
+            applied_override_keys.update(attempt_overrides.to_dict().keys())
+        for key in applied_override_keys:
+            self._controller_overrides_applied[key] = int(self._controller_overrides_applied.get(key, 0)) + 1
+
+        if controller_events is not None:
+            for controller_event in controller_events:
+                if controller_event.from_mode == controller_event.to_mode:
+                    continue
+                self._controller_transitions.append(self._serialize_controller_event(controller_event))
+
+        ok = plan is not None or bool(treat_fail_as_normal_close)
+        if ok:
+            self._controller_consec_ok += 1
+            self._controller_consec_fail = 0
+            self._controller_last_ok = True
+            self._controller_last_fail_reason = None
+        else:
+            self._controller_consec_fail += 1
+            self._controller_consec_ok = 0
+            self._controller_last_ok = False
+            self._controller_last_fail_reason = str(fail_reason) if fail_reason is not None else None
+
+        self._controller_consecutive_failures_max = max(
+            int(self._controller_consecutive_failures_max),
+            int(self._controller_consec_fail),
+        )
+
+        self._controller_pick_index += 1
+
+    def _run_scheduler_attempt(
+        self,
+        *,
+        sim_state: SchedulerSimState,
+        overrides: Overrides,
+    ) -> tuple[PickPlan | None, str | None, dict[int | str, str], str | None, dict[str, object]]:
+        plan = self._choose_action_with_overrides(sim_state, overrides)
+        fail_reason = self._infer_fail_reason()
+        pending_closures: dict[int | str, str] = {}
+        stop_reason: str | None = None
+        stop_details: dict[str, object] = {}
+
+        if plan is None and self._scheduler.last_blocked_pallets:
+            pending_closures = dict(self._scheduler.last_blocked_pallets)
+            blocked_reasons = [str(v) for v in self._scheduler.last_blocked_pallets.values() if v is not None]
+            if blocked_reasons:
+                fail_reason = blocked_reasons[0]
+
+        if plan is None and self._scheduler.last_deadlock:
+            stop_reason = "DEADLOCK"
+            details = self._scheduler.last_deadlock_item or {}
+            stop_details = dict(details)
+            fail_reason = str(details.get("reason", fail_reason or "DEADLOCK"))
+
+        return plan, fail_reason, pending_closures, stop_reason, stop_details
+
+    @staticmethod
+    def _normalize_retry_reason(reason: str | None) -> str:
+        if reason is None:
+            return "NO_FEASIBLE"
+
+        normalized = str(reason).upper().strip()
+        if not normalized:
+            return "NO_FEASIBLE"
+        if "STABILITY" in normalized:
+            return "STABILITY"
+        if "HEIGHT_LIMIT" in normalized:
+            return "HEIGHT_LIMIT"
+        if "NO_FEASIBLE" in normalized or normalized in {"NO_PLAN", "NO_SPACE"}:
+            return "NO_FEASIBLE"
+        return normalized
+
+    @staticmethod
+    def _build_retry_overrides(
+        *,
+        retry_reason: str,
+        attempt1_effective_budget_ms: int,
+        fallback_overrides: Overrides,
+    ) -> tuple[Overrides, str]:
+        attempt2_budget_ms = max(int(attempt1_effective_budget_ms), 4500)
+
+        if retry_reason == "HEIGHT_LIMIT":
+            return (
+                Overrides(
+                    score_mode="min_height_then_gain",
+                    height_slack_mm=0,
+                    micro_depth=8,
+                    micro_width=140,
+                    micro_topk=25,
+                    time_budget_ms=attempt2_budget_ms,
+                ),
+                "L2-H",
+            )
+
+        if retry_reason in {"STABILITY", "NO_FEASIBLE"}:
+            return (
+                Overrides(
+                    score_mode="min_height_slack_then_gain",
+                    height_slack_mm=80,
+                    micro_depth=8,
+                    micro_width=160,
+                    micro_topk=30,
+                    time_budget_ms=attempt2_budget_ms,
+                ),
+                "L2-S",
+            )
+
+        return (
+            replace(
+                fallback_overrides,
+                time_budget_ms=max(int(fallback_overrides.time_budget_ms or 0), attempt2_budget_ms),
+            ),
+            "L2-S",
+        )
+
+    def _record_controller_debug_attempt(
+        self,
+        *,
+        attempt_index: int,
+        mode: ControllerMode,
+        overrides: Overrides,
+        plan: PickPlan | None,
+        fail_reason: str | None,
+        note: str | None = None,
+    ) -> None:
+        if not self._controller_debug or len(self._controller_debug_events) >= self._controller_debug_max_events:
+            return
+
+        self._controller_debug_events.append(
+            {
+                "pick_index": int(self._controller_pick_index),
+                "attempt_index": int(attempt_index),
+                "mode": mode.value,
+                "overrides": overrides.to_dict(),
+                "result": "ok" if plan is not None else "fail",
+                "fail_reason": str(fail_reason) if fail_reason is not None else None,
+                "note": note,
+            }
+        )
+
+    @staticmethod
+    def _serialize_controller_event(event: ControllerEvent) -> dict[str, object]:
+        return {
+            "pick_index": int(event.pick_index),
+            "from_mode": event.from_mode.value,
+            "to_mode": event.to_mode.value,
+            "trigger": str(event.trigger),
+            "overrides": dict(event.overrides),
+            "note": event.note,
+        }
 
     def _collect_pallets(self, ramps: Mapping[int, Any]) -> dict[int | str, PalletModel]:
         pallets: dict[int | str, PalletModel] = {}
@@ -383,6 +1088,19 @@ class PolicyPackerScheduler:
             items = list(queue)[:k]
             ramp_boxes[int(ramp_id)] = [self._to_box(item) for item in items]
         return ramp_boxes
+
+    def _collect_ramp_states(self, ramps: Mapping[int, Any]) -> dict[int, SchedulerRampState]:
+        snapshots: dict[int, SchedulerRampState] = {}
+        for ramp_id, ramp in ramps.items():
+            queue = tuple(self._to_box(item) for item in list(getattr(ramp, "queue", [])))
+            upstream = tuple(self._to_box(item) for item in list(getattr(ramp, "upstream", [])))
+            capacity = int(getattr(ramp, "capacity", len(queue)) or len(queue))
+            snapshots[int(ramp_id)] = SchedulerRampState(
+                queue=queue,
+                upstream=upstream,
+                capacity=max(0, capacity),
+            )
+        return snapshots
 
     def _to_box(self, item: Any) -> Box:
         length_mm = getattr(item, "length_mm", None) or self.config.default_box_length_mm
@@ -444,7 +1162,16 @@ class PolicyPackerScheduler:
             spec=self.config.pallet_spec,
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,
+            stacking_mode=str(self.config.stacking_mode),
+            z_band_mm=(None if self.config.z_band_mm is None else max(0, int(self.config.z_band_mm))),
             control_config=control_config,
+            orientation_mode=str(self.config.orientation_mode),
+            stand_hw_height_margin_gate_mm=int(self.config.stand_hw_height_margin_gate_mm),
+            coverage_grid_x=max(0, int(self.config.coverage_grid_x)),
+            coverage_grid_y=max(0, int(self.config.coverage_grid_y)),
+            coverage_weight=max(0.0, float(self.config.coverage_weight)),
+            dominant_free_rect_weight=max(0.0, float(self.config.dominant_free_rect_weight)),
+            dominant_free_rect_ratio_gate=max(0.0, float(self.config.dominant_free_rect_ratio_gate)),
         )
 
     def _get_first_attr(self, obj: Any, names: tuple[str, ...]) -> Any:
@@ -452,6 +1179,13 @@ class PolicyPackerScheduler:
             if hasattr(obj, n):
                 return getattr(obj, n)
         return None
+
+    def export_committed_placements(self) -> dict[str, list[dict[str, object]]]:
+        """Return committed placements grouped by pallet_id (keys are strings for JSON)."""
+        out: dict[str, list[dict[str, object]]] = {}
+        for pid, seq in self._committed_placements.items():
+            out[str(pid)] = [dict(item) for item in seq]
+        return out
 
     def _extract_rect_xywh(self, obj: Any) -> tuple[float | None, float | None, float | None, float | None]:
         """Try to extract (x,y,w,h) in mm from a placement-like object."""

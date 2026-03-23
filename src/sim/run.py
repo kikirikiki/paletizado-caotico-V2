@@ -4,8 +4,11 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
+
+from palca.tuning.episodes import apply_shuffle
 
 from .des import Arrival, SimConfig, simulate
 from .io import load_arrivals
@@ -28,10 +31,60 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ramp_cap", type=int, default=15)
     parser.add_argument("--staging_cap", type=int, default=0)
     parser.add_argument("--time_scale", type=float, default=1.0, help="Escala de tiempo (1,2,3,4,...)")
+    parser.add_argument(
+        "--force-destination",
+        type=int,
+        default=None,
+        help="Si se define, fuerza ese destino (1..6) para todas las cajas",
+    )
+    parser.add_argument(
+        "--continuous-pallets",
+        action="store_true",
+        help="Modo continuo: cierra pallet por DEADLOCK y sigue con uno nuevo",
+    )
+    parser.add_argument(
+        "--max-pallets",
+        type=int,
+        default=0,
+        help="Si >0, detiene al cerrar N pallets del destino forzado (requiere --force-destination).",
+    )
+
+    parser.add_argument(
+        "--arrival-mode",
+        choices=["excel", "immediate"],
+        default="excel",
+        help="excel=usa timestamps del Excel; immediate=ignora timestamps y hace arrivals en t=0 para simular ventana física constante (ramp_cap)",
+    )
+    parser.add_argument("--episode-seed", type=int, default=0, help="Seed para episodio reproducible")
+    parser.add_argument(
+        "--shuffle-window",
+        type=int,
+        default=0,
+        help="Ventana de shuffle por bloques (<=1 deshabilita)",
+    )
+    parser.add_argument(
+        "--shuffle-strength",
+        type=float,
+        default=0.0,
+        help="Intensidad de shuffle (<=0 deshabilita)",
+    )
+    parser.add_argument("--episode-id", type=str, default=None, help="ID de episodio para metadata")
 
     # Policy
     parser.add_argument("--policy", choices=["legacy", "palca"], default="legacy")
     parser.add_argument("--k", type=int, default=1, help="Lookahead K (1,3,5,10,15) para palca")
+    parser.add_argument(
+        "--stacking-mode",
+        choices=["layers", "heightfield"],
+        default="layers",
+        help="Modo de apilado: layers (legacy) o heightfield (2.5D).",
+    )
+    parser.add_argument(
+        "--z-band-mm",
+        type=int,
+        default=None,
+        help="Banda de Z para heightfield: limita candidatos a z <= min_z + banda (None deshabilita).",
+    )
 
     # palca knobs (packer + scheduler)
     parser.add_argument("--overhang_mm", type=int, default=0, help="Overhang permitido (0/20/40...)")
@@ -71,7 +124,157 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
+    parser.add_argument("--coverage-grid-x", type=int, default=0, help="Grid X para coverage control (0 deshabilita)")
+    parser.add_argument("--coverage-grid-y", type=int, default=0, help="Grid Y para coverage control (0 deshabilita)")
+    parser.add_argument("--coverage-weight", type=float, default=0.0, help="Peso coverage control (0 deshabilita)")
+    parser.add_argument(
+        "--dominant-free-rect-weight",
+        type=float,
+        default=0.0,
+        help="Peso dominant free-rect targeting (0 deshabilita)",
+    )
+    parser.add_argument(
+        "--dominant-free-rect-ratio-gate",
+        type=float,
+        default=0.35,
+        help="Gate de ratio para dominant free-rect targeting",
+    )
+    parser.add_argument(
+        "--score-mode",
+        choices=["gain_frag", "min_height_then_gain", "min_height_slack_then_gain"],
+        default="gain_frag",
+        help=(
+            "gain_frag=score actual; min_height_then_gain=prioriza menor altura final, luego gain/frag; "
+            "min_height_slack_then_gain=prioriza altura con slack, luego gain/frag"
+        ),
+    )
+    parser.add_argument(
+        "--height-slack-mm",
+        type=int,
+        default=0,
+        help="Slack de altura para min_height_slack_then_gain (mm)",
+    )
+    parser.add_argument(
+        "--tower-z-band-mm",
+        type=int,
+        default=0,
+        help="Banda (mm) para penalización tower-z respecto al mínimo factible (0 = solo por encima del mínimo).",
+    )
+    parser.add_argument(
+        "--tower-z-penalty-weight",
+        type=float,
+        default=0.0,
+        help="Peso de penalización tower-z (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--spatial-xy-bin-mm",
+        type=int,
+        default=150,
+        help="Tamaño de bin XY (mm) para penalty espacial anti-torre.",
+    )
+    parser.add_argument(
+        "--spatial-tower-penalty-weight",
+        type=float,
+        default=0.0,
+        help="Peso de penalización espacial anti-torre temprana (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--spatial-tower-penalty-end-step",
+        type=int,
+        default=0,
+        help="Paso límite (exclusivo) para aplicar penalty espacial; 0 deshabilita.",
+    )
+    parser.add_argument(
+        "--spatial-tower-target-base",
+        type=int,
+        default=2,
+        help="Target base de cajas por bin XY al inicio del episode step por pallet.",
+    )
+    parser.add_argument(
+        "--spatial-tower-target-step-div",
+        type=int,
+        default=6,
+        help="Cada N pasos sube en +1 el target espacial por bin.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-end-step",
+        type=int,
+        default=0,
+        help="Fase dura de base: durante los primeros N placements solo permite z==0 (0 deshabilita).",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-min-base-candidates",
+        type=int,
+        default=1,
+        help="Minimo de candidatos en suelo para mantener fase dura; si cae por debajo, se desactiva.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-lookahead-items",
+        type=int,
+        default=8,
+        help="Limite de lookahead por rampa durante fase dura de base.",
+    )
+    parser.add_argument(
+        "--hard-floor-phase-stand-mix-bonus",
+        type=float,
+        default=0.0,
+        help="Bonus extra para candidatos stand_hw en suelo durante hard floor phase.",
+    )
+    parser.add_argument(
+        "--orientation-mode",
+        choices=["planar", "planar+stand_hw"],
+        default="planar",
+        help="Modo de orientaciones de caja: planar (2) o planar+stand_hw (4).",
+    )
+    parser.add_argument(
+        "--stand-hw-height-margin-gate-mm",
+        type=int,
+        default=400,
+        help="Permite stand_hw solo si (max_height-current_height) <= gate (mm).",
+    )
     parser.add_argument("--time-budget-ms", type=int, default=120, help="Presupuesto por decision (ms)")
+    parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
+    parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
+    parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
+    parser.add_argument(
+        "--micro-topk",
+        type=int,
+        default=15,
+        help="Max candidatos factibles a expandir por paso del micro-planner",
+    )
+    parser.add_argument(
+        "--batchfill-layer-starter",
+        action="store_true",
+        help="Activa BatchFill para elegir mejor starter al abrir capa nueva",
+    )
+    parser.add_argument(
+        "--batchfill-starters-max",
+        type=int,
+        default=6,
+        help="Max starters evaluados por pallet en BatchFill",
+    )
+    parser.add_argument(
+        "--batchfill-budget-ms",
+        type=int,
+        default=150,
+        help="Presupuesto de tiempo BatchFill por decision (ms)",
+    )
+    parser.add_argument(
+        "--batchfill-greedy-topk",
+        type=int,
+        default=12,
+        help="Top-K de candidatos usados por el fill greedy interno de BatchFill",
+    )
+    parser.add_argument(
+        "--online-controller",
+        action="store_true",
+        help="Habilita controller online de modos NORMAL/PUSH/RESCUE sobre palca",
+    )
+    parser.add_argument(
+        "--controller-debug",
+        action="store_true",
+        help="Guarda eventos de debug del online-controller (max 200)",
+    )
     parser.add_argument("--weight-col", type=str, default=None, help="Columna peso (opcional)")
     parser.add_argument(
         "--max-tries-per-item",
@@ -100,6 +303,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Output
     parser.add_argument("--out", type=str, default=None, help="Ruta de salida .json o .csv (opcional)")
+    parser.add_argument(
+        "--dump-placements",
+        type=str,
+        default=None,
+        help="Si se define, vuelca la secuencia real de placements commitados a este JSON (opcional).",
+    )
     parser.add_argument("--print", action="store_true", help="Imprime el JSON aunque uses --out")
 
     # Visualization
@@ -121,6 +330,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _is_episode_shuffle_enabled(*, shuffle_window: int, shuffle_strength: float) -> bool:
+    return int(shuffle_window) > 1 and float(shuffle_strength) > 0.0
 
 
 def _detect_destinations(arrivals: list[Arrival]) -> list[int]:
@@ -200,9 +413,16 @@ def run_simulation(
     policy: str = "legacy",
     lookahead_k: int = 1,
     time_scale: float = 1.0,
+    arrival_mode: str = "excel",
+    episode_seed: int = 0,
+    shuffle_window: int = 0,
+    shuffle_strength: float = 0.0,
+    episode_id: str | None = None,
     # palca
     overhang_mm: int = 0,
     heuristic: str = "baf",
+    stacking_mode: str = "layers",
+    z_band_mm: int | None = None,
     t_select_base: float = 0.0,
     t_select_step: float = 0.0,
     time_penalty_weight: float = 1.0,
@@ -221,12 +441,46 @@ def run_simulation(
     priority_mode: str = "none",
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
+    coverage_grid_x: int = 0,
+    coverage_grid_y: int = 0,
+    coverage_weight: float = 0.0,
+    dominant_free_rect_weight: float = 0.0,
+    dominant_free_rect_ratio_gate: float = 0.35,
+    score_mode: str = "gain_frag",
+    height_slack_mm: int = 0,
+    tower_z_band_mm: int = 0,
+    tower_z_penalty_weight: float = 0.0,
+    spatial_xy_bin_mm: int = 150,
+    spatial_tower_penalty_weight: float = 0.0,
+    spatial_tower_penalty_end_step: int = 0,
+    spatial_tower_target_base: int = 2,
+    spatial_tower_target_step_div: int = 6,
+    hard_floor_phase_end_step: int = 0,
+    hard_floor_phase_min_base_candidates: int = 1,
+    hard_floor_phase_lookahead_items: int = 8,
+    hard_floor_phase_stand_mix_bonus: float = 0.0,
+    orientation_mode: str = "planar",
+    stand_hw_height_margin_gate_mm: int = 400,
     time_budget_ms: int = 120,
+    micro_plan: bool = False,
+    micro_depth: int = 3,
+    micro_width: int = 8,
+    micro_topk: int = 15,
+    batchfill_layer_starter: bool = False,
+    batchfill_starters_max: int = 6,
+    batchfill_budget_ms: int = 150,
+    batchfill_greedy_topk: int = 12,
+    online_controller: bool = False,
+    controller_debug: bool = False,
     weight_col: str | None = None,
     max_tries_per_item: int = 0,
     max_candidates: int = 0,
     max_seconds_per_item: float = 0.0,
     watchdog_heartbeat_sec: float = 1.0,
+    force_destination: int | None = None,
+    continuous_pallets: bool = False,
+    max_pallets: int = 0,
+    dump_placements_path: str | None = None,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -245,10 +499,17 @@ def run_simulation(
         if len(parts) == 2 and parts[1].strip():
             priority_col = parts[1].strip()
 
-    arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
-
+    if force_destination is not None and not (1 <= int(force_destination) <= 6):
+        raise ValueError("force_destination debe estar entre 1 y 6")
+    max_pallets_value = int(max_pallets)
+    if max_pallets_value < 0:
+        raise ValueError("max_pallets debe ser >= 0")
+    if max_pallets_value > 0 and force_destination is None:
+        raise ValueError("max_pallets requiere force_destination (usa --force-destination)")
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
+
+    arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
     if time_scale != 1.0:
         arrivals = [
@@ -259,8 +520,48 @@ def run_simulation(
                 length_mm=a.length_mm,
                 width_mm=a.width_mm,
                 height_mm=a.height_mm,
+                weight_kg=a.weight_kg,
+                priority=a.priority,
             )
             for a in arrivals
+        ]
+
+    if force_destination is not None:
+        forced_dest = int(force_destination)
+        arrivals = [
+            Arrival(
+                time=a.time,
+                destination=forced_dest,
+                row_idx=a.row_idx,
+                length_mm=a.length_mm,
+                width_mm=a.width_mm,
+                height_mm=a.height_mm,
+                weight_kg=a.weight_kg,
+                priority=a.priority,
+            )
+            for a in arrivals
+        ]
+
+    if _is_episode_shuffle_enabled(shuffle_window=shuffle_window, shuffle_strength=shuffle_strength):
+        ordered = sorted(arrivals, key=lambda a: int(a.row_idx))
+        shuffled = apply_shuffle(
+            ordered,
+            seed=int(episode_seed),
+            window=int(shuffle_window),
+            strength=float(shuffle_strength),
+        )
+        arrivals = [
+            Arrival(
+                time=a.time,
+                destination=a.destination,
+                row_idx=idx,
+                length_mm=a.length_mm,
+                width_mm=a.width_mm,
+                height_mm=a.height_mm,
+                weight_kg=a.weight_kg,
+                priority=a.priority,
+            )
+            for idx, a in enumerate(shuffled, start=1)
         ]
 
     pallet_ids = _detect_destinations(arrivals) if viz else None
@@ -309,11 +610,23 @@ def run_simulation(
             lookahead_k=lookahead_k,
             overhang_mm=overhang_mm,
             heuristic=heuristic,
+            stacking_mode=stacking_mode,
+            z_band_mm=(None if z_band_mm is None else int(z_band_mm)),
             t_select_base=t_select_base,
             t_select_step=t_select_step,
             time_penalty_weight=time_penalty_weight,
             starvation_weight=starvation_weight,
             time_budget_ms=time_budget_ms,
+            micro_plan_enabled=bool(micro_plan),
+            micro_plan_depth=int(micro_depth),
+            micro_plan_width=int(micro_width),
+            micro_plan_topk_per_step=int(micro_topk),
+            batchfill_layer_starter=bool(batchfill_layer_starter),
+            batchfill_starters_max=int(batchfill_starters_max),
+            batchfill_budget_ms=int(batchfill_budget_ms),
+            batchfill_greedy_topk=int(batchfill_greedy_topk),
+            online_controller=bool(online_controller),
+            controller_debug=bool(controller_debug),
             priority_weight=priority_weight,
             stability_mode=stability_mode,
             min_support_ratio=min_support,
@@ -327,6 +640,26 @@ def run_simulation(
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            coverage_grid_x=int(coverage_grid_x),
+            coverage_grid_y=int(coverage_grid_y),
+            coverage_weight=float(coverage_weight),
+            dominant_free_rect_weight=float(dominant_free_rect_weight),
+            dominant_free_rect_ratio_gate=float(dominant_free_rect_ratio_gate),
+            score_mode=score_mode,
+            height_slack_mm=max(0, int(height_slack_mm)),
+            tower_z_band_mm=max(0, int(tower_z_band_mm)),
+            tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
+            spatial_xy_bin_mm=max(1, int(spatial_xy_bin_mm)),
+            spatial_tower_penalty_weight=max(0.0, float(spatial_tower_penalty_weight)),
+            spatial_tower_penalty_end_step=max(0, int(spatial_tower_penalty_end_step)),
+            spatial_tower_target_base=max(1, int(spatial_tower_target_base)),
+            spatial_tower_target_step_div=max(1, int(spatial_tower_target_step_div)),
+            hard_floor_phase_end_step=max(0, int(hard_floor_phase_end_step)),
+            hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
+            hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
+            hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            orientation_mode=str(orientation_mode),
+            stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
@@ -346,7 +679,15 @@ def run_simulation(
                     print("[VIZ] attached via decision_policy._viewer/_viewer_rect_cls (fallback)", flush=True)
 
     try:
-        result = simulate(arrivals, config, decision_policy=decision_policy)
+        result = simulate(
+            arrivals,
+            config,
+            decision_policy=decision_policy,
+            continuous_pallets=continuous_pallets,
+            arrival_mode=arrival_mode,
+            max_pallets=max_pallets_value,
+            max_pallets_destination=(int(force_destination) if max_pallets_value > 0 else None),
+        )
     finally:
         if viewer is not None:
             if viz_block:
@@ -358,6 +699,19 @@ def run_simulation(
                     pass
             else:
                 viewer.finalize(block=False)
+
+    metrics_payload = result.to_dict()
+    controller_metrics: dict[str, Any] = {"enabled": False}
+    if policy == "palca" and decision_policy is not None and hasattr(decision_policy, "collect_controller_metrics"):
+        try:
+            raw_controller_metrics = decision_policy.collect_controller_metrics()  # type: ignore[attr-defined]
+            if isinstance(raw_controller_metrics, dict):
+                controller_metrics = dict(raw_controller_metrics)
+        except Exception:
+            controller_metrics = {"enabled": False}
+    if "enabled" not in controller_metrics:
+        controller_metrics["enabled"] = bool(policy == "palca" and online_controller)
+    metrics_payload["controller"] = controller_metrics
 
     payload: dict[str, Any] = {
         "model": model,
@@ -372,8 +726,15 @@ def run_simulation(
             "policy": policy,
             "lookahead_k": lookahead_k,
             "time_scale": time_scale,
+            "arrival_mode": arrival_mode,
+            "episode_seed": int(episode_seed),
+            "shuffle_window": int(shuffle_window),
+            "shuffle_strength": float(shuffle_strength),
+            "episode_id": episode_id,
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
+            "stacking_mode": stacking_mode,
+            "z_band_mm": (None if z_band_mm is None else int(z_band_mm)),
             "t_select_base": t_select_base,
             "t_select_step": t_select_step,
             "time_penalty_weight": time_penalty_weight,
@@ -392,16 +753,54 @@ def run_simulation(
             "priority_mode": priority_mode,
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
+            "coverage_grid_x": int(coverage_grid_x),
+            "coverage_grid_y": int(coverage_grid_y),
+            "coverage_weight": float(coverage_weight),
+            "dominant_free_rect_weight": float(dominant_free_rect_weight),
+            "dominant_free_rect_ratio_gate": float(dominant_free_rect_ratio_gate),
+            "score_mode": score_mode,
+            "height_slack_mm": int(max(0, int(height_slack_mm))),
+            "tower_z_band_mm": int(max(0, int(tower_z_band_mm))),
+            "tower_z_penalty_weight": float(max(0.0, float(tower_z_penalty_weight))),
+            "spatial_xy_bin_mm": int(max(1, int(spatial_xy_bin_mm))),
+            "spatial_tower_penalty_weight": float(max(0.0, float(spatial_tower_penalty_weight))),
+            "spatial_tower_penalty_end_step": int(max(0, int(spatial_tower_penalty_end_step))),
+            "spatial_tower_target_base": int(max(1, int(spatial_tower_target_base))),
+            "spatial_tower_target_step_div": int(max(1, int(spatial_tower_target_step_div))),
+            "hard_floor_phase_end_step": int(max(0, int(hard_floor_phase_end_step))),
+            "hard_floor_phase_min_base_candidates": int(max(1, int(hard_floor_phase_min_base_candidates))),
+            "hard_floor_phase_lookahead_items": int(max(1, int(hard_floor_phase_lookahead_items))),
+            "hard_floor_phase_stand_mix_bonus": float(max(0.0, float(hard_floor_phase_stand_mix_bonus))),
+            "orientation_mode": str(orientation_mode),
+            "stand_hw_height_margin_gate_mm": int(max(0, int(stand_hw_height_margin_gate_mm))),
             "time_budget_ms": time_budget_ms,
+            "micro_plan": bool(micro_plan),
+            "micro_depth": int(micro_depth),
+            "micro_width": int(micro_width),
+            "micro_topk": int(micro_topk),
+            "batchfill_layer_starter": bool(batchfill_layer_starter),
+            "batchfill_starters_max": int(batchfill_starters_max),
+            "batchfill_budget_ms": int(batchfill_budget_ms),
+            "batchfill_greedy_topk": int(batchfill_greedy_topk),
+            "online_controller": bool(online_controller),
+            "controller_debug": bool(controller_debug),
             "weight_col": weight_col,
             "max_tries_per_item": max_tries_per_item,
             "max_candidates": max_candidates,
             "max_seconds_per_item": max_seconds_per_item,
             "watchdog_heartbeat_sec": watchdog_heartbeat_sec,
+            "force_destination": force_destination,
+            "continuous_pallets": continuous_pallets,
+            "max_pallets": int(max_pallets_value),
             "viz_dest": viz_dest,
         },
-        "metrics": result.to_dict(),
+        "metrics": metrics_payload,
     }
+
+    if dump_placements_path:
+        resolved_dump = resolve_repo_path(dump_placements_path)
+        dump_payload = _build_placements_dump(decision_policy=decision_policy, params=payload.get("params", {}))
+        _write_json(resolved_dump, dump_payload)
 
     if out_path:
         resolved = resolve_repo_path(out_path)
@@ -431,8 +830,15 @@ def main() -> None:
         policy=args.policy,
         lookahead_k=args.k,
         time_scale=args.time_scale,
+        arrival_mode=str(args.arrival_mode),
+        episode_seed=int(args.episode_seed),
+        shuffle_window=int(args.shuffle_window),
+        shuffle_strength=float(args.shuffle_strength),
+        episode_id=args.episode_id,
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,
+        stacking_mode=str(args.stacking_mode),
+        z_band_mm=(None if args.z_band_mm is None else int(args.z_band_mm)),
         t_select_base=args.t_select_base,
         t_select_step=args.t_select_step,
         time_penalty_weight=args.time_penalty_weight,
@@ -451,12 +857,48 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        coverage_grid_x=int(args.coverage_grid_x),
+        coverage_grid_y=int(args.coverage_grid_y),
+        coverage_weight=float(args.coverage_weight),
+        dominant_free_rect_weight=float(args.dominant_free_rect_weight),
+        dominant_free_rect_ratio_gate=float(args.dominant_free_rect_ratio_gate),
+        score_mode=str(args.score_mode),
+        height_slack_mm=int(args.height_slack_mm),
+        tower_z_band_mm=int(args.tower_z_band_mm),
+        tower_z_penalty_weight=float(args.tower_z_penalty_weight),
+        spatial_xy_bin_mm=int(args.spatial_xy_bin_mm),
+        spatial_tower_penalty_weight=float(args.spatial_tower_penalty_weight),
+        spatial_tower_penalty_end_step=int(args.spatial_tower_penalty_end_step),
+        spatial_tower_target_base=int(args.spatial_tower_target_base),
+        spatial_tower_target_step_div=int(args.spatial_tower_target_step_div),
+        hard_floor_phase_end_step=int(args.hard_floor_phase_end_step),
+        hard_floor_phase_min_base_candidates=int(args.hard_floor_phase_min_base_candidates),
+        hard_floor_phase_lookahead_items=int(args.hard_floor_phase_lookahead_items),
+        hard_floor_phase_stand_mix_bonus=float(args.hard_floor_phase_stand_mix_bonus),
+        orientation_mode=str(args.orientation_mode),
+        stand_hw_height_margin_gate_mm=int(args.stand_hw_height_margin_gate_mm),
         time_budget_ms=args.time_budget_ms,
+        micro_plan=bool(args.micro_plan),
+        micro_depth=int(args.micro_depth),
+        micro_width=int(args.micro_width),
+        micro_topk=int(args.micro_topk),
+        batchfill_layer_starter=bool(args.batchfill_layer_starter),
+        batchfill_starters_max=int(args.batchfill_starters_max),
+        batchfill_budget_ms=int(args.batchfill_budget_ms),
+        batchfill_greedy_topk=int(args.batchfill_greedy_topk),
+        online_controller=bool(args.online_controller),
+        controller_debug=bool(args.controller_debug),
         weight_col=args.weight_col,
         max_tries_per_item=int(args.max_tries_per_item),
         max_candidates=int(args.max_candidates),
         max_seconds_per_item=float(args.max_seconds_per_item),
         watchdog_heartbeat_sec=float(args.watchdog_heartbeat_sec),
+        force_destination=(
+            int(args.force_destination) if args.force_destination is not None else None
+        ),
+        continuous_pallets=bool(args.continuous_pallets),
+        max_pallets=int(args.max_pallets),
+        dump_placements_path=args.dump_placements,
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
@@ -466,8 +908,63 @@ def main() -> None:
         viz_dest=int(args.viz_dest),
     )
 
+    if args.print and args.continuous_pallets:
+        _print_continuous_summary(payload, args.force_destination)
+
     if (not args.out) or args.print:
         print(json.dumps(payload, indent=2, ensure_ascii=True))
+
+
+def _print_continuous_summary(payload: dict[str, Any], forced_destination: int | None) -> None:
+    metrics = payload.get("metrics", {})
+    pallet_kpis = metrics.get("pallet_kpis", {}) if isinstance(metrics, dict) else {}
+    seq_by_dest = pallet_kpis.get("continuous_pallet_sequence", {}) if isinstance(pallet_kpis, dict) else {}
+    total_by_dest = pallet_kpis.get("continuous_pallets_total", {}) if isinstance(pallet_kpis, dict) else {}
+    reason_by_dest = pallet_kpis.get("continuous_closures_by_reason", {}) if isinstance(pallet_kpis, dict) else {}
+
+    def _lookup(d: Any, dest: int, default: Any) -> Any:
+        if not isinstance(d, dict):
+            return default
+        if dest in d:
+            return d[dest]
+        key = str(dest)
+        if key in d:
+            return d[key]
+        return default
+
+    destination = int(forced_destination) if forced_destination is not None else 1
+    sequence = _lookup(seq_by_dest, destination, [])
+    pallets_total = _lookup(total_by_dest, destination, len(sequence))
+    closures = _lookup(reason_by_dest, destination, {})
+    boxes_total = int(sum(sequence)) if isinstance(sequence, list) else 0
+
+    print(f"continuous dest={destination} pallets={pallets_total} boxes_total={boxes_total}")
+    print(f"sequence: {sequence} (len={len(sequence)} sum={boxes_total})")
+    print(f"closures_by_reason: {closures}")
+
+def _git_head() -> str | None:
+    try:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        return head or None
+    except Exception:
+        return None
+
+
+def _build_placements_dump(*, decision_policy: Any | None, params: dict[str, Any]) -> dict[str, Any]:
+    pallets: dict[str, Any] = {}
+    if decision_policy is not None and hasattr(decision_policy, "export_committed_placements"):
+        try:
+            exported = decision_policy.export_committed_placements()  # type: ignore[attr-defined]
+            if isinstance(exported, dict):
+                pallets = dict(exported)
+        except Exception:
+            pallets = {}
+    return {
+        "schema_version": 1,
+        "git_head": _git_head(),
+        "params": dict(params),
+        "pallets": pallets,
+    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

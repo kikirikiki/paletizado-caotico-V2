@@ -18,6 +18,8 @@ class Placement:
     weight_kg: float | None = None
     loadbear: float | None = None
     priority: float | None = None
+    orientation_name: str | None = None
+    orientation_family: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ class PlacementPreview:
     placement: Placement | None
     packing_gain: float
     fragmentation: float
+    height_after_mm: int | None = None
     infeasible_reason: str | None = None
     score_adjustment: float = 0.0
     debug: dict[str, Any] | None = None

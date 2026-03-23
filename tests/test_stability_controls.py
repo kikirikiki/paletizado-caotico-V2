@@ -157,3 +157,53 @@ def test_settle_lowers_without_penetration() -> None:
     result_blocked = control.evaluate(pallet=pallet, box=box, placement=candidate_high)
     assert result_blocked.feasible
     assert result_blocked.placement.z_mm == 10
+
+
+def test_stand_hw_uses_stricter_support_threshold() -> None:
+    spec = PalletSpec(length_mm=30, width_mm=30, max_height_mm=80)
+    pallet = PalletModel(spec=spec)
+    control = StabilityPlacementControl(
+        StabilityConfig(mode="ratio", min_support_ratio=0.85, eps_mm=0.01)
+    )
+    box = Box(box_id=21, length_mm=20, width_mm=20, height_mm=5, timestamp=0.0)
+
+    stand_candidate = Placement(
+        x_mm=0,
+        y_mm=0,
+        z_mm=10,
+        rot90=False,
+        layer_id=1,
+        length_mm=20,
+        width_mm=20,
+        height_mm=5,
+        box_id=box.box_id,
+        weight_kg=1.0,
+        orientation_family="stand_hw",
+    )
+
+    pallet.placements = [_support_box(0, 0, length_mm=20, width_mm=18, height=10, box_id=1)]
+    result_low_support = control.evaluate(pallet=pallet, box=box, placement=stand_candidate)
+    assert not result_low_support.feasible
+    assert result_low_support.reason == "SUPPORT_RATIO"
+    assert pallet.stats.stand_hw_rejected_support_total == 1
+
+    pallet.placements = [_support_box(0, 0, length_mm=20, width_mm=19, height=10, box_id=2)]
+    result_good_support = control.evaluate(pallet=pallet, box=box, placement=stand_candidate)
+    assert result_good_support.feasible
+
+    planar_candidate = Placement(
+        x_mm=stand_candidate.x_mm,
+        y_mm=stand_candidate.y_mm,
+        z_mm=stand_candidate.z_mm,
+        rot90=stand_candidate.rot90,
+        layer_id=stand_candidate.layer_id,
+        length_mm=stand_candidate.length_mm,
+        width_mm=stand_candidate.width_mm,
+        height_mm=stand_candidate.height_mm,
+        box_id=stand_candidate.box_id,
+        weight_kg=stand_candidate.weight_kg,
+        orientation_family="planar",
+    )
+    pallet.placements = [_support_box(0, 0, length_mm=20, width_mm=18, height=10, box_id=3)]
+    result_planar = control.evaluate(pallet=pallet, box=box, placement=planar_candidate)
+    assert result_planar.feasible

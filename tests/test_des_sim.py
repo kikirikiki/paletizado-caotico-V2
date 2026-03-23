@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from palca.integration.policy_packer_sched import PolicyPackerScheduler
 from sim.des import Arrival, SimConfig, simulate
 
 
@@ -54,3 +55,39 @@ def test_determinism_same_run() -> None:
     result_a = simulate(arrivals, config).to_dict()
     result_b = simulate(arrivals, config).to_dict()
     assert result_a == result_b
+
+
+def test_stop_after_max_pallets_reached() -> None:
+    arrivals = make_arrivals([(0.0, 1), (0.0, 1), (0.0, 1), (0.0, 1), (0.0, 1)])
+    config = SimConfig(model="M1", ramp_capacity=5, n_per_pallet=2, t_pick_place=1.0, t_changeover=1.0)
+    result = simulate(
+        arrivals,
+        config,
+        max_pallets=2,
+        max_pallets_destination=1,
+    )
+    seq = result.pallet_kpis["continuous_pallet_sequence"][1]
+    assert result.stop_reason == "MAX_PALLETS_REACHED"
+    assert seq == [2, 2]
+    assert result.processed_boxes == 4
+
+
+def test_max_pallets_one_does_not_create_empty_next_pallet() -> None:
+    arrivals = make_arrivals([(0.0, 1), (0.0, 1), (0.0, 1), (0.0, 1)])
+    config = SimConfig(model="M1", ramp_capacity=4, n_per_pallet=2, t_pick_place=1.0, t_changeover=1.0)
+    policy = PolicyPackerScheduler.from_defaults(lookahead_k=1)
+
+    result = simulate(
+        arrivals,
+        config,
+        decision_policy=policy,
+        max_pallets=1,
+        max_pallets_destination=1,
+    )
+
+    seq = result.pallet_kpis["continuous_pallet_sequence"][1]
+    pallets_count = result.pallet_kpis["pallets_count"][1]
+    assert seq == [2]
+    assert pallets_count == 1
+    assert result.processed_boxes == 2
+    assert result.stop_reason == "MAX_PALLETS_REACHED"

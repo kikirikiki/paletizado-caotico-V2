@@ -1,3 +1,5 @@
+import pytest
+
 from palca.domain.box import Box
 from palca.domain.pallet_spec import PalletSpec
 from palca.packer.pallet_model import PalletModel
@@ -52,3 +54,13 @@ def test_pick_window_2_can_take_tail():
     assert plan is not None
     assert plan.buffer_index == 1
     assert plan.box_id == 2
+
+
+def test_pick_window_alias_sets_lookahead_k() -> None:
+    cfg = SchedulerConfig(pick_window=15)
+    assert cfg.lookahead_k == 15
+
+
+def test_pick_window_conflict_raises_value_error() -> None:
+    with pytest.raises(ValueError):
+        SchedulerConfig(lookahead_k=3, pick_window=2)

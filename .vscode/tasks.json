@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "palca: smoke_offline",
+      "type": "shell",
+      "command": "./scripts/dev_shell_cmd.sh ./scripts/smoke_offline.sh",
+      "group": "test",
+      "problemMatcher": [],
+      "options": { "cwd": "${workspaceFolder}" }
+    },
+    {
+      "label": "palca: pytest -q",
+      "type": "shell",
+      "command": "./scripts/dev_shell_cmd.sh python -m pytest -q",
+      "group": "test",
+      "problemMatcher": [],
+      "options": { "cwd": "${workspaceFolder}" }
+    }
+  ]
+}
