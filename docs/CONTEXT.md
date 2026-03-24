@@ -131,3 +131,95 @@ Para superar este techo, las únicas palancas reales son:
 1. Evaluar impacto de aumentar micro_depth (4→6) y micro_width (40→60)
 2. Analizar si pre-ordenación parcial del flujo mejora la densidad
 3. Validar el sistema con flujo real de producción (no solo el Excel de prueba)
+
+---
+
+## ANÁLISIS DEL FLUJO REAL — Flujo_rampas_Tipos_contenedores.xlsx
+
+### Hallazgos críticos que cambian el alcance del proyecto
+
+El análisis del Excel completo (Flujo_rampas_Tipos_contenedores.xlsx) revela
+que la arquitectura real del sistema es significativamente diferente a los
+supuestos con los que se ha trabajado hasta ahora.
+
+### 1. Hay DOS rampas, no una
+
+| Rampa | Nombre | Cajas | Destinos | Horario |
+|---|---|---|---|---|
+| Rampa 1 | Exp.1 (MS-CC-00029) | 105 | ES | 07:25 – 10:17 |
+| Rampa 2 | Exp.2 (MS-CC-00030) | 81 | FR, IT, NL, PT | 09:41 – 11:35 |
+
+El scheduler actual gestiona una sola rampa. Con dos rampas el sistema
+debe decidir en cada step qué caja coger y de qué rampa.
+
+### 2. Hay múltiples destinos — palets monodestino
+
+Las 186 cajas se distribuyen en 12 palets, cada uno con un único destino:
+
+| Palet | Destino | Cajas reales |
+|---|---|---|
+| PA0001000000231940 | ES | 10 |
+| PA0001000000231933 | ES | 23 |
+| PA0001000000231937 | ES | 13 |
+| PA0001000000231934 | ES | 21 |
+| PA0001000000231935 | ES | 21 |
+| PA0001000000231936 | ES | 17 |
+| PA0001000000232655 | FR | 9 |
+| PA0001000000232656 | IT | 12 |
+| PA0001000000232653 | IT | 19 |
+| PA0001000000232654 | IT | 5 |
+| PA0001000000232651 | IT | 17 |
+| PA0001000000232652 | IT | 19 |
+
+**Media real de producción: 15.5 cajas/palet** (incluyendo palets incompletos).
+
+El scheduler debe respetar el destino de cada caja — no puede mezclar
+cajas de destinos diferentes en el mismo palet.
+
+### 3. Tipos de contenedor reales
+
+| Tipo | N cajas | Ancho (mm) | Largo (mm) | Alto (mm) |
+|---|---|---|---|---|
+| W450.L650 | 143 (77%) | 405–465 | 430–645 | 325–415 |
+| W400.L650 | 18 (10%) | 350–400 | 410–635 | 330–435 |
+| W400.L400 | 13 (7%) | 330–335 | 380–390 | 260–295 |
+| W450.L685 | 5 (3%) | 440–450 | 655–660 | 360–400 |
+| PICKING MULTISHUTTLE | 4 (2%) | 445–480 | 605–700 | 360–460 |
+| W400.L685 | 3 (2%) | 355–365 | 655–660 | 370–395 |
+
+### 4. Comparativa baseline simulado vs producción real
+
+| Métrica | Simulado (micro=False) | Real (Excel) |
+|---|---|---|
+| Rampas | 1 | 2 |
+| Cajas totales | 186 | 186 |
+| Palets construidos | ~11 | 12 |
+| Media cajas/palet | 17.3 | 15.5 |
+| Max cajas/palet | 24 | 23 |
+| Destinos | 1 (forzado) | 4 (ES/IT/FR/NL/PT) |
+
+El sistema simulado supera la media real (17.3 vs 15.5) incluso con una
+sola rampa y sin restricción de destino, lo que indica que el algoritmo
+es competitivo con la asignación manual real.
+
+### 5. Preguntas abiertas que bloquean el diseño final
+
+Estas preguntas deben responderse antes de continuar el desarrollo:
+
+| # | Pregunta | Impacto |
+|---|---|---|
+| 1 | ¿El sistema final tendrá 1 rampa o 2? | Si son 2, el scheduler debe gestionar selección multi-rampa |
+| 2 | ¿Los palets son monodestino o pueden mezclar? | Si monodestino, el scheduler debe filtrar por destino en cada step |
+| 3 | ¿Hay un palet activo por destino simultáneamente? | Determina cuántos palets construye el robot en paralelo |
+| 4 | ¿El robot construye UN palet a la vez o varios en paralelo? | Cambia completamente la arquitectura del scheduler |
+
+### Estado del trabajo hasta este punto
+
+Todo el trabajo realizado (scheduler greedy heightfield, validación con
+10 seeds aleatorios, análisis de micro_planner, etc.) es válido para el
+escenario simplificado de 1 rampa / 1 destino / 1 palet. Sirve como
+baseline y punto de partida para el sistema multi-rampa multi-destino.
+
+El código experimental (ZoneScheduler, GuidedHeightfield, XmaxFirst) está
+disponible en el repo pero no se usa en producción. El sistema validado
+es el PolicyPackerScheduler con micro_plan=False.
