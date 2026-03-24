@@ -223,3 +223,49 @@ baseline y punto de partida para el sistema multi-rampa multi-destino.
 El código experimental (ZoneScheduler, GuidedHeightfield, XmaxFirst) está
 disponible en el repo pero no se usa en producción. El sistema validado
 es el PolicyPackerScheduler con micro_plan=False.
+
+---
+
+## BASELINE MULTI-RAMPA — RESULTADOS VALIDADOS
+
+### Configuración
+- arrival_mode: immediate (los timestamps del Excel son incompatibles con asignación aleatoria por caja)
+- Excel fuente: data/Flujo_rampas_Tipos_contenedores.xlsx (2 hojas: Rampa1 105 cajas, Rampa2 81 cajas)
+- Generación de inputs: scripts/gen_multi_ramp_input.py --seeds 42 123 777 999 1234
+- Benchmark: scripts/benchmark_multi_ramp.py --input-dir data/multi_ramp_inputs/ --workers 5
+- Parámetros de simulación: idénticos al baseline mono-rampa validado (ver sección anterior)
+  - micro_plan=False (único valor válido en producción)
+
+### Por qué arrival_mode=excel falla con asignación aleatoria por caja
+Con timestamps reales, Rampa2 empieza 2h15min después de Rampa1. Durante ese gap,
+solo están activos los destinos 1/2/3. Si queda 1 sola caja de Rampa1 que no cabe
+en ningún palet activo, el sistema hace DEADLOCK global porque no hay más cajas
+entrando. Con arrival_mode=immediate todas las cajas están disponibles desde t=0
+y el scheduler siempre tiene opciones.
+
+### Resultados (5 seeds, palets completos, excluyendo último incompleto por destino)
+
+| seed | palets | media | min | max | stop_reason |
+|------|--------|-------|-----|-----|-------------|
+| 42   | 9      | 15.6  | 12  | 20  | None        |
+| 123  | 8      | 16.9  | 15  | 21  | None        |
+| 777  | 10     | 15.7  | 12  | 24  | None        |
+| 999  | 9      | 15.0  | 12  | 20  | None        |
+| 1234 | 8      | 16.5  | 14  | 24  | None        |
+| **GLOBAL** | **8.8** | **15.9** | **12** | **24** | |
+
+### Comparativa con producción real
+- Producción real (manual, 2 palets): 15.5 cajas/palet
+- Sistema simulado (6 palets, multi-rampa): 15.9 cajas/palet (+2.6%)
+- El sistema con 6 palets supera la media real con 2 palets.
+
+### Componentes añadidos en este milestone
+- src/sim/io_multi.py — loader multi-rampa (no usado en producción, solo para --multi-ramp)
+- scripts/gen_multi_ramp_input.py — generador de inputs con seed reproducible
+- scripts/benchmark_multi_ramp.py — benchmark multi-rampa con ProcessPoolExecutor
+- src/sim/run.py — flags --multi-ramp y --multi-ramp-seed
+
+### Próximos pasos identificados
+1. Validar con más seeds (50+) para confirmar estabilidad de la media
+2. Evaluar impacto de ramp_cap (15→20) en escenario multi-rampa
+3. Definir métricas de tiempo de ciclo robot (makespan, utilización)
