@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Si se define, fuerza ese destino (1..6) para todas las cajas",
     )
+    parser.add_argument("--multi-ramp", action="store_true",
+        help="Carga el Excel multi-rampa (2 hojas). Incompatible con --force-destination.")
+    parser.add_argument("--multi-ramp-seed", type=int, default=42,
+        help="Seed para asignación aleatoria de destinos en modo multi-rampa.")
     parser.add_argument(
         "--continuous-pallets",
         action="store_true",
@@ -484,6 +488,8 @@ def run_simulation(
     continuous_pallets: bool = False,
     max_pallets: int = 0,
     dump_placements_path: str | None = None,
+    multi_ramp: bool = False,
+    multi_ramp_seed: int = 42,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -512,7 +518,13 @@ def run_simulation(
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
 
-    arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
+    if multi_ramp and force_destination is not None:
+        raise ValueError("--multi-ramp es incompatible con --force-destination")
+    if multi_ramp:
+        from .io_multi import load_arrivals_multi_ramp
+        arrivals = load_arrivals_multi_ramp(excel_path, seed=multi_ramp_seed, weight_col=weight_col)
+    else:
+        arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
     if time_scale != 1.0:
         arrivals = [
@@ -905,6 +917,8 @@ def main() -> None:
         continuous_pallets=bool(args.continuous_pallets),
         max_pallets=int(args.max_pallets),
         dump_placements_path=args.dump_placements,
+        multi_ramp=bool(args.multi_ramp),
+        multi_ramp_seed=int(args.multi_ramp_seed),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),
