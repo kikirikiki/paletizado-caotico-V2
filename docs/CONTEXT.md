@@ -269,3 +269,50 @@ y el scheduler siempre tiene opciones.
 1. Validar con más seeds (50+) para confirmar estabilidad de la media
 2. Evaluar impacto de ramp_cap (15→20) en escenario multi-rampa
 3. Definir métricas de tiempo de ciclo robot (makespan, utilización)
+
+---
+
+## BENCHMARK REGLAS DE DESVÍO DIVERGENTE — RESULTADOS VALIDADOS
+
+### Objetivo
+Evaluar qué regla de desvío en el divergente físico (1 cinta → 2 rampas) maximiza
+la densidad de paletizado (media cajas/palet).
+
+### Configuración del experimento
+- 100 seeds (1-100), arrival_mode=immediate
+- 5 reglas evaluadas: random, size_natural, size_median, round_robin, load_balance
+- Scripts: gen_multi_ramp_input.py + benchmark_divert_rules.py
+- Parámetros de simulación: idénticos al baseline multi-rampa
+
+### Resultados (100 seeds)
+
+| Regla | Media | Std | Min | Max | vs real |
+|---|---|---|---|---|---|
+| size_median | 16.7 | 0.97 | 5 | 28 | +7.7% |
+| round_robin | 16.6 | 0.99 | 3 | 23 | +7.1% |
+| load_balance | 16.6 | 0.99 | 3 | 23 | +7.1% |
+| random | 16.1 | 0.82 | 3 | 25 | +3.9% |
+| size_natural | 15.2 | 0.55 | 5 | 21 | -1.9% |
+| **baseline_real** | **15.5** | | | | |
+
+### Conclusiones
+
+1. La diferencia entre size_median y load_balance (0.1 cajas/palet) NO es
+   estadísticamente significativa con std~1.0 y n=100.
+
+2. La palanca real es el EQUILIBRIO de carga entre rampas (~93/93 cajas),
+   no el criterio de selección. Cualquier regla equilibrada supera al random en +0.5.
+
+3. size_natural perjudica porque manda 152 cajas a Ramp1 vs 34 a Ramp2 —
+   peor que la producción manual actual.
+
+### Recomendación para producción
+
+**load_balance** — misma densidad que size_median (+7.1% vs real) sin necesitar
+las dimensiones de la caja en el divergente. Solo requiere contar cajas asignadas
+a cada rampa. Más simple y robusto para implementar en PLC.
+
+### Próximos pasos identificados
+1. Validar load_balance con datos de producción real (más de 186 cajas)
+2. Analizar métricas de tiempo de ciclo robot (makespan, utilización) con load_balance
+3. Estimar impacto económico: +7.1% densidad → reducción de palets/turno
