@@ -26,3 +26,6 @@ __pycache__/
 out/
 __pycache__/
 .claude/
+
+# Artefactos generados
+data/multi_ramp_inputs/
