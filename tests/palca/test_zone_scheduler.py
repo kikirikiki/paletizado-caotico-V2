@@ -143,7 +143,7 @@ def test_step_places_boxes_with_height_sync():
     scheduler = _scheduler()
 
     # Use the dominant box from the real flow
-    boxes = [_box(i, 605, 445, 355) for i in range(20)]
+    boxes = [_box(i, 580, 340, 355) for i in range(20)]  # 605x445 no cabe en B/C (discarded by design)
     buffer = list(boxes[:15])
     remaining = list(boxes[15:])
 
