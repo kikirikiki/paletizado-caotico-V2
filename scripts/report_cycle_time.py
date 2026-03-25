@@ -15,6 +15,7 @@ import math
 import statistics
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,12 @@ SIM_PARAMS = [
     "--continuous-pallets",
     "--arrival-mode", "immediate",
 ]
+
+
+def _run_one(args: tuple[str, str]) -> dict[str, Any]:
+    excel, out = args
+    _run_sim(excel, out)
+    return _load(out)
 
 
 def _run_sim(excel: str, out: str) -> None:
@@ -205,6 +212,8 @@ def main() -> None:
                         help="Regla de desvío (prefijo de fichero)")
     parser.add_argument("--seeds", type=str, default="1-100",
                         help="Seeds: '1-100', '42', '42,123,999'")
+    parser.add_argument("--workers", type=int, default=16,
+                        help="Número de procesos paralelos (default=16)")
     args = parser.parse_args()
 
     if args.json:
@@ -217,21 +226,26 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     rule = args.rule
 
-    results = []
+    tasks = []
     for seed in seeds:
-        fname = f"flujo_mr_{rule}_seed{seed:04d}.xlsx" if rule != "random" else f"flujo_mr_seed{seed:04d}.xlsx"
+        fname = f"flujo_mr_{rule}_seed{seed:04d}.xlsx" if rule != "random" \
+            else f"flujo_mr_seed{seed:04d}.xlsx"
         excel = str(input_dir / fname)
         if not Path(excel).exists():
-            print(f"  [skip] {fname} no existe", file=sys.stderr)
+            print(f"  [skip] {fname}", file=sys.stderr)
             continue
         out = f"/tmp/ct_{rule}_{seed:04d}.json"
-        try:
-            _run_sim(excel, out)
-            data = _load(out)
-            result = _extract(data)
-            results.append(result)
-        except Exception as e:
-            print(f"  [error] seed={seed}: {e}", file=sys.stderr)
+        tasks.append((excel, out))
+
+    results = []
+    with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(_run_one, t): t for t in tasks}
+        for future in as_completed(futures):
+            try:
+                data = future.result()
+                results.append(_extract(data))
+            except Exception as e:
+                print(f"  [error] {futures[future]}: {e}", file=sys.stderr)
 
     _print_report(results, rule=rule)
 
