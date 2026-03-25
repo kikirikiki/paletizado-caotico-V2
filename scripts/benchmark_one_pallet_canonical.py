@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import inspect
 import json
 import subprocess
 import sys
@@ -14,6 +15,31 @@ from pathlib import Path
 from typing import Any
 
 from sim.run import run_simulation
+from sim.run import run_simulation as _run_simulation_ref
+
+# Parámetros de run_simulation derivados de su firma real
+RUN_SIMULATION_PARAM_KEYS: frozenset[str] = frozenset(
+    k for k in inspect.signature(_run_simulation_ref).parameters.keys()
+)
+
+# Parámetros que se pasan explícitamente fuera del perfil (no van en params)
+RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
+    "excel_path",
+    "out_path",
+    "out_json",
+    "episode_seed",
+    "dump_placements_path",
+    "viz",
+    "viz_mode",
+    "viz_every",
+    "viz_labels",
+    "viz_block",
+    "viz_debug",
+    "viz_dest",
+    "multi_ramp",
+    "multi_ramp_seed",
+    "accessibility_delta_mm",
+})
 
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("configs/benchmarks/one_pallet_canonical.json")
@@ -115,9 +141,22 @@ class SeedSummary:
     first_stand_hw_step: int | None
     stand_hw_used_total: int | None
     hard_floor_phase_stand_hw_chosen_total: int | None
-    output_json: str
-    placements_json: str
-    effective_config_hash: str
+    lower_layer_reentry_count: int | None = None
+    lower_layer_reentry_total_drop_mm: float | None = None
+    lower_layer_reentry_max_drop_mm: float | None = None
+    lower_layer_reentry_mean_drop_mm: float | None = None
+    monotonic_stack_rate: float | None = None
+    placements_below_current_top_band_after_opening_next_band: int | None = None
+    layer_closure_score: float | None = None
+    layer_fill_homogeneity_score: float | None = None
+    z_band_fill_homogeneity_score: float | None = None
+    layer_band_mm: int | None = None
+    layer_band_fill_progress_json: str | None = None
+    active_layers_over_time_json: str | None = None
+    step_trace_relevant_json: str | None = None
+    output_json: str = ""
+    placements_json: str = ""
+    effective_config_hash: str = ""
 
 
 def _safe_int(value: Any) -> int | None:
@@ -125,6 +164,15 @@ def _safe_int(value: Any) -> int | None:
         if value is None:
             return None
         return int(value)
+    except Exception:
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
     except Exception:
         return None
 
@@ -214,7 +262,7 @@ def load_profile(path: str | Path) -> dict[str, Any]:
 
     unknown_params = sorted(set(params.keys()) - REQUIRED_PARAM_KEYS)
     if unknown_params:
-        raise ValueError(f"Perfil invalido: parametros desconocidos: {unknown_params}")
+        raise ValueError(f"Perfil invalido: parametros desconocidos/no usados: {unknown_params}")
 
     return {
         "schema_version": schema_version,
@@ -257,6 +305,27 @@ def load_variant_overrides(path: str | Path | None) -> tuple[str | None, dict[st
         overrides[normalized] = value
 
     return excel_override, overrides
+
+
+def build_run_simulation_kwargs(
+    *,
+    params: dict[str, Any],
+    excel_path: str | Path,
+    out_path: Path,
+    seed: int,
+    dump_placements_path: Path,
+) -> dict[str, Any]:
+    """Construye los kwargs para run_simulation validando que no hay params huérfanos."""
+    unknown = sorted(set(params.keys()) - RUN_SIMULATION_PARAM_KEYS)
+    if unknown:
+        raise ValueError(f"run_simulation no acepta estos parametros: {unknown}")
+
+    kwargs: dict[str, Any] = dict(params)
+    kwargs["excel_path"] = str(excel_path)
+    kwargs["out_path"] = str(out_path)
+    kwargs["episode_seed"] = int(seed)
+    kwargs["dump_placements_path"] = str(dump_placements_path)
+    return kwargs
 
 
 def apply_param_overrides(base_params: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -369,14 +438,54 @@ def run_seed(
         forced_destination=forced_destination,
     )
 
+    layer_mono = _safe_get(
+        payload,
+        ["metrics", "pallet_kpis", "layer_monotonicity_first_pallet_by_dest", "1"],
+        default={},
+    )
+    if not isinstance(layer_mono, dict):
+        layer_mono = {}
+
+    max_z_list = layer_mono.get("max_z_seen_so_far_by_step", [])
+    first_stack = None
+    if isinstance(max_z_list, list):
+        for idx, val in enumerate(max_z_list):
+            if val is not None and int(val) > 0:
+                first_stack = idx
+                break
+    if first_stack is None:
+        raw_fss = layer_mono.get("first_stack_step")
+        first_stack = _safe_int(raw_fss)
+
+    # Use layer_mono-derived first_stack_step if available, otherwise fall back to placements
+    effective_first_stack_step = first_stack if first_stack is not None else first_stack_step
+
     return SeedSummary(
         run_label=run_label,
         seed=int(seed),
         processed_boxes=processed_boxes,
-        first_stack_step=first_stack_step,
+        first_stack_step=effective_first_stack_step,
         first_stand_hw_step=first_stand_hw_step,
         stand_hw_used_total=stand_hw_used_total,
         hard_floor_phase_stand_hw_chosen_total=hard_floor_stand_total,
+        lower_layer_reentry_count=_safe_int(layer_mono.get("lower_layer_reentry_count")),
+        lower_layer_reentry_total_drop_mm=_safe_float(layer_mono.get("lower_layer_reentry_total_drop_mm")),
+        lower_layer_reentry_max_drop_mm=_safe_float(layer_mono.get("lower_layer_reentry_max_drop_mm")),
+        lower_layer_reentry_mean_drop_mm=_safe_float(layer_mono.get("lower_layer_reentry_mean_drop_mm")),
+        monotonic_stack_rate=_safe_float(layer_mono.get("monotonic_stack_rate")),
+        placements_below_current_top_band_after_opening_next_band=_safe_int(
+            layer_mono.get("placements_below_current_top_band_after_opening_next_band")
+        ),
+        layer_closure_score=_safe_float(layer_mono.get("layer_closure_score")),
+        layer_fill_homogeneity_score=_safe_float(layer_mono.get("layer_fill_homogeneity_score")),
+        z_band_fill_homogeneity_score=_safe_float(layer_mono.get("z_band_fill_homogeneity_score")),
+        layer_band_mm=_safe_int(layer_mono.get("layer_band_mm")),
+        layer_band_fill_progress_json=json.dumps(layer_mono.get("layer_band_fill_progress"))
+            if layer_mono.get("layer_band_fill_progress") is not None else None,
+        active_layers_over_time_json=json.dumps(layer_mono.get("active_layers_over_time"))
+            if layer_mono.get("active_layers_over_time") is not None else None,
+        step_trace_relevant_json=json.dumps(layer_mono.get("step_trace_relevant"))
+            if layer_mono.get("step_trace_relevant") is not None else None,
         output_json=str(out_json_path),
         placements_json=str(placements_path),
         effective_config_hash=effective_config_hash,
@@ -564,19 +673,40 @@ def run_benchmark(
         "profile_name": profile["profile_name"],
         "profile_description": profile.get("description", ""),
         "fingerprint": fingerprint,
+        "param_contract": {
+            "run_simulation_param_keys": sorted(RUN_SIMULATION_PARAM_KEYS),
+            "excluded_profile_keys": sorted(RUN_SIM_EXCLUDED_PROFILE_KEYS),
+            "missing_required_in_profile": sorted(
+                REQUIRED_PARAM_KEYS - set(baseline_params.keys())
+            ),
+            "unknown_in_profile": sorted(
+                set(baseline_params.keys()) - REQUIRED_PARAM_KEYS
+            ),
+        },
         "runs": {
             "baseline": {
                 "excel": baseline_excel,
                 "effective_config_hash": baseline_hash,
+                "effective_params": deepcopy(baseline_params),
                 "overrides": {},
             },
             str(variant_name): {
                 "excel": variant_excel,
                 "effective_config_hash": variant_hash,
+                "effective_params": deepcopy(variant_params),
                 "overrides": merged_variant_overrides,
             }
             if variant_requested
             else None,
+        },
+        "discriminative": {
+            run_label: {
+                "is_flat_processed_boxes": len(set(
+                    r.processed_boxes for r in rows_sorted if r.run_label == run_label
+                    and r.processed_boxes is not None
+                )) <= 1,
+            }
+            for run_label in {r.run_label for r in rows_sorted}
         },
         "aggregates": aggregates,
         "rows": [asdict(r) for r in rows_sorted],
