@@ -69,3 +69,26 @@ def test_slack_zero_matches_min_height_then_gain_pool() -> None:
     assert selected_min_height.name == "min_height_high_gain"
     assert selected_slack_zero.name == selected_min_height.name
     assert stats_slack_zero.slack_set_n == 2
+    assert stats_slack_zero.slack_set_used is True
+
+
+def test_slack_huge_keeps_all_candidates_and_does_not_mark_filtered() -> None:
+    candidates = [
+        DummyCandidate(name="min_height", height_after_mm=1000, gain_frag_sort_key=(1.00,)),
+        DummyCandidate(name="medium_height", height_after_mm=1200, gain_frag_sort_key=(1.50,)),
+        DummyCandidate(name="higher_height_best_gain", height_after_mm=1500, gain_frag_sort_key=(2.00,)),
+    ]
+
+    selected, stats = choose_with_height_slack(
+        candidates=candidates,
+        score_mode=ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN,
+        height_slack_mm=10_000,
+        height_after_mm_fn=_height_after,
+        gain_frag_key_fn=_gain_key,
+    )
+
+    assert selected is not None
+    assert selected.name == "higher_height_best_gain"
+    assert stats.feasible_n == 3
+    assert stats.slack_set_n == 3
+    assert stats.slack_set_used is False
