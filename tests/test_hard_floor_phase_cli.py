@@ -18,12 +18,15 @@ def test_build_parser_accepts_hard_floor_phase_flags() -> None:
             "11",
             "--hard-floor-phase-stand-mix-bonus",
             "0.35",
+            "--hard-floor-phase-height-balance-weight",
+            "0.6",
         ]
     )
     assert int(args.hard_floor_phase_end_step) == 8
     assert int(args.hard_floor_phase_min_base_candidates) == 2
     assert int(args.hard_floor_phase_lookahead_items) == 11
     assert float(args.hard_floor_phase_stand_mix_bonus) == 0.35
+    assert float(args.hard_floor_phase_height_balance_weight) == 0.6
 
 
 def test_policy_from_defaults_propagates_hard_floor_phase_config() -> None:
@@ -32,9 +35,11 @@ def test_policy_from_defaults_propagates_hard_floor_phase_config() -> None:
         hard_floor_phase_min_base_candidates=3,
         hard_floor_phase_lookahead_items=10,
         hard_floor_phase_stand_mix_bonus=0.4,
+        hard_floor_phase_height_balance_weight=0.55,
     )
     cfg = policy.config.scheduler
     assert int(cfg.hard_floor_phase_end_step) == 9
     assert int(cfg.hard_floor_phase_min_base_candidates) == 3
     assert int(cfg.hard_floor_phase_lookahead_items) == 10
     assert float(cfg.hard_floor_phase_stand_mix_bonus) == 0.4
+    assert float(cfg.hard_floor_phase_height_balance_weight) == 0.55
