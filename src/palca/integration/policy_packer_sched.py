@@ -774,6 +774,12 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+        equivalent_footprint_tiebreak_opportunities_total = int(
+            getattr(self._scheduler, "equivalent_footprint_tiebreak_opportunities_total", 0) or 0
+        )
+        equivalent_footprint_tiebreak_applied_total = int(
+            getattr(self._scheduler, "equivalent_footprint_tiebreak_applied_total", 0) or 0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -810,6 +816,10 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_stand_mix_bonus_applied_total"] = int(hard_floor_phase_stand_mix_bonus_applied_total)
         kpis["hard_floor_phase_stand_mix_candidates_total"] = int(hard_floor_phase_stand_mix_candidates_total)
         kpis["hard_floor_phase_stand_mix_chosen_total"] = int(hard_floor_phase_stand_mix_chosen_total)
+        kpis["equivalent_footprint_tiebreak_opportunities_total"] = int(
+            equivalent_footprint_tiebreak_opportunities_total
+        )
+        kpis["equivalent_footprint_tiebreak_applied_total"] = int(equivalent_footprint_tiebreak_applied_total)
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )

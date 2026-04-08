@@ -71,13 +71,20 @@ class FakePallet:
         return max(int(p.z_mm) + int(p.height_mm) for p in self.placements)
 
 
-def _box(box_id: int) -> Box:
+def _box(
+    box_id: int,
+    *,
+    length_mm: int = 1,
+    width_mm: int = 1,
+    height_mm: int = 1,
+    timestamp: float = 0.0,
+) -> Box:
     return Box(
         box_id=int(box_id),
-        length_mm=1,
-        width_mm=1,
-        height_mm=1,
-        timestamp=0.0,
+        length_mm=int(length_mm),
+        width_mm=int(width_mm),
+        height_mm=int(height_mm),
+        timestamp=float(timestamp),
         destination=1,
     )
 
@@ -380,3 +387,120 @@ def test_hard_floor_phase_kpis_are_exposed() -> None:
     assert int(kpis["hard_floor_phase_stand_mix_candidates_total"]) == 6
     assert int(kpis["hard_floor_phase_stand_mix_chosen_total"]) == 1
     assert float(kpis["hard_floor_phase_score_mean"]) == 2.5
+
+
+def test_equivalent_footprint_scarcity_tiebreak_prefers_abundant_signature() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=0, y_mm=0, length_mm=41, width_mm=30, height_mm=20, packing_gain=1.0),
+            2: PreviewSpec(z_mm=0, x_mm=42, y_mm=0, length_mm=40, width_mm=30, height_mm=20, packing_gain=1.0),
+            3: PreviewSpec(z_mm=0, x_mm=84, y_mm=0, length_mm=40, width_mm=30, height_mm=20, packing_gain=1.0),
+        }
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            hard_floor_phase_end_step=0,
+            score_mode="gain_frag",
+        )
+    )
+    plan = scheduler.choose_action(
+        _sim_state(
+            boxes=[
+                _box(1, timestamp=0.0),
+                _box(2, timestamp=10.0),
+                _box(3, timestamp=20.0),
+            ],
+            pallet=pallet,
+        )
+    )
+
+    assert plan is not None
+    assert int(plan.box_id) in (2, 3)
+    assert int(scheduler.equivalent_footprint_tiebreak_applied_total) == 1
+
+
+def test_equivalent_footprint_scarcity_tiebreak_skips_non_marginal_scores() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=0, y_mm=0, length_mm=41, width_mm=30, height_mm=20, packing_gain=1.0),
+            2: PreviewSpec(z_mm=0, x_mm=42, y_mm=0, length_mm=40, width_mm=30, height_mm=20, packing_gain=0.7),
+            3: PreviewSpec(z_mm=0, x_mm=84, y_mm=0, length_mm=40, width_mm=30, height_mm=20, packing_gain=0.7),
+        }
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            hard_floor_phase_end_step=0,
+            score_mode="gain_frag",
+        )
+    )
+    plan = scheduler.choose_action(
+        _sim_state(
+            boxes=[
+                _box(1, timestamp=0.0),
+                _box(2, timestamp=10.0),
+                _box(3, timestamp=20.0),
+            ],
+            pallet=pallet,
+        )
+    )
+
+    assert plan is not None
+    assert int(plan.box_id) == 1
+    assert int(scheduler.equivalent_footprint_tiebreak_applied_total) == 0
+
+
+def test_equivalent_footprint_scarcity_tiebreak_skips_non_equivalent_candidates() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=0, y_mm=0, length_mm=41, width_mm=30, height_mm=20, packing_gain=1.0),
+            2: PreviewSpec(z_mm=0, x_mm=42, y_mm=0, length_mm=52, width_mm=30, height_mm=20, packing_gain=1.0),
+            3: PreviewSpec(z_mm=0, x_mm=94, y_mm=0, length_mm=52, width_mm=30, height_mm=20, packing_gain=1.0),
+        }
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=3,
+            hard_floor_phase_end_step=0,
+            score_mode="gain_frag",
+        )
+    )
+    plan = scheduler.choose_action(
+        _sim_state(
+            boxes=[
+                _box(1, timestamp=0.0),
+                _box(2, timestamp=10.0),
+                _box(3, timestamp=20.0),
+            ],
+            pallet=pallet,
+        )
+    )
+
+    assert plan is not None
+    assert int(plan.box_id) == 1
+    assert int(scheduler.equivalent_footprint_tiebreak_applied_total) == 0
+
+
+def test_equivalent_footprint_scarcity_tiebreak_keeps_legacy_when_no_tie_window() -> None:
+    pallet = FakePallet(
+        {
+            1: PreviewSpec(z_mm=0, x_mm=0, y_mm=0, length_mm=40, width_mm=30, height_mm=20, packing_gain=1.0),
+        }
+    )
+    scheduler = SchedulerV1(
+        SchedulerConfig(
+            lookahead_k=1,
+            hard_floor_phase_end_step=0,
+            micro_plan_enabled=True,
+            micro_plan_depth=2,
+            micro_plan_width=4,
+            micro_plan_topk_per_step=4,
+            score_mode="gain_frag",
+        )
+    )
+    plan = scheduler.choose_action(_sim_state(boxes=[_box(1)], pallet=pallet))
+
+    assert plan is not None
+    assert int(plan.box_id) == 1
+    assert int(scheduler.equivalent_footprint_tiebreak_opportunities_total) == 0
