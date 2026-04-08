@@ -335,12 +335,14 @@ class PolicyPackerScheduler:
         override_attempts: list[Overrides] = []
         controller_events: list[ControllerEvent] = []
         if self._online_controller_enabled and self._controller is not None:
+            height_margin_mm = self._compute_controller_height_margin_mm(ramps=ramps, destinations=destinations)
             controller_ctx = DecisionContext(
                 last_ok=bool(self._controller_last_ok),
                 last_fail_reason=self._controller_last_fail_reason,
                 consec_ok=int(self._controller_consec_ok),
                 consec_fail=int(self._controller_consec_fail),
                 pick_index=int(self._controller_pick_index),
+                height_margin_mm=height_margin_mm,
             )
             controller_overrides, controller_event = self._controller.step(controller_ctx)
             overrides = controller_overrides
@@ -829,6 +831,13 @@ class PolicyPackerScheduler:
 
     def collect_controller_metrics(self) -> dict[str, object]:
         mode_counts = {mode.value: int(self._controller_mode_counts.get(mode.value, 0)) for mode in ControllerMode}
+        anti_height_threshold = int(OnlineController.DEFAULT_ANTI_HEIGHT_THRESHOLD_MM)
+        anti_height_picks_total = 0
+        anti_height_entries_total = 0
+        if self._controller is not None:
+            anti_height_threshold = int(self._controller.anti_height_threshold_mm)
+            anti_height_picks_total = int(self._controller.anti_height_picks_total)
+            anti_height_entries_total = int(self._controller.anti_height_entries_total)
         metrics: dict[str, object] = {
             "enabled": bool(self._online_controller_enabled),
             "mode_counts": mode_counts,
@@ -840,6 +849,9 @@ class PolicyPackerScheduler:
             "retry_by_reason": dict(self._controller_retry_by_reason),
             "retry_skipped_by_reason": dict(self._controller_retry_skipped_by_reason),
             "consecutive_failures_max": int(self._controller_consecutive_failures_max),
+            "anti_height_threshold_mm": anti_height_threshold,
+            "anti_height_picks_total": anti_height_picks_total,
+            "anti_height_entries_total": anti_height_entries_total,
         }
         if self._controller_debug:
             metrics["debug_events"] = list(self._controller_debug_events)
@@ -1101,6 +1113,44 @@ class PolicyPackerScheduler:
                 capacity=max(0, capacity),
             )
         return snapshots
+
+    def _compute_controller_height_margin_mm(
+        self,
+        *,
+        ramps: Mapping[int, Any],
+        destinations: Mapping[int, Any],
+    ) -> int | None:
+        candidate_destinations: set[int | str] = set()
+        for ramp in ramps.values():
+            queue = list(getattr(ramp, "queue", []))
+            if not queue:
+                continue
+            head = queue[0]
+            destination = getattr(head, "destination", None)
+            if destination is None:
+                continue
+            dest_key: int | str = int(destination) if str(destination).isdigit() else destination
+            dest_state = destinations.get(dest_key)
+            if dest_state is not None and getattr(dest_state, "state", "ACTIVE") != "ACTIVE":
+                continue
+            candidate_destinations.add(dest_key)
+            if len(candidate_destinations) > 1:
+                return None
+
+        if len(candidate_destinations) != 1:
+            return None
+
+        candidate_destination = next(iter(candidate_destinations))
+        pallet = self._pallets.get(candidate_destination)
+        if pallet is None:
+            return None
+
+        try:
+            max_height_mm = int(getattr(getattr(pallet, "spec", None), "max_height_mm"))
+            current_height_mm = int(pallet.current_height_mm())
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return int(max_height_mm - current_height_mm)
 
     def _to_box(self, item: Any) -> Box:
         length_mm = getattr(item, "length_mm", None) or self.config.default_box_length_mm

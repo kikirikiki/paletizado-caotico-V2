@@ -128,3 +128,47 @@ def test_transitions_only_on_mode_change() -> None:
     assert first_event is not None
     assert first_event.from_mode == ControllerMode.NORMAL
     assert first_event.to_mode == ControllerMode.PUSH
+
+
+def test_anti_height_blocks_push() -> None:
+    controller = _baseline_controller()
+
+    overrides, event = controller.step(
+        DecisionContext(
+            last_ok=True,
+            last_fail_reason=None,
+            consec_ok=6,
+            consec_fail=0,
+            pick_index=0,
+            height_margin_mm=90,
+        )
+    )
+
+    assert controller.mode == ControllerMode.NORMAL
+    assert event is None
+    assert overrides.to_dict() == {
+        "score_mode": "min_height_then_gain",
+        "height_slack_mm": 0,
+    }
+    assert controller.anti_height_picks_total == 1
+    assert controller.anti_height_entries_total == 1
+
+
+def test_anti_height_only_when_margin_small() -> None:
+    controller = _baseline_controller()
+
+    overrides, _event = controller.step(
+        DecisionContext(
+            last_ok=True,
+            last_fail_reason=None,
+            consec_ok=6,
+            consec_fail=0,
+            pick_index=0,
+            height_margin_mm=150,
+        )
+    )
+
+    assert controller.mode == ControllerMode.PUSH
+    assert overrides.to_dict() == {"time_budget_ms": 3500}
+    assert controller.anti_height_picks_total == 0
+    assert controller.anti_height_entries_total == 0
