@@ -23,3 +23,9 @@ __pycache__/
 
 # Virtualenv
 .venv/
+out/
+__pycache__/
+.claude/
+data/multi_ramp_inputs/
+results/
+data/Flujo_rampas_Tipos_contenedores.xlsx

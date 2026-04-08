@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping
 
 from ..domain.box import Box
 from ..domain.pallet_spec import PalletSpec
-from ..packer.controls import BalanceConfig, ControlConfig, LoadBearConfig, StabilityConfig
+from ..packer.controls import AccessibilityConfig, BalanceConfig, ControlConfig, LoadBearConfig, StabilityConfig
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring import ScoringWeights
 from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerRampState, SchedulerSimState, SchedulerV1
@@ -42,6 +42,7 @@ class PolicyConfig:
     loadbear_penalty_weight: float = 1.0
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
+    accessibility_delta_mm: int = 0
     coverage_grid_x: int = 0
     coverage_grid_y: int = 0
     coverage_weight: float = 0.0
@@ -166,6 +167,7 @@ class PolicyPackerScheduler:
         loadbear_penalty_weight: float = 1.0,
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
+        accessibility_delta_mm: int = 0,
         coverage_grid_x: int = 0,
         coverage_grid_y: int = 0,
         coverage_weight: float = 0.0,
@@ -257,6 +259,7 @@ class PolicyPackerScheduler:
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            accessibility_delta_mm=max(0, int(accessibility_delta_mm)),
             coverage_grid_x=max(0, int(coverage_grid_x)),
             coverage_grid_y=max(0, int(coverage_grid_y)),
             coverage_weight=max(0.0, float(coverage_weight)),
@@ -1157,6 +1160,7 @@ class PolicyPackerScheduler:
                 loadbear_factor=self.config.loadbear_factor,
             ),
             balance=BalanceConfig(balance_weight=self.config.balance_weight),
+            accessibility=AccessibilityConfig(accessibility_delta_mm=self.config.accessibility_delta_mm),
         )
         return PalletModel(
             spec=self.config.pallet_spec,

@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Si se define, fuerza ese destino (1..6) para todas las cajas",
     )
+    parser.add_argument("--multi-ramp", action="store_true",
+        help="Carga el Excel multi-rampa (2 hojas). Incompatible con --force-destination.")
+    parser.add_argument("--multi-ramp-seed", type=int, default=42,
+        help="Seed para asignación aleatoria de destinos en modo multi-rampa.")
     parser.add_argument(
         "--continuous-pallets",
         action="store_true",
@@ -124,6 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-mode", type=str, default="none", help="none | weight | excel[:colname]")
     parser.add_argument("--priority-weight", type=float, default=1.0, help="Peso del bonus por prioridad")
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
+    parser.add_argument("--accessibility-delta-mm", type=int, default=0,
+                        help="Delta mm para RobotAccessibilityControl (0=desactivado)")
     parser.add_argument("--coverage-grid-x", type=int, default=0, help="Grid X para coverage control (0 deshabilita)")
     parser.add_argument("--coverage-grid-y", type=int, default=0, help="Grid Y para coverage control (0 deshabilita)")
     parser.add_argument("--coverage-weight", type=float, default=0.0, help="Peso coverage control (0 deshabilita)")
@@ -441,6 +447,7 @@ def run_simulation(
     priority_mode: str = "none",
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
+    accessibility_delta_mm: int = 0,
     coverage_grid_x: int = 0,
     coverage_grid_y: int = 0,
     coverage_weight: float = 0.0,
@@ -481,6 +488,8 @@ def run_simulation(
     continuous_pallets: bool = False,
     max_pallets: int = 0,
     dump_placements_path: str | None = None,
+    multi_ramp: bool = False,
+    multi_ramp_seed: int = 42,
     # viz
     viz: bool = False,
     viz_mode: str = "2d",
@@ -509,7 +518,13 @@ def run_simulation(
     if time_scale <= 0:
         raise ValueError("time_scale debe ser positivo")
 
-    arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
+    if multi_ramp and force_destination is not None:
+        raise ValueError("--multi-ramp es incompatible con --force-destination")
+    if multi_ramp:
+        from .io_multi import load_arrivals_multi_ramp
+        arrivals = load_arrivals_multi_ramp(excel_path, seed=multi_ramp_seed, weight_col=weight_col)
+    else:
+        arrivals = load_arrivals(excel_path, weight_col=weight_col, priority_col=priority_col)
 
     if time_scale != 1.0:
         arrivals = [
@@ -640,6 +655,7 @@ def run_simulation(
             loadbear_penalty_weight=loadbear_penalty_weight,
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
+            accessibility_delta_mm=max(0, int(accessibility_delta_mm)),
             coverage_grid_x=int(coverage_grid_x),
             coverage_grid_y=int(coverage_grid_y),
             coverage_weight=float(coverage_weight),
@@ -753,6 +769,7 @@ def run_simulation(
             "priority_mode": priority_mode,
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
+            "accessibility_delta_mm": int(max(0, int(accessibility_delta_mm))),
             "coverage_grid_x": int(coverage_grid_x),
             "coverage_grid_y": int(coverage_grid_y),
             "coverage_weight": float(coverage_weight),
@@ -857,6 +874,7 @@ def main() -> None:
         priority_mode=str(args.priority_mode),
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
+        accessibility_delta_mm=args.accessibility_delta_mm,
         coverage_grid_x=int(args.coverage_grid_x),
         coverage_grid_y=int(args.coverage_grid_y),
         coverage_weight=float(args.coverage_weight),
@@ -899,6 +917,8 @@ def main() -> None:
         continuous_pallets=bool(args.continuous_pallets),
         max_pallets=int(args.max_pallets),
         dump_placements_path=args.dump_placements,
+        multi_ramp=bool(args.multi_ramp),
+        multi_ramp_seed=int(args.multi_ramp_seed),
         viz=bool(args.viz),
         viz_mode=str(args.viz_mode),
         viz_every=int(args.viz_every),

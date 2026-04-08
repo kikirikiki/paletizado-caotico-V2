@@ -280,6 +280,12 @@ class PalletModel:
         self.coverage_weight = max(0.0, float(coverage_weight))
         self.dominant_free_rect_weight = max(0.0, float(dominant_free_rect_weight))
         self.dominant_free_rect_ratio_gate = max(0.0, float(dominant_free_rect_ratio_gate))
+        self.accessibility_delta_mm: int = (
+            int(control_config.accessibility.accessibility_delta_mm)
+            if control_config is not None
+            and getattr(control_config, "accessibility", None) is not None
+            else 0
+        )
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
@@ -523,6 +529,40 @@ class PalletModel:
             debug=debug,
         )
 
+    def preview_place_in_region(
+        self,
+        box: Box,
+        *,
+        x_min: int | None = None,
+        x_max: int | None = None,
+        y_min: int | None = None,
+        y_max: int | None = None,
+        max_tries_per_item: int | None = None,
+        max_candidates: int | None = None,
+        max_seconds_per_item: float | None = None,
+    ) -> PlacementPreview:
+        """preview_place restricted to a spatial region. heightfield mode only.
+        Falls back to full preview_place if not in heightfield mode."""
+        if self.stacking_mode != STACKING_MODE_HEIGHTFIELD:
+            return self.preview_place(box)
+        # Temporarily patch _heightfield_xy_candidates via a closure
+        original = self._heightfield_xy_candidates
+        def _patched(l_mm, w_mm, *, cap=120):
+            return original(l_mm, w_mm, cap=cap,
+                          x_min=x_min, x_max=x_max,
+                          y_min=y_min, y_max=y_max)
+        self._heightfield_xy_candidates = _patched
+        try:
+            result = self.preview_place(
+                box,
+                max_tries_per_item=max_tries_per_item,
+                max_candidates=max_candidates,
+                max_seconds_per_item=max_seconds_per_item,
+            )
+        finally:
+            self._heightfield_xy_candidates = original
+        return result
+
     def commit_place(self, preview: PlacementPreview) -> Placement:
         if not preview.feasible or preview.placement is None:
             raise ValueError("Cannot commit infeasible placement")
@@ -681,6 +721,25 @@ class PalletModel:
                 return -float(self.scoring_weights.tower_penalty_ratio) * float(packing_gain)
         return 0.0
 
+    def _accessibility_height_penalty(
+        self,
+        placement: Placement,
+        packing_gain: float,
+        accessibility_delta_mm: int,
+    ) -> float:
+        if accessibility_delta_mm <= 0 or packing_gain <= 0:
+            return 0.0
+        if not self.placements:
+            return 0.0
+        min_top = min(int(p.z_mm) + int(p.height_mm) for p in self.placements)
+        excess = int(placement.z_mm) - min_top - accessibility_delta_mm
+        if excess <= 0:
+            return 0.0
+        # Penalización lineal: a partir del delta, penaliza proporcionalmente
+        # A 2x delta la penalización es máxima (1.0 * packing_gain)
+        ratio = min(1.0, float(excess) / float(accessibility_delta_mm))
+        return -ratio * float(packing_gain)
+
     def _preview_in_layer(
         self,
         layer: LayerState,
@@ -819,6 +878,17 @@ class PalletModel:
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
 
+                    if self.accessibility_delta_mm > 0:
+                        acc_penalty = self._accessibility_height_penalty(
+                            adjusted,
+                            weighted_gain,
+                            self.accessibility_delta_mm,
+                        )
+                        if acc_penalty:
+                            score_delta += acc_penalty
+                            objective += acc_penalty
+                            debug["accessibility_height_penalty"] = float(acc_penalty)
+
                     if coverage_enabled and zone_fill:
                         zone_id = self._coverage_zone_id(
                             int(adjusted.x_mm),
@@ -935,6 +1005,10 @@ class PalletModel:
         w_mm: int,
         *,
         cap: int = 120,
+        x_min: int | None = None,
+        x_max: int | None = None,
+        y_min: int | None = None,
+        y_max: int | None = None,
     ) -> list[tuple[int, int]]:
         bin_l = int(self.spec.bin_length_mm)
         bin_w = int(self.spec.bin_width_mm)
@@ -993,6 +1067,18 @@ class PalletModel:
                     _add_point(x, y)
 
         ordered = sorted(points, key=lambda pt: (pt[0], pt[1]))
+        if any(v is not None for v in (x_min, x_max, y_min, y_max)):
+            _offset = int(self.spec.offset_mm)
+            def _in_region(pt: tuple[int, int]) -> bool:
+                x, y = pt
+                cx = x + _offset + l_mm / 2.0  # absolute centre-x
+                cy = y + _offset + w_mm / 2.0  # absolute centre-y
+                if x_min is not None and cx < x_min: return False
+                if x_max is not None and cx >= x_max: return False
+                if y_min is not None and cy < y_min: return False
+                if y_max is not None and cy >= y_max: return False
+                return True
+            ordered = [pt for pt in ordered if _in_region(pt)]
         limit = max(1, int(cap))
         if len(ordered) > limit:
             return ordered[:limit]
@@ -1185,6 +1271,17 @@ class PalletModel:
                         score_delta += tower_penalty
                         objective += tower_penalty
                         debug["tower_penalty"] = float(tower_penalty)
+
+                    if self.accessibility_delta_mm > 0:
+                        acc_penalty = self._accessibility_height_penalty(
+                            adjusted,
+                            weighted_gain,
+                            self.accessibility_delta_mm,
+                        )
+                        if acc_penalty:
+                            score_delta += acc_penalty
+                            objective += acc_penalty
+                            debug["accessibility_height_penalty"] = float(acc_penalty)
 
                     is_floor = int(adjusted.z_mm) <= 0
                     if is_floor and coverage_enabled and zone_fill:
