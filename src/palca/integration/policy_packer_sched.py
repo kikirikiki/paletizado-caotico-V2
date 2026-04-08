@@ -774,6 +774,18 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+        band_opening_guard_considered_total = int(
+            getattr(self._scheduler, "band_opening_guard_considered_total", 0) or 0
+        )
+        band_opening_guard_delayed_total = int(
+            getattr(self._scheduler, "band_opening_guard_delayed_total", 0) or 0
+        )
+        band_opening_guard_structural_override_total = int(
+            getattr(self._scheduler, "band_opening_guard_structural_override_total", 0) or 0
+        )
+        band_opening_guard_penalty_sum = float(
+            getattr(self._scheduler, "band_opening_guard_penalty_sum", 0.0) or 0.0
+        )
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -812,6 +824,13 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_stand_mix_chosen_total"] = int(hard_floor_phase_stand_mix_chosen_total)
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
+        )
+        kpis["band_opening_guard_considered_total"] = int(band_opening_guard_considered_total)
+        kpis["band_opening_guard_delayed_total"] = int(band_opening_guard_delayed_total)
+        kpis["band_opening_guard_structural_override_total"] = int(band_opening_guard_structural_override_total)
+        kpis["band_opening_guard_penalty_sum"] = float(band_opening_guard_penalty_sum)
+        kpis["band_opening_guard_penalty_mean"] = float(
+            band_opening_guard_penalty_sum / max(1, band_opening_guard_delayed_total)
         )
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
