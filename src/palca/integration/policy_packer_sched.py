@@ -60,6 +60,13 @@ class PolicyConfig:
     hard_floor_phase_min_base_candidates: int = 1
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
+    hard_floor_phase_early_stand_policy: str = "off"
+    hard_floor_phase_early_stand_max_count: int = 1
+    hard_floor_phase_early_stand_candidate_cap: int = 3
+    hard_floor_phase_early_stand_max_placed_loss: int = 0
+    hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio: float = 0.08
+    hard_floor_phase_early_stand_max_height_std_increase_mm: float = 40.0
+    hard_floor_phase_early_stand_min_access_mouth_mm: int = 180
     orientation_mode: str = "planar"
     stand_hw_height_margin_gate_mm: int = 400
     priority_mode: str = "none"
@@ -184,6 +191,13 @@ class PolicyPackerScheduler:
         hard_floor_phase_min_base_candidates: int = 1,
         hard_floor_phase_lookahead_items: int = 8,
         hard_floor_phase_stand_mix_bonus: float = 0.0,
+        hard_floor_phase_early_stand_policy: str = "off",
+        hard_floor_phase_early_stand_max_count: int = 1,
+        hard_floor_phase_early_stand_candidate_cap: int = 3,
+        hard_floor_phase_early_stand_max_placed_loss: int = 0,
+        hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio: float = 0.08,
+        hard_floor_phase_early_stand_max_height_std_increase_mm: float = 40.0,
+        hard_floor_phase_early_stand_min_access_mouth_mm: int = 180,
         orientation_mode: str = "planar",
         stand_hw_height_margin_gate_mm: int = 400,
         priority_mode: str = "none",
@@ -228,6 +242,13 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=hard_floor_phase_min_base_candidates,
             hard_floor_phase_lookahead_items=hard_floor_phase_lookahead_items,
             hard_floor_phase_stand_mix_bonus=hard_floor_phase_stand_mix_bonus,
+            hard_floor_phase_early_stand_policy=hard_floor_phase_early_stand_policy,
+            hard_floor_phase_early_stand_max_count=hard_floor_phase_early_stand_max_count,
+            hard_floor_phase_early_stand_candidate_cap=hard_floor_phase_early_stand_candidate_cap,
+            hard_floor_phase_early_stand_max_placed_loss=hard_floor_phase_early_stand_max_placed_loss,
+            hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio=hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio,
+            hard_floor_phase_early_stand_max_height_std_increase_mm=hard_floor_phase_early_stand_max_height_std_increase_mm,
+            hard_floor_phase_early_stand_min_access_mouth_mm=hard_floor_phase_early_stand_min_access_mouth_mm,
             max_tries_per_item=max_tries_per_item,
             max_candidates=max_candidates,
             max_seconds_per_item=max_seconds_per_item,
@@ -275,6 +296,19 @@ class PolicyPackerScheduler:
             hard_floor_phase_min_base_candidates=max(1, int(hard_floor_phase_min_base_candidates)),
             hard_floor_phase_lookahead_items=max(1, int(hard_floor_phase_lookahead_items)),
             hard_floor_phase_stand_mix_bonus=max(0.0, float(hard_floor_phase_stand_mix_bonus)),
+            hard_floor_phase_early_stand_policy=str(hard_floor_phase_early_stand_policy or "off"),
+            hard_floor_phase_early_stand_max_count=max(0, int(hard_floor_phase_early_stand_max_count)),
+            hard_floor_phase_early_stand_candidate_cap=max(1, int(hard_floor_phase_early_stand_candidate_cap)),
+            hard_floor_phase_early_stand_max_placed_loss=max(0, int(hard_floor_phase_early_stand_max_placed_loss)),
+            hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio=max(
+                0.0, float(hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio)
+            ),
+            hard_floor_phase_early_stand_max_height_std_increase_mm=max(
+                0.0, float(hard_floor_phase_early_stand_max_height_std_increase_mm)
+            ),
+            hard_floor_phase_early_stand_min_access_mouth_mm=max(
+                0, int(hard_floor_phase_early_stand_min_access_mouth_mm)
+            ),
             orientation_mode=str(orientation_mode),
             stand_hw_height_margin_gate_mm=max(0, int(stand_hw_height_margin_gate_mm)),
             priority_mode=priority_mode,
@@ -750,6 +784,32 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_bonus = float(
             getattr(self._scheduler.config, "hard_floor_phase_stand_mix_bonus", 0.0) or 0.0
         )
+        hard_floor_phase_early_stand_policy = str(
+            getattr(self._scheduler.config, "hard_floor_phase_early_stand_policy", "off") or "off"
+        )
+        hard_floor_phase_early_stand_max_count = int(
+            getattr(self._scheduler.config, "hard_floor_phase_early_stand_max_count", 1) or 1
+        )
+        hard_floor_phase_early_stand_candidate_cap = int(
+            getattr(self._scheduler.config, "hard_floor_phase_early_stand_candidate_cap", 3) or 3
+        )
+        hard_floor_phase_early_stand_max_placed_loss = int(
+            getattr(self._scheduler.config, "hard_floor_phase_early_stand_max_placed_loss", 0) or 0
+        )
+        hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio = float(
+            getattr(
+                self._scheduler.config,
+                "hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio",
+                0.08,
+            )
+            or 0.08
+        )
+        hard_floor_phase_early_stand_max_height_std_increase_mm = float(
+            getattr(self._scheduler.config, "hard_floor_phase_early_stand_max_height_std_increase_mm", 40.0) or 40.0
+        )
+        hard_floor_phase_early_stand_min_access_mouth_mm = int(
+            getattr(self._scheduler.config, "hard_floor_phase_early_stand_min_access_mouth_mm", 180) or 180
+        )
         hard_floor_phase_active_total = int(getattr(self._scheduler, "hard_floor_phase_active_total", 0) or 0)
         hard_floor_phase_floor_candidates_seen_total = int(
             getattr(self._scheduler, "hard_floor_phase_floor_candidates_seen_total", 0) or 0
@@ -774,6 +834,47 @@ class PolicyPackerScheduler:
         hard_floor_phase_stand_mix_chosen_total = int(
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
+        early_stand_candidates_total = int(getattr(self._scheduler, "early_stand_candidates_total", 0) or 0)
+        early_stand_eval_total = int(getattr(self._scheduler, "early_stand_eval_total", 0) or 0)
+        early_stand_admitted_total = int(getattr(self._scheduler, "early_stand_admitted_total", 0) or 0)
+        early_stand_selected_total = int(getattr(self._scheduler, "early_stand_selected_total", 0) or 0)
+        early_stand_admitted_but_not_selected_total = int(
+            getattr(
+                self._scheduler,
+                "early_stand_admitted_but_not_selected_total",
+                max(0, int(early_stand_admitted_total) - int(early_stand_selected_total)),
+            )
+            or 0
+        )
+        early_stand_reject_geom_total = int(getattr(self._scheduler, "early_stand_reject_geom_total", 0) or 0)
+        early_stand_reject_regret_total = int(getattr(self._scheduler, "early_stand_reject_regret_total", 0) or 0)
+        early_stand_reject_access_total = int(getattr(self._scheduler, "early_stand_reject_access_total", 0) or 0)
+        early_stand_selected_step_first = int(getattr(self._scheduler, "early_stand_selected_step_first", -1))
+        early_stand_projected_placed_loss_sum = float(
+            getattr(self._scheduler, "early_stand_projected_placed_loss_sum", 0.0) or 0.0
+        )
+        early_stand_projected_lfr_loss_ratio_sum = float(
+            getattr(self._scheduler, "early_stand_projected_lfr_loss_ratio_sum", 0.0) or 0.0
+        )
+        early_stand_projected_height_std_increase_sum = float(
+            getattr(self._scheduler, "early_stand_projected_height_std_increase_sum", 0.0) or 0.0
+        )
+        early_stand_reject_debug_limit = int(getattr(self._scheduler, "early_stand_reject_debug_limit", 20) or 20)
+        early_stand_reject_debug_total = int(getattr(self._scheduler, "early_stand_reject_debug_total", 0) or 0)
+        early_stand_reject_debug_samples_raw = getattr(self._scheduler, "early_stand_reject_debug_samples", []) or []
+        early_stand_reject_debug_samples = [
+            dict(item)
+            for item in list(early_stand_reject_debug_samples_raw)
+            if isinstance(item, Mapping)
+        ]
+        early_stand_ranking_debug_limit = int(getattr(self._scheduler, "early_stand_ranking_debug_limit", 20) or 20)
+        early_stand_ranking_debug_total = int(getattr(self._scheduler, "early_stand_ranking_debug_total", 0) or 0)
+        early_stand_ranking_debug_samples_raw = getattr(self._scheduler, "early_stand_ranking_debug_samples", []) or []
+        early_stand_ranking_debug_samples = [
+            dict(item)
+            for item in list(early_stand_ranking_debug_samples_raw)
+            if isinstance(item, Mapping)
+        ]
 
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
@@ -801,6 +902,19 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_min_base_candidates"] = int(hard_floor_phase_min_base_candidates)
         kpis["hard_floor_phase_lookahead_items"] = int(hard_floor_phase_lookahead_items)
         kpis["hard_floor_phase_stand_mix_bonus"] = float(hard_floor_phase_stand_mix_bonus)
+        kpis["hard_floor_phase_early_stand_policy"] = str(hard_floor_phase_early_stand_policy)
+        kpis["hard_floor_phase_early_stand_max_count"] = int(hard_floor_phase_early_stand_max_count)
+        kpis["hard_floor_phase_early_stand_candidate_cap"] = int(hard_floor_phase_early_stand_candidate_cap)
+        kpis["hard_floor_phase_early_stand_max_placed_loss"] = int(hard_floor_phase_early_stand_max_placed_loss)
+        kpis["hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio"] = float(
+            hard_floor_phase_early_stand_max_largest_free_rect_loss_ratio
+        )
+        kpis["hard_floor_phase_early_stand_max_height_std_increase_mm"] = float(
+            hard_floor_phase_early_stand_max_height_std_increase_mm
+        )
+        kpis["hard_floor_phase_early_stand_min_access_mouth_mm"] = int(
+            hard_floor_phase_early_stand_min_access_mouth_mm
+        )
         kpis["hard_floor_phase_active_total"] = int(hard_floor_phase_active_total)
         kpis["hard_floor_phase_floor_candidates_seen_total"] = int(hard_floor_phase_floor_candidates_seen_total)
         kpis["hard_floor_phase_chosen_total"] = int(hard_floor_phase_chosen_total)
@@ -813,6 +927,30 @@ class PolicyPackerScheduler:
         kpis["hard_floor_phase_score_mean"] = float(
             hard_floor_phase_score_sum / max(1, hard_floor_phase_chosen_total)
         )
+        kpis["early_stand_candidates_total"] = int(early_stand_candidates_total)
+        kpis["early_stand_eval_total"] = int(early_stand_eval_total)
+        kpis["early_stand_admitted_total"] = int(early_stand_admitted_total)
+        kpis["early_stand_selected_total"] = int(early_stand_selected_total)
+        kpis["early_stand_admitted_but_not_selected_total"] = int(early_stand_admitted_but_not_selected_total)
+        kpis["early_stand_reject_geom_total"] = int(early_stand_reject_geom_total)
+        kpis["early_stand_reject_regret_total"] = int(early_stand_reject_regret_total)
+        kpis["early_stand_reject_access_total"] = int(early_stand_reject_access_total)
+        kpis["early_stand_selected_step_first"] = int(early_stand_selected_step_first)
+        kpis["early_stand_projected_placed_loss_sum"] = float(early_stand_projected_placed_loss_sum)
+        kpis["early_stand_projected_lfr_loss_ratio_sum"] = float(early_stand_projected_lfr_loss_ratio_sum)
+        kpis["early_stand_projected_height_std_increase_sum"] = float(early_stand_projected_height_std_increase_sum)
+        kpis["early_stand_reject_debug_limit"] = int(early_stand_reject_debug_limit)
+        kpis["early_stand_reject_debug_total"] = int(early_stand_reject_debug_total)
+        kpis["early_stand_reject_debug_truncated"] = bool(
+            early_stand_reject_debug_total > len(early_stand_reject_debug_samples)
+        )
+        kpis["early_stand_reject_debug_samples"] = list(early_stand_reject_debug_samples)
+        kpis["early_stand_ranking_debug_limit"] = int(early_stand_ranking_debug_limit)
+        kpis["early_stand_ranking_debug_total"] = int(early_stand_ranking_debug_total)
+        kpis["early_stand_ranking_debug_truncated"] = bool(
+            early_stand_ranking_debug_total > len(early_stand_ranking_debug_samples)
+        )
+        kpis["early_stand_ranking_debug_samples"] = list(early_stand_ranking_debug_samples)
         kpis["orientation_mode"] = str(self.config.orientation_mode or "planar")
         kpis["selected_height_after_mm_count"] = int(height_count)
         kpis["selected_height_after_mm_min"] = height_min
