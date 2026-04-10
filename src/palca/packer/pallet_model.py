@@ -45,6 +45,9 @@ class PalletStats:
     stand_hw_gate_blocks_total: int = 0
     stand_hw_gate_allows_total: int = 0
     stand_hw_rejected_support_total: int = 0
+    stand_hl_gate_blocks_total: int = 0
+    stand_hl_gate_allows_total: int = 0
+    stand_hl_rejected_support_total: int = 0
 
     def record_settle(self, settle_mm: float) -> None:
         self.settle_adjustments_count += 1
@@ -81,7 +84,12 @@ class _PreviewBudget:
 
 ORIENTATION_MODE_PLANAR = "planar"
 ORIENTATION_MODE_PLANAR_STAND_HW = "planar+stand_hw"
-ALLOWED_ORIENTATION_MODES = (ORIENTATION_MODE_PLANAR, ORIENTATION_MODE_PLANAR_STAND_HW)
+ORIENTATION_MODE_ALL = "planar+stand_hw+stand_hl"
+ALLOWED_ORIENTATION_MODES = (
+    ORIENTATION_MODE_PLANAR,
+    ORIENTATION_MODE_PLANAR_STAND_HW,
+    ORIENTATION_MODE_ALL,
+)
 DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM = 400
 STACKING_MODE_LAYERS = "layers"
 STACKING_MODE_HEIGHTFIELD = "heightfield"
@@ -142,6 +150,7 @@ def _orientation_variants_for_mode(
     mode: str,
     allow_rotate: bool,
     allow_stand_hw: bool | None = None,
+    allow_stand_hl: bool | None = None,
 ) -> list[_OrientationVariant]:
     normalized_mode = normalize_orientation_mode(mode)
     l_mm = int(length_mm)
@@ -172,7 +181,7 @@ def _orientation_variants_for_mode(
             )
         )
 
-    include_stand_hw = normalized_mode == ORIENTATION_MODE_PLANAR_STAND_HW
+    include_stand_hw = normalized_mode in (ORIENTATION_MODE_PLANAR_STAND_HW, ORIENTATION_MODE_ALL)
     if allow_stand_hw is not None:
         include_stand_hw = include_stand_hw and bool(allow_stand_hw)
 
@@ -199,10 +208,40 @@ def _orientation_variants_for_mode(
                 )
             )
 
+    include_stand_hl = normalized_mode == ORIENTATION_MODE_ALL
+    if allow_stand_hl is not None:
+        include_stand_hl = include_stand_hl and bool(allow_stand_hl)
+
+    if include_stand_hl:
+        # stand_hl: caja de pie sobre L (intercambia H<->L)
+        # rot0: H x W x L  ->  l=h_mm, w=w_mm, h=l_mm
+        variants.append(
+            _OrientationVariant(
+                rot90=False,
+                length_mm=h_mm,
+                width_mm=w_mm,
+                height_mm=l_mm,
+                name="HWL_hl",
+                family="stand_hl",
+            )
+        )
+        # rot90: W x H x L  ->  l=w_mm, w=h_mm, h=l_mm
+        if allow_rotate and w_mm != h_mm:
+            variants.append(
+                _OrientationVariant(
+                    rot90=True,
+                    length_mm=w_mm,
+                    width_mm=h_mm,
+                    height_mm=l_mm,
+                    name="WHL_hl",
+                    family="stand_hl",
+                )
+            )
+
     deduped: list[_OrientationVariant] = []
-    seen: set[tuple[int, int, int]] = set()
+    seen: set[tuple[int, int, int, str]] = set()
     for variant in variants:
-        key = (int(variant.length_mm), int(variant.width_mm), int(variant.height_mm))
+        key = (int(variant.length_mm), int(variant.width_mm), int(variant.height_mm), variant.family)
         if key in seen:
             continue
         seen.add(key)
@@ -1509,13 +1548,26 @@ class PalletModel:
 
     def _orientations(self, length_mm: int, width_mm: int, height_mm: int) -> list[_OrientationVariant]:
         allow_stand_hw: bool | None = None
-        if self.orientation_mode == ORIENTATION_MODE_PLANAR_STAND_HW:
+        allow_stand_hl: bool | None = None
+
+        if self.orientation_mode in (ORIENTATION_MODE_PLANAR_STAND_HW, ORIENTATION_MODE_ALL):
             height_margin_mm = max(0, int(self.spec.max_height_mm) - int(self.current_height_mm()))
-            allow_stand_hw = should_allow_stand_hw(height_margin_mm, self.stand_hw_height_margin_gate_mm)
-            if allow_stand_hw:
+            gate_open = should_allow_stand_hw(height_margin_mm, self.stand_hw_height_margin_gate_mm)
+            allow_stand_hw = gate_open
+            if gate_open:
                 self.stats.stand_hw_gate_allows_total += 1
             else:
                 self.stats.stand_hw_gate_blocks_total += 1
+
+        if self.orientation_mode == ORIENTATION_MODE_ALL:
+            height_margin_mm = max(0, int(self.spec.max_height_mm) - int(self.current_height_mm()))
+            gate_open = should_allow_stand_hw(height_margin_mm, self.stand_hw_height_margin_gate_mm)
+            allow_stand_hl = gate_open
+            if gate_open:
+                self.stats.stand_hl_gate_allows_total += 1
+            else:
+                self.stats.stand_hl_gate_blocks_total += 1
+
         return _orientation_variants_for_mode(
             length_mm,
             width_mm,
@@ -1523,6 +1575,7 @@ class PalletModel:
             mode=self.orientation_mode,
             allow_rotate=bool(self.spec.allow_rotate),
             allow_stand_hw=allow_stand_hw,
+            allow_stand_hl=allow_stand_hl,
         )
 
     def _best_by_maxrects_score(self, candidates: list[_LayerCandidate]) -> list[_LayerCandidate]:
