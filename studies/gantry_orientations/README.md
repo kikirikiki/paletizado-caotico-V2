@@ -48,15 +48,25 @@ python studies/gantry_orientations/benchmark.py
 
 ## Resultados
 
-<!-- Rellenar tras ejecutar el benchmark -->
-
 | Config | media | min | max | palets | vol_util% |
 |---|---|---|---|---|---|
-| brazo_hw | - | - | - | - | - |
-| gantry_planar | - | - | - | - | - |
-| gantry_hw | - | - | - | - | - |
-| gantry_all | - | - | - | - | - |
+| brazo_hw      | 17.2 | 8  | 25 | 101 | 64.6% |
+| gantry_planar | 14.0 | 8  | 23 | 129 | 52.6% |
+| gantry_hw     | 18.6 | 13 | 25 |  95 | 69.6% |
+| gantry_all    | 19.2 | 13 | 25 |  90 | 72.1% |
 
 ## Conclusion
 
-<!-- Rellenar tras analizar resultados -->
+stand_hl confirma la hipotesis con una ganancia modesta: +0.6 cajas/palet (+3.2%)
+sobre gantry_hw, pasando de 69.6% a 72.1% de utilizacion volumetrica.
+El mismo flujo se empaqueta en 90 palets en lugar de 95.
+
+El gate de 400mm funciona correctamente: stand_hl solo entra en la fase final
+del palet, evitando que la altura de 605mm de la caja dominante agote capas
+prematuramente.
+
+El techo fisico no mejora (max=25 en ambos casos), la ganancia es en la media.
+
+Recomendacion: stand_hl es beneficioso en escenario gantry. La feature
+(PR #139) puede mergearse a feat/fifo-scorer-coherencia cuando se valide
+fisicamente con ROBOGUIDE.
