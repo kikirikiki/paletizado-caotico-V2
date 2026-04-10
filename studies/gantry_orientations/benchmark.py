@@ -1,11 +1,13 @@
 """
 Estudio comparativo de orientaciones de caja — gantry vs brazo robotico.
 
-Hipotesis: permitir stand_hl (6 orientaciones) mejora vol_util% respecto
-a stand_hw (4 orientaciones) en escenario gantry (accessibility_delta_mm=0).
+Hipotesis: permitir stand_hl (6 orientaciones totales) mejora vol_util%
+respecto a stand_hw (4 orientaciones) en escenario gantry
+(accessibility_delta_mm=0).
 
 Uso:
     cd <repo_root>
+    source .venv/bin/activate
     export PYTHONPATH=$(pwd)/src
     python studies/gantry_orientations/benchmark.py
 
@@ -18,7 +20,7 @@ import os
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +34,8 @@ from sim.run import run_simulation  # noqa: E402
 # ---------------------------------------------------------------------------
 
 SEEDS = [50021, 1, 42, 100, 777, 5678, 9999, 12345, 99999, 314159]
+
+EXCEL_PATH = str(REPO_ROOT / "data" / "Flujo rampas - Editado.xlsx")
 
 CONFIGS: dict[str, dict] = {
     "brazo_hw": dict(
@@ -56,71 +60,90 @@ CONFIGS: dict[str, dict] = {
     ),
 }
 
-# Parametros fijos — cargados desde configs/base_params.json
-_PARAMS_PATH = Path(__file__).parent / "configs" / "base_params.json"
-with open(_PARAMS_PATH) as _f:
-    _RAW = json.load(_f)
-
-BASE_PARAMS: dict = {k: v for k, v in _RAW.items() if not k.startswith("_")}
+# Parametros fijos de produccion validados
+BASE_PARAMS: dict = dict(
+    model="M1",
+    n_per_pallet=999999,
+    t_pick_place=14.0,
+    staging_cap=0,
+    out_path=None,
+    ramp_cap=15,
+    policy="palca",
+    lookahead_k=15,
+    arrival_mode="immediate",
+    shuffle_window=15,
+    shuffle_strength=1.0,
+    overhang_mm=20,
+    heuristic="bssf",
+    stacking_mode="heightfield",
+    stability_mode="ratio+corners+settle",
+    min_support=0.85,
+    score_mode="min_height_slack_then_gain",
+    height_slack_mm=120,
+    stand_hw_height_margin_gate_mm=400,
+    time_budget_ms=900,
+    micro_plan=False,
+    force_destination=1,
+    continuous_pallets=True,
+    max_pallets=0,
+)
 
 # Volumetria de referencia
 VOL_PALET_MM3 = 1240 * 820 * 2400
-# Mix: 77% caja dominante 605x445x355, 23% resto (volumen medio estimado)
 VOL_MEDIO_MM3 = 0.77 * (605 * 445 * 355) + 0.23 * 78_000_000
 
 
 # ---------------------------------------------------------------------------
-# Ejecucion por seed
+# Extraccion de metricas (igual que benchmark_divert_rules.py)
+# ---------------------------------------------------------------------------
+
+def _extract_boxes_per_pallet(payload: dict) -> list[int]:
+    """
+    Extrae lista de cajas por palet completo del resultado de run_simulation.
+    Excluye el ultimo palet de cada seed (incompleto por agotamiento del flujo).
+    """
+    metrics = payload.get("metrics", {})
+    kpis = metrics.get("pallet_kpis", {})
+    seq_by_dest: dict = kpis.get("continuous_pallet_sequence", {})
+    reasons_by_dest: dict = kpis.get("continuous_closures_by_reason", {})
+
+    all_completos: list[int] = []
+
+    for dest_key in sorted(seq_by_dest.keys(), key=lambda x: int(x)):
+        seq: list[int] = list(seq_by_dest[dest_key])
+        reasons: dict[str, int] = dict(reasons_by_dest.get(dest_key, {}))
+        n_end = int(reasons.get("END", 0))
+        # Excluir ultimo palet (cierre por END = agotamiento de flujo)
+        completos = seq[:-n_end] if n_end > 0 else list(seq)
+        all_completos.extend(completos)
+
+    return all_completos
+
+
+# ---------------------------------------------------------------------------
+# Worker
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SeedResult:
     config: str
     seed: int
-    boxes_per_pallet: list[float]
+    boxes_per_pallet: list[int]
     error: str | None = None
 
 
-def _extract_boxes_per_pallet(result: dict) -> list[float]:
-    """Extrae lista de cajas por palet del resultado de run_simulation."""
-    for key in ("pallets", "pallet_stats", "pallet_results"):
-        pallets = result.get(key)
-        if not pallets:
-            continue
-        out = []
-        for p in pallets:
-            if isinstance(p, dict):
-                n = (
-                    p.get("n_boxes")
-                    or p.get("boxes_placed")
-                    or p.get("num_boxes")
-                    or 0
-                )
-            else:
-                n = (
-                    getattr(p, "n_boxes", None)
-                    or getattr(p, "boxes_placed", None)
-                    or getattr(p, "num_boxes", None)
-                    or 0
-                )
-            out.append(float(n))
-        if out:
-            return out
-    return []
-
-
 def run_one(config_name: str, seed: int, extra: dict) -> SeedResult:
+    # Re-insertar path en el worker (necesario con ProcessPoolExecutor)
+    sys.path.insert(0, str(REPO_ROOT / "src"))
     params = {
         **BASE_PARAMS,
         **{k: v for k, v in extra.items() if not k.startswith("_")},
-        "seed": seed,
+        "excel_path": EXCEL_PATH,
+        "episode_seed": seed,
     }
     try:
-        result = run_simulation(**params)
-        boxes = _extract_boxes_per_pallet(result)
-        # Excluir ultimo palet: suele estar incompleto por agotamiento del flujo
-        if len(boxes) > 1:
-            boxes = boxes[:-1]
+        payload = run_simulation(**params)
+        boxes = _extract_boxes_per_pallet(payload)
         return SeedResult(config=config_name, seed=seed, boxes_per_pallet=boxes)
     except Exception as exc:
         return SeedResult(config=config_name, seed=seed, boxes_per_pallet=[], error=str(exc))
@@ -130,7 +153,7 @@ def run_one(config_name: str, seed: int, extra: dict) -> SeedResult:
 # Agregacion y reporte
 # ---------------------------------------------------------------------------
 
-def _stats(values: list[float]) -> dict:
+def _stats(values: list[int]) -> dict:
     if not values:
         return {"media": None, "min": None, "max": None, "n": 0, "vol_util_pct": None}
     media = sum(values) / len(values)
@@ -144,7 +167,10 @@ def _stats(values: list[float]) -> dict:
 
 
 def print_table(aggregated: dict[str, dict]) -> None:
-    header = f"{'config':<28} | {'media':>6} | {'min':>4} | {'max':>4} | {'palets':>6} | {'vol_util%':>9}"
+    header = (
+        f"{'config':<28} | {'media':>6} | {'min':>4} | {'max':>4}"
+        f" | {'palets':>6} | {'vol_util%':>9}"
+    )
     sep = "-" * len(header)
     print()
     print(header)
@@ -172,10 +198,11 @@ def main() -> None:
         for seed in SEEDS
     ]
     total = len(tasks)
-    raw: dict[str, list[float]] = {k: [] for k in CONFIGS}
+    raw: dict[str, list[int]] = {k: [] for k in CONFIGS}
     errors: list[str] = []
 
     print(f"\nEstudio: gantry-orientations")
+    print(f"Excel: {EXCEL_PATH}")
     print(f"Configs: {len(CONFIGS)}  |  Seeds: {len(SEEDS)}  |  Total jobs: {total}")
     print(f"Workers: 14  |  Inicio: {datetime.now().strftime('%H:%M:%S')}\n")
 
@@ -192,14 +219,17 @@ def main() -> None:
             done += 1
             r: SeedResult = future.result()
             if r.error:
-                msg = f"  [{done:>2}/{total}] ERROR  {cfg:<28} seed={seed}  → {r.error}"
+                msg = (
+                    f"  [{done:>2}/{total}] ERROR  {cfg:<28}"
+                    f" seed={seed}  -> {r.error}"
+                )
                 print(msg)
                 errors.append(msg)
             else:
                 raw[r.config].extend(r.boxes_per_pallet)
                 print(
-                    f"  [{done:>2}/{total}] OK     {cfg:<28} seed={seed}"
-                    f"  → {len(r.boxes_per_pallet)} palets"
+                    f"  [{done:>2}/{total}] OK     {cfg:<28}"
+                    f" seed={seed}  -> {len(r.boxes_per_pallet)} palets"
                 )
 
     elapsed = time.perf_counter() - t0
@@ -217,10 +247,15 @@ def main() -> None:
         json.dump(
             {
                 "timestamp": ts,
+                "excel": EXCEL_PATH,
                 "seeds": SEEDS,
-                "configs": {k: {ck: cv for ck, cv in v.items() if not ck.startswith("_")}
-                            for k, v in CONFIGS.items()},
-                "base_params": BASE_PARAMS,
+                "configs": {
+                    k: {ck: cv for ck, cv in v.items() if not ck.startswith("_")}
+                    for k, v in CONFIGS.items()
+                },
+                "base_params": {
+                    k: v for k, v in BASE_PARAMS.items() if k != "out_path"
+                },
                 "aggregated": aggregated,
                 "errors": errors,
             },
