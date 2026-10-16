@@ -1,0 +1,12 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: gantry_4orient
+  preset: gantry_4orient
+  role: contrast
+  overrides: {}
+- name: arm6_planar
+  preset: arm6_planar
+  role: control
+  overrides: {}
