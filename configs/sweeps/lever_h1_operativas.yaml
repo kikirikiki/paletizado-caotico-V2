@@ -1,0 +1,17 @@
+# PALANCAS operativas combinadas con H1 (informativo, seeds de referencia). Ejecutado por el director (D-011).
+- name: h1_ref
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty}
+- name: h1_k30
+  preset: arm6_4orient
+  role: bound
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, ramp_cap: 30, lookahead_k: 30}
+- name: h1_k75
+  preset: arm6_4orient
+  role: bound
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, ramp_cap: 75, lookahead_k: 75}
+- name: h1_n2
+  preset: arm6_4orient
+  role: bound
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, open_pallets: 2}
