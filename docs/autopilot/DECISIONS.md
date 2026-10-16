@@ -155,6 +155,7 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   | Testigo offline 80,40 % (186 cajas) | 19 | 97 | **117 (63 %)** | 119 |
   | Baseline producción (1860 cajas, 10 seeds) | 207 | 377 | **557 (30 %)** | 613 |
   | H1 (1860 cajas) | 145 | 386 | **611 (33 %)** | 667 |
+  | H1 + H3 (1860 cajas, h3_eval) | 269 | 543 | **754 (40,5 %)** | 786 |
   Todas las políticas, incluida la de producción, dependen de esta lectura de la regla; el testigo offline, mucho más.
 - Opción: la regla es una restricción física congelada (§2) y no se modifica; todas las cifras oficiales usan la regla tal cual.
   Se añade a los sweeps la métrica de robustez `acc_violations_gap{5,20,50}` y se reporta junto al KPI. Ninguna técnica nueva

@@ -31,6 +31,7 @@
 | **H1 + H3 búsqueda determinista (n100 d3 w8) — MEJOR (reportada aparte, D-012)** | **70,94 % ± 1,50 · IC95 [69,86; 72,01] · +9,04 pp [7,23; 10,86]; vs H1 +6,24 [5,11; 7,36]** · 486 ms/dec (p95 1044) · determinista (2 ejecuciones idénticas) | `run_sweep.py --configs configs/sweeps/h3_eval.yaml --seeds 10 --workers 15 --name h3_eval --baseline arm6_4orient` (wt2) | 48,9 % del gap; a 0,2 pp de T1 |
 | *PALANCA* H1 + micro_plan (d3 w8, corte por tiempo) | 70,90 % ± 1,64 · +9,01 pp [7,77; 10,25] vs baseline · 722 ms/dec (p95 911) | `run_sweep.py --configs configs/sweeps/lever_microplan_eval.yaml --seeds 10 --workers 15 --name lever_microplan_eval --baseline arm6_4orient` (wt2) | NO cuenta para T1 (micro_plan=False es restricción, D-012) y NO es determinista (8/10 seeds cambian al repetir) → H3 |
 | gantry_4orient (contraste) | 66,92 % ± 2,26 (+5,03 pp) | baseline_v1 | informativo; H1 no actúa con delta 0 |
+| gantry_4orient + H1 + H3 (contraste) | 73,36 % ± 1,33 (+6,45 pp sobre gantry) | `run_sweep.py --configs configs/sweeps/contrast_gantry_h3.yaml --seeds 10 --workers 15 --name contrast_gantry_h3 --baseline gantry_4orient` (wt2) | informativo: la desventaja del brazo baja de 5,0 a 2,4 pp |
 | arm6_planar (control) | 47,42 % | baseline_v1 | control |
 
 ## Cotas y palancas (Fase 0)
@@ -49,8 +50,9 @@
 | feat/metrica-congelada | feat/parametros-congelados | métrica v1.0.0 + validador | #142 | abierto |
 | feat/sweep-paralelo | feat/metrica-congelada | run_sweep + baseline oficial | #143 | abierto |
 | feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + C (B pendiente) | — | commits 2483261 (C), 382ee4f (A); PR a abrir con A+C, B se añade después |
-| feat/h1-deuda-accesibilidad (wt2, TOPE) | feat/cotas-superiores | H1 | #145 | abierto (rebase verificado: 20 KPIs idénticos) |
-| feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + B + C, headroom, metas | #144 | abierto (acd5bda, 956f527: smoke pendiente de re-ejecutar con el lock libre, D-014) |
+| feat/h1-deuda-accesibilidad | feat/cotas-superiores | H1 | #145 | abierto (rebase verificado: 20 KPIs idénticos) |
+| feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + B + C, headroom, metas | #144 | abierto (smoke re-verificado OK con el lock libre, D-014) |
+| feat/h3-busqueda-determinista (wt2, TOPE) | feat/h1-deuda-accesibilidad | H3 | #146 | abierto |
 
 ## Trabajos Codex
 | Job | Spec | Modelo / effort | WT | Estado |
@@ -84,7 +86,13 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 - `stand_hl` (PR #139) duplica `stand_hw` (D-004). Gate stand_hw no es palanca. Simulador determinista.
 - H1: banda 200 mm empeora; banda ≥ 445 mejora; paisaje plano con ruido ~2 pp/seed.
 
-## Siguiente acción
+## Siguiente acción (vigente)
+1. A las 00:02 del 2026-10-17 (cuota de Codex): crear `feat/h4-columnas-online` desde feat/h3-busqueda-determinista en wt2 y lanzar
+   `docs/autopilot/specs/09_h4_columnas_online.md` con gpt-6.1-sol high, sobre H1+H3 (referencia = 70,94 %). Indicar en la cabecera
+   que la referencia incluye H3 (micro_plan_node_budget=100, depth 3, width 8, topk 15).
+2. Después: 07 H2 ranuras (sobre la mejor configuración vigente) y 06 canto (PLAN_B + contraste 6 orientaciones reales).
+
+## Siguiente acción (histórico)
 1. (hecho) PR #144 (cotas A+C) y PR #145 (H1). Autopsia con H1 → RESEARCH §1ter → spec 07 reescrita (H2 ranuras estrechas).
 2. (en curso) 04B en wt1 y 08_h3 en wt2. Al terminar cada uno: revisar diff, verificar cifras en out/, smoke, commit, PR.
 3. Cuando esté B: tabla de headroom en docs/COTAS.md (wt1), T1/T2/T3 aquí, push a #144.
