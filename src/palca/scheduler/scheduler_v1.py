@@ -130,6 +130,8 @@ class SchedulerSimState:
     ramp_states: Mapping[int, SchedulerRampState] = field(default_factory=dict)
     ramp_sizes: Mapping[int, int] = field(default_factory=dict)
     remaining_total: int = 0
+    # Vacío conserva exactamente un palet por destino; solo la variante bound lo amplía.
+    pallet_choices: Mapping[int | str, Sequence[int | str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -359,6 +361,8 @@ class SchedulerV1:
         items_evaluated = 0
         items_feasible = 0
         feasible_candidates: list[_ScoredCandidate] = []
+        evaluated_by_pallet: dict[int | str, int] = {}
+        feasible_by_pallet: dict[int | str, int] = {}
         window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
 
@@ -376,8 +380,9 @@ class SchedulerV1:
                 except Exception:
                     continue
 
-            for idx, box in enumerate(ramp_items):
-                pallet_id = box.destination
+            choices = ((idx, box, pid) for idx, box in enumerate(ramp_items)
+                       for pid in sim_state.pallet_choices.get(box.destination, (box.destination,)))
+            for idx, box, pallet_id in choices:
                 if pallet_id is not None:
                     window_boxes_by_pallet_id.setdefault(pallet_id, []).append(box)
                 if deadline is not None and time.perf_counter() >= deadline:
@@ -397,6 +402,7 @@ class SchedulerV1:
                     continue
 
                 items_evaluated += 1
+                evaluated_by_pallet[pallet_id] = evaluated_by_pallet.get(pallet_id, 0) + 1
                 preview = self._preview_place(pallet, box)
 
                 if next_heartbeat is not None and time.perf_counter() >= next_heartbeat:
@@ -465,6 +471,7 @@ class SchedulerV1:
                             }
                     continue
                 items_feasible += 1
+                feasible_by_pallet[pallet_id] = feasible_by_pallet.get(pallet_id, 0) + 1
 
                 height_after_mm = self._resolve_height_after_mm(preview, pallet)
 
@@ -520,6 +527,8 @@ class SchedulerV1:
         self.last_eval_stats = {
             "items_evaluated": int(items_evaluated),
             "items_feasible": int(items_feasible),
+            "evaluated_by_pallet": evaluated_by_pallet,
+            "feasible_by_pallet": feasible_by_pallet,
             "cutoff": bool(cutoff),
             "cutoff_reason": cutoff_reason,
             "batchfill_calls": int(batchfill_stats["batchfill_calls"]),

@@ -1,0 +1,16 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 15, lookahead_k: 15, open_pallets: 1}
+- name: buffer_k30
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 30, lookahead_k: 30, open_pallets: 1}
+- name: buffer_k75
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 75, lookahead_k: 75, open_pallets: 1}
+- name: buffer_k186
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 186, lookahead_k: 186, open_pallets: 1}
