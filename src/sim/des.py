@@ -259,6 +259,7 @@ def simulate(
             staging_full_percent={1: 0.0, 2: 0.0},
             pallet_kpis={
                 "continuous_pallet_sequence": {dest: [] for dest in range(1, 7)},
+                "continuous_closure_sequence": {dest: [] for dest in range(1, 7)},
                 "continuous_pallets_total": {dest: 0 for dest in range(1, 7)},
                 "continuous_closures_by_reason": {dest: {} for dest in range(1, 7)},
                 "accessible_window_stats": {
@@ -294,6 +295,7 @@ def simulate(
     }
     destinations = {dest: DestinationState(destination=dest) for dest in range(1, 7)}
     closed_pallets: dict[int, list[int]] = {dest: [] for dest in destinations}
+    closure_sequence: dict[int, list[str]] = {dest: [] for dest in destinations}
     closures_by_reason: dict[int, dict[str, int]] = {dest: {} for dest in destinations}
 
     scheduler = Scheduler()
@@ -416,6 +418,7 @@ def simulate(
         max_pallets_reached = False
         if dest_state.count > 0:
             closed_pallets[destination].append(int(dest_state.count))
+            closure_sequence[destination].append(str(reason).strip() or "UNKNOWN")
             register_closed_pallet(destination)
             dest_state.count = 0
             max_pallets_reached = (
@@ -848,6 +851,7 @@ def simulate(
     for dest, dest_state in destinations.items():
         if dest_state.state == "ACTIVE" and dest_state.count > 0:
             closed_pallets[dest].append(int(dest_state.count))
+            closure_sequence[dest].append("END")
             by_reason = closures_by_reason.setdefault(dest, {})
             by_reason["END"] = int(by_reason.get("END", 0)) + 1
             register_closed_pallet(dest)
@@ -863,6 +867,7 @@ def simulate(
         pallet_kpis = {}
     pallet_kpis = dict(pallet_kpis)
     pallet_kpis["continuous_pallet_sequence"] = {dest: list(seq) for dest, seq in closed_pallets.items()}
+    pallet_kpis["continuous_closure_sequence"] = {dest: list(seq) for dest, seq in closure_sequence.items()}
     pallet_kpis["continuous_pallets_total"] = {dest: len(seq) for dest, seq in closed_pallets.items()}
     pallet_kpis["continuous_closures_by_reason"] = {
         dest: dict(reasons) for dest, reasons in closures_by_reason.items()
