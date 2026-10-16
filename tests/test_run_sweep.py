@@ -228,3 +228,20 @@ def test_lock_retry_preserves_inode_and_waits(tmp_path, monkeypatch):
         inode = lock.stat().st_ino
     assert calls == ['occupied', 60]
     assert lock.stat().st_ino == inode
+
+
+def test_summary_reports_d015_means_and_additional_reference_pairs(tmp_path):
+    synthetic_sweep(tmp_path)
+    manifest=json.loads((tmp_path/'manifest.json').read_text())
+    for config in manifest['configs']:
+        config['overrides']={} if config['name']=='base' else {'micro_plan':True}
+        for seed in manifest['seeds']:
+            path=tmp_path/config['name']/str(seed)/'kpi.json'
+            row=json.loads(path.read_text())
+            row.update({f'acc_violations_gap{g}': seed*g for g in (5,20,50)})
+            sweep.write_json(path,row)
+    sweep.write_json(tmp_path/'manifest.json',manifest)
+    summary=sweep.generate_summary(tmp_path)
+    assert summary['configs']['better']['acc_violations_gap50']['mean']==100
+    assert summary['comparisons_by_reference']['better']['base']['result']['mean_diff_pp']==pytest.approx(-5)
+    assert 'Robustez D-015' in (tmp_path/'summary.md').read_text()

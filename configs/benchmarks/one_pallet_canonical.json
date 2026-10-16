@@ -5,6 +5,9 @@
   "excel": "data/Flujo rampas - Editado.xlsx",
   "seeds": [50021, 50022, 50023, 50024, 50025],
   "params": {
+    "column_template": "off",
+    "column_min_fill": 0.85,
+    "column_fallback": "free",
     "access_debt_weight": 0.0,
     "access_debt_band_mm": 300,
     "access_debt_mode": "penalty",
