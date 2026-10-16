@@ -8,6 +8,8 @@
     "access_debt_weight": 0.0,
     "access_debt_band_mm": 300,
     "access_debt_mode": "penalty",
+    "slot_weight": 0.0,
+    "slot_min_mm": 355,
     "model": "M1",
     "n_per_pallet": 999999,
     "t_pick_place": 14.0,

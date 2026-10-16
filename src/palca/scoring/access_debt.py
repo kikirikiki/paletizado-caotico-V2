@@ -20,6 +20,8 @@ class HeightField:
     x_mm: np.ndarray
     y_mm: np.ndarray
     cell_areas_mm2: np.ndarray
+    x_edges_mm: np.ndarray
+    y_edges_mm: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,8 @@ def build_heightfield(
         y0, y1 = np.searchsorted(y, [p.y_mm, p.y_mm + p.width_mm])
         view = heights[y0:y1, x0:x1]
         np.maximum(view, p.z_mm + p.height_mm, out=view)
-    return HeightField(heights, x, y, np.diff(y_edges)[:, None] * np.diff(x_edges)[None, :])
+    return HeightField(heights, x, y, np.diff(y_edges)[:, None] * np.diff(x_edges)[None, :],
+                       x_edges + origin_mm[0], y_edges + origin_mm[1])
 
 
 def access_debt(

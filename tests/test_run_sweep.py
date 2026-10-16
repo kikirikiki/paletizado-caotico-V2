@@ -228,3 +228,15 @@ def test_lock_retry_preserves_inode_and_waits(tmp_path, monkeypatch):
         inode = lock.stat().st_ino
     assert calls == ['occupied', 60]
     assert lock.stat().st_ino == inode
+
+
+def test_d015_robustness_replay_keeps_strict_local_z():
+    def box(x, z=0, height=600):
+        return dict(x_mm=x, y_mm=0, z_mm=z, length_mm=100, width_mm=100, height_mm=height)
+    items = [box(0), box(110, height=100), box(220, height=100)]
+    assert sweep.accessibility_gap_violations(items, 400, 5) == 0
+    assert sweep.accessibility_gap_violations(items, 400, 20) == 1
+    assert sweep.accessibility_gap_violations(items, 400, 50) == 1
+    assert sweep.accessibility_gap_violations(items, 0, 50) == 0
+    # Strict overlap raises local_z, even when replaying a rejected placement.
+    assert sweep.accessibility_gap_violations([box(0), box(50, z=600)], 400, 20) == 0

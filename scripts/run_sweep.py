@@ -155,6 +155,30 @@ def cached_task(task: dict) -> bool:
         return False
 
 
+def accessibility_gap_violations(items: list[dict], delta_mm: int, gap_mm: int) -> int:
+    """D-015: replay actual order, changing only adjacency tolerance.
+
+    local_z always uses strict XY overlap, as RobotAccessibilityControl does.
+    A rejected placement counts once, even with multiple blockers; it remains
+    in the observed history for subsequent checks. delta=0 disables the rule.
+    """
+    if delta_mm == 0:
+        return 0
+    previous = []
+    count = 0
+    for p in items:
+        x0, y0 = int(p["x_mm"]), int(p["y_mm"])
+        x1, y1 = x0 + int(p["length_mm"]), y0 + int(p["width_mm"])
+        local_z = max((top for px0, py0, px1, py1, top in previous
+                       if min(x1, px1) > max(x0, px0) and min(y1, py1) > max(y0, py0)), default=0)
+        count += int(any(max(x0, px0) - min(x1, px1) <= gap_mm
+                         and max(y0, py0) - min(y1, py1) <= gap_mm
+                         and top > local_z + delta_mm
+                         for px0, py0, px1, py1, top in previous))
+        previous.append((x0, y0, x1, y1, int(p["z_mm"]) + int(p["height_mm"])))
+    return count
+
+
 def run_task(task: dict) -> dict:
     started = perf_counter()
     import numpy as np
@@ -173,12 +197,16 @@ def run_task(task: dict) -> dict:
                   for rec in records for violation in validate_pallet(
                       rec.items, originals, min_support=task["params"]["min_support"])]
     result = run_kpi(records)
+    result.update({f"acc_violations_gap{gap}": sum(
+        accessibility_gap_violations(rec.items, task["params"]["accessibility_delta_mm"], gap)
+        for rec in records) for gap in (5, 20, 50)})
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
     result.update(n_violations=len(violations), violations=violations,
                   decision_timing=payload["metrics"]["decision_timing"],
                   hard_cap_hits=payload["metrics"]["pallet_kpis"].get("hard_cap_hits", 0),
                   micro_plan={key: value for key, value in payload["metrics"]["pallet_kpis"].items()
                               if key.startswith("micro_plan_")},
+                  slots=payload["metrics"]["pallet_kpis"].get("slots", {}),
                   access_debt=payload["metrics"]["pallet_kpis"].get("access_debt", {}),
                   n_boxes_input=len(originals), n_unplaced=len(originals) - result["boxes_placed"],
                   deadline_cutoffs_count=payload["metrics"]["pallet_kpis"]["deadline_cutoffs_count"],
@@ -233,6 +261,11 @@ def generate_summary(folder: Path) -> dict:
     for config in manifest["configs"]:
         rows = grouped[config["name"]]
         metrics = {field: stats([row[field] for row in rows]) for field in fields}
+        for gap in (5, 20, 50):
+            key = f"acc_violations_gap{gap}"
+            metrics[key] = stats([row.get(key) for row in rows])
+        for key in ("selected_penalty_mean", "changed_choices", "candidate_mean_ms", "candidate_p95_ms"):
+            metrics[f"slots_{key}"] = stats([row.get("slots", {}).get(key) for row in rows])
         metrics.update(role=config["role"], n_seeds=len(rows),
                        decision_mean_ms=stats([row["decision_timing"]["mean_ms"] for row in rows]),
                        decision_p95_ms=stats([row["decision_timing"]["p95_ms"] for row in rows]),
@@ -287,6 +320,17 @@ def render_summary(summary: dict) -> str:
             lines.append(f"| {name} | {result['n']} | {number(result['mean_diff_pp'])} | {interval(result['ci95_pp'])} | {'sí' if result['significant'] else 'no'} |")
         else:
             lines.append(f"| {name} | 0 | N/D | N/D | N/D |")
+    lines += ["", "Robustez D-015: colocaciones infactibles con tolerancia G (media por seed; no cambia el KPI).", "",
+              "| Config | gap5 | gap20 | gap50 |", "|---|---:|---:|---:|"]
+    for name, row in summary["configs"].items():
+        values = [number(row[f"acc_violations_gap{gap}"]["mean"]) for gap in (5, 20, 50)]
+        lines.append(f"| {name} | " + " | ".join(values) + " |")
+    lines += ["", "H2 (medias por seed; cambios en candidatos/frontera explorados, sin repetir búsqueda):", "",
+              "| Config | Penalización elegida | Elecciones cambiadas | ms/candidato media / p95 |",
+              "|---|---:|---:|---:|"]
+    for name, row in summary["configs"].items():
+        value = lambda key: number(row[f"slots_{key}"]["mean"])
+        lines.append(f"| {name} | {value('selected_penalty_mean')} | {value('changed_choices')} | {value('candidate_mean_ms')} / {value('candidate_p95_ms')} |")
     lines += ["", "Validación física (sin relajar):"]
     for name, row in summary["configs"].items():
         lines.append(f"- {name}: hard_cap_hits={row.get('hard_cap_hits_total', 0)}; {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")

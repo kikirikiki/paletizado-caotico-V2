@@ -12,6 +12,7 @@ from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring_coherencia import CoherenciaCapaScorer
 from ..scoring.access_debt import HeightField, access_debt, build_heightfield
+from ..scoring.slots import narrow_slot_penalty
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -43,6 +44,8 @@ class SchedulerConfig:
     access_debt_weight: float = 0.0
     access_debt_band_mm: int = 300
     access_debt_mode: str = "penalty"
+    slot_weight: float = 0.0
+    slot_min_mm: int = 355
     tower_z_band_mm: int = 0
     tower_z_penalty_weight: float = 0.0
     spatial_xy_bin_mm: int = 150
@@ -73,6 +76,9 @@ class SchedulerConfig:
             raise ValueError("micro_plan_node_budget must be a nonnegative int and hard_cap_ms a positive int")
         if self.micro_plan_enabled and self.micro_plan_node_budget > 0 and self.max_seconds_per_item > 0:
             raise ValueError("Deterministic microplan requires max_seconds_per_item=0")
+        if (not 0 <= self.slot_weight < float("inf")
+                or not isinstance(self.slot_min_mm, int) or self.slot_min_mm <= 0):
+            raise ValueError("slot_weight must be finite/nonnegative and slot_min_mm a positive int")
         if self.access_debt_mode not in ("penalty", "filter"):
             raise ValueError("access_debt_mode must be penalty or filter")
         if not 0 <= self.access_debt_weight < float("inf") or self.access_debt_band_mm < 0:
@@ -177,6 +183,7 @@ class _ScoreTerms:
     access_dead_volume_mm3: float = 0.0
     access_dead_area_mm2: float = 0.0
     access_debt_penalty: float = 0.0
+    slot_penalty: float = 0.0
     tower_z_delta_mm: int = 0
     tower_z_penalty: float = 0.0
     spatial_tower_delta: int = 0
@@ -197,6 +204,8 @@ class _BeamNode:
     height_after_mm: int = 0
     placed_count: int = 0
     first_plan: PickPlan | None = None
+    first_slot_penalty: float = 0.0
+    slot_cost_sum: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -230,6 +239,10 @@ class _HardFloorScoredExpansion:
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
+        self.slot_selected_count = 0
+        self.slot_selected_sum = 0.0
+        self.slot_changed_choices = 0
+        self.slot_candidate_ms: list[float] = []
         self.access_debt_selected_count = 0
         self.access_debt_volume_sum = 0.0
         self.access_debt_area_sum = 0.0
@@ -626,11 +639,16 @@ class SchedulerV1:
                     reference_choice, _ = self._choose_scored_candidate(feasible_candidates, sim_state, undo_debt=True)
                 if self.config.access_debt_mode == "filter":
                     feasible_candidates = self._filter_access_debt(feasible_candidates)
+                if self.config.slot_weight > 0:
+                    slot_reference, _ = self._choose_scored_candidate(feasible_candidates, sim_state, undo_slot=True)
                 selected, slack_stats = self._choose_scored_candidate(feasible_candidates, sim_state)
+                if self.config.slot_weight > 0 and selected is not None:
+                    self.slot_changed_choices += int(slot_reference.plan != selected.plan)
                 if self._access_debt_enabled() and selected is not None:
                     self.access_debt_changed_choices += int(reference_choice.plan != selected.plan)
 
             if selected is not None:
+                self._record_slot_choice(selected.terms.slot_penalty)
                 self._record_access_debt_choice(selected.terms)
                 best_plan = selected.plan
                 self._record_height_decision(
@@ -679,6 +697,7 @@ class SchedulerV1:
         )
         beam: list[_BeamNode] = [root]
         best_node = root
+        slot_reference_node = root
 
         nodes_expanded = 0
         feasible_first_candidates = 0
@@ -808,6 +827,7 @@ class SchedulerV1:
                                     / max(1, int(batchfill_selected_boxes_count_local))
                                 ),
                             }
+                            self._record_slot_choice(chosen.expansion.node.first_slot_penalty)
                             return chosen_plan, stats, None
 
                 if depth == 0:
@@ -851,6 +871,13 @@ class SchedulerV1:
             if not next_beam:
                 break
 
+            if self.config.slot_weight > 0:
+                # Counterfactual on the explored frontier, before beam pruning.
+                def without_slots(n):
+                    return self._beam_rank_key(replace(n, score_sum=n.score_sum + n.slot_cost_sum))
+                reference = max(next_beam, key=without_slots)
+                if without_slots(reference) > without_slots(slot_reference_node):
+                    slot_reference_node = reference
             next_beam.sort(key=self._beam_rank_key, reverse=True)
             beam = next_beam[:beam_width]
             depth_effective = depth + 1
@@ -895,6 +922,9 @@ class SchedulerV1:
 
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
+        self._record_slot_choice(best_node.first_slot_penalty)
+        if self.config.slot_weight > 0:
+            self.slot_changed_choices += int(slot_reference_node.first_plan != best_node.first_plan)
         return best_node.first_plan, stats, root_slack_stats
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
@@ -1080,6 +1110,8 @@ class SchedulerV1:
             height_after_mm=int(self._state_height_after_mm(new_pallets)),
             placed_count=int(node.placed_count) + 1,
             first_plan=first_plan,
+            first_slot_penalty=(terms.slot_penalty if node.first_plan is None else node.first_slot_penalty),
+            slot_cost_sum=node.slot_cost_sum + self.config.slot_weight * terms.slot_penalty,
         )
         return _BeamExpansion(node=child, box=box, terms=terms)
 
@@ -2136,22 +2168,24 @@ class SchedulerV1:
             - starv_cost
             + priority_score
         )
-        debt_volume = debt_area = penalty = 0.0
-        if self._access_debt_enabled() and pallet is not None and preview.placement is not None:
+        debt_volume = debt_area = penalty = slot_penalty = 0.0
+        delta = int(getattr(pallet, "accessibility_delta_mm", 0))
+        h1_enabled = self._access_debt_enabled() and delta > 0
+        if (h1_enabled or self.config.slot_weight > 0) and pallet is not None and preview.placement is not None:
             placement = preview.placement
-            delta = int(getattr(pallet, "accessibility_delta_mm", 0))
-            if delta > 0:
+            fields = access_fields if access_fields is not None else {}
+            key = id(pallet)
+            if key not in fields:
+                spec = pallet.spec
+                fields[key] = build_heightfield(
+                    pallet.placements, spec.bin_length_mm, spec.bin_width_mm,
+                    origin_mm=(spec.offset_mm, spec.offset_mm),
+                )
+            footprint = (placement.x_mm, placement.y_mm, placement.length_mm, placement.width_mm)
+            if h1_enabled:
                 started = time.perf_counter()
-                fields = access_fields if access_fields is not None else {}
-                key = id(pallet)
-                if key not in fields:
-                    spec = pallet.spec
-                    fields[key] = build_heightfield(
-                        pallet.placements, spec.bin_length_mm, spec.bin_width_mm,
-                        origin_mm=(spec.offset_mm, spec.offset_mm),
-                    )
                 debt = access_debt(
-                    fields[key], (placement.x_mm, placement.y_mm, placement.length_mm, placement.width_mm),
+                    fields[key], footprint,
                     placement.z_mm + placement.height_mm, delta, self.config.access_debt_band_mm,
                 )
                 debt_volume, debt_area = debt.dead_volume_mm3, debt.dead_area_mm2
@@ -2160,10 +2194,16 @@ class SchedulerV1:
                     penalty = self.config.access_debt_weight * debt_volume / max(1, volume)
                     score -= penalty
                 self.access_debt_candidate_ms.append((time.perf_counter() - started) * 1000)
+            if self.config.slot_weight > 0:
+                started = time.perf_counter()
+                slot_penalty = narrow_slot_penalty(fields[key], footprint, placement.z_mm, self.config.slot_min_mm)
+                score -= self.config.slot_weight * slot_penalty
+                self.slot_candidate_ms.append((time.perf_counter() - started) * 1000)
         return _ScoreTerms(
             access_dead_volume_mm3=debt_volume,
             access_dead_area_mm2=debt_area,
             access_debt_penalty=penalty,
+            slot_penalty=slot_penalty,
             packing_gain=float(preview.packing_gain),
             fragmentation=float(preview.fragmentation),
             score_adjustment=float(getattr(preview, "score_adjustment", 0.0) or 0.0),
@@ -2183,7 +2223,11 @@ class SchedulerV1:
         zero = [c for c in candidates if c.terms.access_dead_volume_mm3 == 0]
         return zero or candidates
 
-    def _choose_scored_candidate(self, candidates, sim_state, *, undo_debt=False):
+    def _choose_scored_candidate(self, candidates, sim_state, *, undo_debt=False, undo_slot=False):
+        if undo_slot:
+            candidates = [replace(c, terms=replace(
+                c.terms, scalar_score=c.terms.scalar_score + self.config.slot_weight * c.terms.slot_penalty
+            )) for c in candidates]
         if undo_debt:
             candidates = [replace(c, terms=replace(
                 c.terms, scalar_score=c.terms.scalar_score + c.terms.access_debt_penalty
@@ -2209,6 +2253,24 @@ class SchedulerV1:
             self.access_debt_selected_count += 1
             self.access_debt_volume_sum += terms.access_dead_volume_mm3
             self.access_debt_area_sum += terms.access_dead_area_mm2
+
+    def _record_slot_choice(self, penalty: float) -> None:
+        if self.config.slot_weight > 0:
+            self.slot_selected_count += 1
+            self.slot_selected_sum += penalty
+
+    def collect_slot_metrics(self) -> dict[str, Any]:
+        import numpy as np
+        times = self.slot_candidate_ms
+        return dict(
+            enabled=self.config.slot_weight > 0, weight=self.config.slot_weight,
+            min_mm=self.config.slot_min_mm, selected_count=self.slot_selected_count,
+            selected_penalty_mean=self.slot_selected_sum / max(1, self.slot_selected_count),
+            changed_choices=self.slot_changed_choices, measured_candidates=len(times),
+            candidate_mean_ms=float(np.mean(times)) if times else 0.0,
+            candidate_p95_ms=float(np.percentile(times, 95)) if times else 0.0,
+            choice_comparison="greedy: same slate with H1; beam: explored frontier before pruning, undo cumulative H2 cost; not a full search replay",
+        )
 
     def collect_access_debt_metrics(self) -> dict[str, Any]:
         import numpy as np
