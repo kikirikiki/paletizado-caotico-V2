@@ -176,6 +176,9 @@ def run_task(task: dict) -> dict:
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
     result.update(n_violations=len(violations), violations=violations,
                   decision_timing=payload["metrics"]["decision_timing"],
+                  hard_cap_hits=payload["metrics"]["pallet_kpis"].get("hard_cap_hits", 0),
+                  micro_plan={key: value for key, value in payload["metrics"]["pallet_kpis"].items()
+                              if key.startswith("micro_plan_")},
                   access_debt=payload["metrics"]["pallet_kpis"].get("access_debt", {}),
                   n_boxes_input=len(originals), n_unplaced=len(originals) - result["boxes_placed"],
                   deadline_cutoffs_count=payload["metrics"]["pallet_kpis"]["deadline_cutoffs_count"],
@@ -234,6 +237,7 @@ def generate_summary(folder: Path) -> dict:
                        decision_mean_ms=stats([row["decision_timing"]["mean_ms"] for row in rows]),
                        decision_p95_ms=stats([row["decision_timing"]["p95_ms"] for row in rows]),
                        violations_total=sum(row["n_violations"] for row in rows),
+                       hard_cap_hits_total=sum(row.get("hard_cap_hits", 0) for row in rows),
                        violation_codes={},
                        undefined_kpi_seeds=[row["seed"] for row in rows if row["kpi"] is None])
         for row in rows:
@@ -285,7 +289,7 @@ def render_summary(summary: dict) -> str:
             lines.append(f"| {name} | 0 | N/D | N/D | N/D |")
     lines += ["", "Validación física (sin relajar):"]
     for name, row in summary["configs"].items():
-        lines.append(f"- {name}: {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")
+        lines.append(f"- {name}: hard_cap_hits={row.get('hard_cap_hits_total', 0)}; {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")
     lines += ["", "Las seeds y parámetros son fijos. Los límites de tiempo del simulador pueden hacer depender decisiones de la carga de CPU; los cortes se registran y el tiempo es observacional."]
     return "\n".join(lines) + "\n"
 

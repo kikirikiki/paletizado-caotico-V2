@@ -55,6 +55,8 @@ class SchedulerConfig:
     hard_floor_phase_lookahead_items: int = 8
     hard_floor_phase_stand_mix_bonus: float = 0.0
     micro_plan_enabled: bool = False
+    micro_plan_node_budget: int = 0
+    micro_plan_hard_cap_ms: int = 10000
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -66,6 +68,11 @@ class SchedulerConfig:
     batchfill_greedy_topk: int = 12
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.micro_plan_node_budget, int) or self.micro_plan_node_budget < 0
+                or not isinstance(self.micro_plan_hard_cap_ms, int) or self.micro_plan_hard_cap_ms <= 0):
+            raise ValueError("micro_plan_node_budget must be a nonnegative int and hard_cap_ms a positive int")
+        if self.micro_plan_enabled and self.micro_plan_node_budget > 0 and self.max_seconds_per_item > 0:
+            raise ValueError("Deterministic microplan requires max_seconds_per_item=0")
         if self.access_debt_mode not in ("penalty", "filter"):
             raise ValueError("access_debt_mode must be penalty or filter")
         if not 0 <= self.access_debt_weight < float("inf") or self.access_debt_band_mm < 0:
@@ -244,6 +251,9 @@ class SchedulerV1:
         self.micro_plan_time_ms_max = 0.0
         self.micro_plan_time_ms_count = 0
         self.micro_plan_nodes_expanded_total = 0
+        self.micro_plan_nodes_expanded: list[int] = []
+        self.micro_plan_times_ms: list[float] = []
+        self.hard_cap_hits = 0
         self.micro_plan_depth_effective_sum = 0.0
         self.micro_plan_depth_effective_count = 0
         self.micro_plan_best_seq_len_hist: dict[int, int] = {}
@@ -283,6 +293,26 @@ class SchedulerV1:
         self.batchfill_selected_boxes_count = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
+        if not (self.config.micro_plan_enabled and self.config.micro_plan_node_budget > 0):
+            return self._choose_action_impl(sim_state)
+        started = time.perf_counter()
+        hard_deadline = started + self.config.micro_plan_hard_cap_ms / 1000.0
+        try:
+            return self._choose_action_impl(sim_state, hard_deadline=hard_deadline)
+        finally:
+            ended = time.perf_counter()
+            self._record_micro_time((ended - started) * 1000.0)
+            hit = ended >= hard_deadline
+            self.hard_cap_hits += int(hit)
+            self.last_micro_plan_stats["hard_cap_hits"] = int(hit)
+            if hit:
+                self.last_micro_plan_stats.update(cutoff=True, cutoff_reason="hard_cap")
+                self.last_eval_stats.update(cutoff=True, cutoff_reason="hard_cap")
+            self.last_eval_stats["micro_plan"] = dict(self.last_micro_plan_stats)
+
+    def _choose_action_impl(
+        self, sim_state: SchedulerSimState, *, hard_deadline: float | None = None,
+    ) -> PickPlan | None:
         self.last_blocked_pallets = {}
         self.last_deadlock = False
         self.last_deadlock_item = None
@@ -293,8 +323,8 @@ class SchedulerV1:
         self._rebuild_spatial_state(sim_state.pallets)
         k = max(1, int(self.config.lookahead_k))
 
-        deadline = None
-        if self.config.time_budget_ms and self.config.time_budget_ms > 0:
+        deadline = hard_deadline
+        if hard_deadline is None and self.config.time_budget_ms and self.config.time_budget_ms > 0:
             deadline = time.perf_counter() + (float(self.config.time_budget_ms) / 1000.0)
 
         micro_enabled = bool(self.config.micro_plan_enabled)
@@ -304,13 +334,15 @@ class SchedulerV1:
             micro_start = time.perf_counter()
             micro_plan, micro_stats, micro_slack_stats = self._choose_action_micro(sim_state, deadline)
             micro_elapsed_ms = (time.perf_counter() - micro_start) * 1000.0
-            self._record_micro_time(micro_elapsed_ms)
+            if hard_deadline is None:
+                self._record_micro_time(micro_elapsed_ms)
 
             self.last_micro_plan_stats = dict(micro_stats)
             self.last_micro_feasible_first_candidates = int(
                 micro_stats.get("feasible_first_candidates", 0) or 0
             )
             self.micro_plan_nodes_expanded_total += int(micro_stats.get("nodes_expanded", 0) or 0)
+            self.micro_plan_nodes_expanded.append(int(micro_stats.get("nodes_expanded", 0) or 0))
             self.micro_plan_depth_effective_sum += float(micro_stats.get("depth_effective", 0.0) or 0.0)
             self.micro_plan_depth_effective_count += 1
             best_seq_len = int(micro_stats.get("best_seq_len", 0) or 0)
@@ -338,6 +370,8 @@ class SchedulerV1:
 
             self.micro_plan_fallback_greedy += 1
 
+        if hard_deadline is not None and time.perf_counter() >= hard_deadline:
+            return None
         plan = self._choose_action_greedy(sim_state, deadline=deadline, lookahead_k=k)
         if micro_stats:
             self.last_eval_stats["micro_plan"] = dict(micro_stats)
@@ -353,6 +387,7 @@ class SchedulerV1:
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
         elapsed = max(0.0, float(elapsed_ms))
+        self.micro_plan_times_ms.append(elapsed)
         self.micro_plan_time_ms_sum += elapsed
         self.micro_plan_time_ms_count += 1
         if self.micro_plan_time_ms_min is None:
@@ -622,6 +657,8 @@ class SchedulerV1:
         sim_state: SchedulerSimState,
         deadline: float | None,
     ) -> tuple[PickPlan | None, dict[str, Any], SlackDecisionStats | None]:
+        node_budget = self.config.micro_plan_node_budget
+        deadline_reason = "hard_cap" if node_budget > 0 else "time_budget"
         depth_limit = max(1, int(self.config.micro_plan_depth))
         beam_width = max(1, int(self.config.micro_plan_width))
         topk_per_step = max(1, int(self.config.micro_plan_topk_per_step))
@@ -658,14 +695,14 @@ class SchedulerV1:
         for depth in range(depth_limit):
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
-                cutoff_reason = "time_budget"
+                cutoff_reason = deadline_reason
                 break
 
             next_beam: list[_BeamNode] = []
             for node in beam:
                 if deadline is not None and time.perf_counter() >= deadline:
                     cutoff = True
-                    cutoff_reason = "time_budget"
+                    cutoff_reason = deadline_reason
                     break
 
                 actions = self._enumerate_beam_actions(node.ramps)
@@ -676,8 +713,16 @@ class SchedulerV1:
                 for action in actions:
                     if deadline is not None and time.perf_counter() >= deadline:
                         cutoff = True
-                        cutoff_reason = "time_budget"
+                        cutoff_reason = deadline_reason
                         break
+                    # One budget unit is one attempted action, including infeasible ones.
+                    # Finalize the partial depth; never start attempt budget + 1.
+                    if node_budget > 0 and nodes_expanded >= node_budget:
+                        cutoff = True
+                        cutoff_reason = "node_budget"
+                        break
+                    if node_budget > 0:
+                        nodes_expanded += 1
                     expansion = self._expand_beam_node(
                         node=node,
                         action=action,
@@ -685,7 +730,8 @@ class SchedulerV1:
                     )
                     if expansion is None:
                         continue
-                    nodes_expanded += 1
+                    if node_budget == 0:
+                        nodes_expanded += 1  # Preserve legacy feasible-node telemetry.
                     expansions.append(expansion)
 
                 if expansions:
@@ -738,6 +784,8 @@ class SchedulerV1:
                             )
                             stats = {
                                 "enabled": True,
+                                "node_budget": int(node_budget),
+                                "hard_cap_hits": int(cutoff_reason == "hard_cap"),
                                 "score_mode": str(self.config.score_mode),
                                 "depth_limit": int(depth_limit),
                                 "width": int(beam_width),
@@ -817,6 +865,8 @@ class SchedulerV1:
         best_seq_len = int(best_node.placed_count)
         stats = {
             "enabled": True,
+            "node_budget": int(node_budget),
+            "hard_cap_hits": int(cutoff_reason == "hard_cap"),
             "score_mode": str(self.config.score_mode),
             "depth_limit": int(depth_limit),
             "width": int(beam_width),
@@ -1059,6 +1109,8 @@ class SchedulerV1:
             return None
 
     def _batchfill_deadline(self, deadline: float | None) -> float | None:
+        if self.config.micro_plan_enabled and self.config.micro_plan_node_budget > 0:
+            return deadline  # Only the hard cap may interrupt H3.
         budget_ms = max(0, int(self.config.batchfill_budget_ms))
         local_deadline = time.perf_counter() + (float(budget_ms) / 1000.0)
         if deadline is None:

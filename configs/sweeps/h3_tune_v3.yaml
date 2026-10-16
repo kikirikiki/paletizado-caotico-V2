@@ -1,0 +1,13 @@
+# Ampliación única de H3 hacia presupuestos menores (ganadora de h3_tune_v2 en el borde n=100). Director (D-011).
+- name: h1_w0.25_b600
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600}
+- name: h3_n25_d3_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 25, micro_depth: 3, micro_width: 8, micro_topk: 15}
+- name: h3_n50_d3_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 50, micro_depth: 3, micro_width: 8, micro_topk: 15}

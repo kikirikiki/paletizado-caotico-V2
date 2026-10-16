@@ -82,6 +82,8 @@ REQUIRED_PARAM_KEYS = {
     "max_tries_per_item",
     "micro_depth",
     "micro_plan",
+    "micro_plan_node_budget",
+    "micro_plan_hard_cap_ms",
     "micro_topk",
     "micro_width",
     "min_support",
