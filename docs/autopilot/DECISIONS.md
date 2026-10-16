@@ -63,6 +63,13 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - **[REVISAR]** El denominador (1240×840 vs 1200×800 vs el histórico 1240×820) mueve el KPI absoluto entre 1,5 y
   5 pp. Las ganancias relativas y el % de gap cerrado no dependen de esta elección.
 
+## D-009 · Seeds de ajuste distintas de las de evaluación (2026-10-16)
+- Contexto: cada técnica de la Fase 1 tiene hiperparámetros; ajustarlos con las mismas 10 seeds con las que se
+  declara la mejora sobreestima la ganancia.
+- Opción: ajuste con seeds 1001–1010; la configuración ganadora se elige solo con ellas y se evalúa una única vez con
+  las 10 seeds de referencia (`REFERENCE_SEEDS`). La mejora oficial es la de la evaluación (comparación pareada, IC95).
+- Justificación: criterio conservador anti-autoengaño (§7).
+
 ## D-008 · Codex no puede commitear: commitea el director tras revisar (2026-10-16)
 - Contexto: el sandbox `workspace-write` de Codex deja `.git` en solo lectura (incluso con `--add-dir`):
   `git add` falla con "Read-only file system".
