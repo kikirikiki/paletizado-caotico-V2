@@ -463,3 +463,65 @@ PY
 
 No se han modificado la métrica, el validador ni los Excel. Los resultados en
 `out/` quedan como artefactos locales; no se realizan commits ni push.
+
+
+# Cotas superiores — parte B: techo alcanzable offline (clarividente)
+
+Información completa: las 186 cajas disponibles desde el inicio y orden de colocación libre. Mismas reglas físicas que
+`arm6_4orient`: la factibilidad se comprueba con `PalletModel` del preset (soporte 0,85, accesibilidad 400 mm, gate
+stand_hw, 4 orientaciones). Código: `src/palca/study/offline_search.py` y `scripts/bound_offline.py` (tests en
+`tests/test_offline_search.py`). Implementado por Codex (gpt-6-astra). El trabajo se cortó dos veces por la cuota de Codex;
+esta sección la redacta el director con los artefactos producidos (DECISIONS D-011, D-013).
+
+Es un **techo alcanzable** (cota inferior del óptimo real con información completa), no una cota superior formal: más búsqueda
+puede subirlo.
+
+## Métodos y resultados (verificados de forma independiente)
+
+Cada resultado se verificó con `scripts/autopilot/verify_offline_witness.py`, que no usa el packer. El verificador comprueba:
+- que el multiconjunto de dimensiones colocadas es igual al del Excel (cada caja exactamente una vez);
+- el validador congelado: envolvente, solapes, cara apoyada y soporte ≥ 0,85;
+- la regla de accesibilidad de 400 mm, re-implementada en el orden de colocación.
+
+| Método | KPI oficial (palets cerrados) | Σvol/(n·V) | Palets | CPU | Comando |
+|---|---|---|---|---|---|
+| Orden de entrada optimizado (búsqueda local) + política de producción | 68,34 % | — | 10 | 376 s | `scripts/bound_offline.py --method order --evaluations 8 --cpu-seconds 900 --out out/bounds/offline_order.json` |
+| Beam palet a palet (ancho 16, top-M 8, scorer de producción) | 71,64 % | 67,16 % | 10 | 891 s | `scripts/bound_offline.py --method beam --width 16 --top-m 8 --cpu-seconds 1600 --out out/bounds/offline_beam_production.json` |
+| **Columnas por plantilla de planta** (beam por columna, ancho 8, plantilla 1) | **78,87 %** | 74,62 % | **9** | 29 s | `scripts/bound_offline.py --method columns --width 8 --templates 1 --cpu-seconds 600 --out out/bounds/offline_columns_w8.json` |
+| **Columnas, testigo verificado** (versión intermedia del método, plantillas 0–2, ancho 16) | **80,40 %** | 74,62 % | **9** | 230 s | testigo: `docs/autopilot/evidence/offline_witness_columns_80p40.json` (`verify_offline_witness.py` → rc 0) |
+
+Las cuatro soluciones tienen **0 violaciones** del validador y **0 de accesibilidad**. El testigo del 80,40 % no se puede regenerar
+con el código actual: salió de una versión intermedia del script de columnas, sobrescrita antes del corte (la versión actual
+reproduce 78,35 % con los mismos argumentos). Se conserva como evidencia porque su validez no depende de cómo se generó.
+
+**Lectura.** El método de columnas fija una partición de la planta y apila columnas en ella: dos columnas planas de
+≈ 619 × 448 a lo largo de x, más tres columnas de cajas de pie en la franja de ≈ 390 mm. Con eso coloca el flujo en
+**9 palets** frente a los 11,1 de media del baseline online, y el mínimo trivial es 7. Es la confirmación offline de la
+hipótesis de carriles (RESEARCH §1, §1ter). Con reordenación libre, el último palet recibe los restos (28–45 %), así que el KPI
+de palets cerrados favorece algo al offline; por eso se reporta también Σvol/(n·V).
+
+## Tabla de headroom (arm6_4orient, KPI congelado v1.0.0)
+
+| Referencia | KPI | Δ vs baseline | Tipo |
+|---|---|---|---|
+| Baseline online `arm6_4orient` (10 seeds) | 61,89 % ± 1,32 · IC95 [60,95; 62,83] | — | medida |
+| H1 (mejor técnica online adoptada, 10 seeds) | 64,70 % · IC95 [63,47; 65,92] | +2,81 pp | medida (PR #145) |
+| Buffer k = 186 (política de producción) | 66,82 % | +4,93 pp | palanca de información |
+| H1 + micro_plan por tiempo (no determinista) | 70,90 % | +9,01 pp | palanca (D-012) |
+| Offline beam (scorer de producción) | 71,64 % | +9,75 pp | techo alcanzable |
+| Offline columnas (reproducible) | 78,87 % | +16,98 pp | techo alcanzable |
+| **Offline columnas (testigo verificado)** | **80,40 %** | **+18,51 pp** | **techo alcanzable usado para el gap** |
+| Cota formal por palet (relajada) | 100 % (flujo) / 96,97 % (familia dominante) | — | cota superior formal, no informativa |
+| Cota trivial de palets | ≥ 6,72 → 7 palets | — | cota formal |
+
+**Gap de referencia = 80,40 − 61,89 = 18,51 pp** (se usa el techo mayor, lo que hace las metas más exigentes; D-013). Si una
+búsqueda offline posterior supera el 80,40 %, el gap y las metas se recalculan al alza.
+
+| Meta | Definición | Umbral |
+|---|---|---|
+| T1 (obligatoria) | ≥ 50 % del gap, algoritmo puro en arm6_4orient | **≥ 71,15 %** |
+| T2 (ambiciosa) | ≥ 90 % del gap (**≥ 78,55 %**), o ≥ 80 % absoluto en una configuración físicamente justificable con palancas cuantificadas | ≥ 78,55 % / ≥ 80 % |
+| T3 (moonshot) | 1,5 × baseline, o refutación formal o empírica con margen (D-010) | ≥ 92,84 % |
+
+Sobre T3: el mejor techo alcanzable encontrado (80,40 %) queda 12,4 pp por debajo del moonshot. Hace falta más esfuerzo de
+búsqueda offline y el margen exigido por D-010 (≥ 10 pp, con su IC) antes de declararlo refutado empíricamente.
