@@ -48,6 +48,12 @@ de la altura de apoyo del candidato. Cuando una pila supera en 400 mm a una zona
 **inaccesible para siempre**. El gantry (sin regla) recupera 5 pp, pero sigue con 31 % de espacio libre: la franja de
 395 mm (840 − 445) solo admite cajas de pie o estrechas, y los pozos estrechos no cumplen el soporte 0,85.
 
+Comprobación descartada (2026-10-16, exploratoria, 10 seeds de referencia, métrica congelada): el gate
+`stand_hw_height_margin_gate_mm` (cajas de pie solo cerca del techo) NO explica el suelo vacío. Con gate 800 / 1600 / 2400
+el KPI cambia +0,51 / −1,04 / −0,54 pp frente a 400, sin significación (IC95 pareados con 0 dentro). El scorer actual
+no aprovecha las cajas de pie aunque se le permitan antes: el problema es de decisión (dónde y cuándo), no de permiso.
+El gate 400 reprodujo el baseline exacto (61,89 %) con la CPU cargada → el simulador es determinista en la práctica.
+
 Hipótesis de la Fase 1, por orden:
 - H1 "deuda de accesibilidad": penalizar (o prohibir, con lookahead) las colocaciones que dejan zonas bajas
   rellenables a más de 400 mm por debajo de una vecina, es decir, mantener el crecimiento por niveles. Techo de referencia: el gap brazo↔gantry (≈ 5 pp).

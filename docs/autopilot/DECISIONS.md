@@ -63,6 +63,26 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - **[REVISAR]** El denominador (1240×840 vs 1200×800 vs el histórico 1240×820) mueve el KPI absoluto entre 1,5 y
   5 pp. Las ganancias relativas y el % de gap cerrado no dependen de esta elección.
 
+## D-011 · Con Codex sin cuota, el director ejecuta sweeps ya revisados (2026-10-16)
+- Contexto: Codex agotó su límite de uso (vuelve a las 19:01) con el segundo ajuste de H1 a medias (135/170 tareas) y el
+  job 04B (techo offline) recién empezado (solo un borrador sin terminar de `offline_search.py`, sin commitear).
+- Opción: el director completa y lanza sweeps con `scripts/run_sweep.py` (código ya revisado y commiteado) y configs YAML
+  nuevas, sin tocar código de `src/`. El desarrollo de código (04B, H2, canto) espera a Codex.
+- Justificación: ejecutar un benchmark ya implementado es mecánico y no infringe "el director no escribe código de
+  producción"; esperar 4 h con la CPU parada no aporta trazabilidad.
+- Resultado: H1 ajuste 2/3 y evaluación final → ganadora w0,25 b600: +2,81 pp [1,04; 4,57] (docs/autopilot/H1_ACCESS_DEBT.md).
+
+## D-010 · Criterio para "T3 refutado" (2026-10-16)
+- Contexto: las cotas formales por relajación (04A: DFF + cortes horizontales, sin soporte ni accesibilidad) dan
+  U* = 100 % para el flujo y 96,97 % para la familia dominante: no pueden refutar el 92,8 % del moonshot. El prompt admite
+  "demostración formal (cota con margen de error)".
+- Opción: T3 se considerará refutado si (a) una cota formal válida queda por debajo de 1,5 × baseline, o, en su defecto,
+  (b) el techo alcanzable con información completa (búsqueda offline clarividente con las restricciones físicas reales,
+  esfuerzo de búsqueda documentado y creciente sin mejora material) queda por debajo con un margen amplio
+  (≥ 10 pp) y con su IC95 sobre seeds/reinicios. (b) se etiqueta siempre como cota empírica, no como demostración.
+- Justificación: es la lectura más estricta posible del prompt que sigue siendo calculable.
+- **[REVISAR]** Si se prefiere exigir solo (a), la condición de parada 2 podría no cumplirse nunca.
+
 ## D-009 · Seeds de ajuste distintas de las de evaluación (2026-10-16)
 - Contexto: cada técnica de la Fase 1 tiene hiperparámetros; ajustarlos con las mismas 10 seeds con las que se
   declara la mejora sobreestima la ganancia.

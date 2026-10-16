@@ -1,59 +1,85 @@
 # PROGRESS — autopiloto de compactidad (fuente única de verdad del estado)
 
-Última actualización: 2026-10-16 · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, ver DECISIONS D-001/D-008)
+Última actualización: 2026-10-16 ~15:15 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
 
 ## Cómo reanudar
 1. Leer este archivo entero, `docs/autopilot/DECISIONS.md` y `docs/autopilot/RESEARCH.md`.
-2. Worktree del autopiloto: `~/code/Paletizador/09_Software/paletizado-autopilot` (WSL). No usar el checkout
-   principal (`paletizado-caotico-V2`, rama del usuario `study/gantry-orientations`).
-3. Verificar: `git -C <worktree> status -sb`, `git log --oneline -10`, trabajos Codex en
-   `~/code/Paletizador/09_Software/autopilot_logs/` (`<job>.exit` existe ⇒ terminado; `<job>.last.md` = resultado).
-4. Delegar: `bash scripts/autopilot/codex_job.sh <job> <modelo> <effort> <spec>` (CLI `~/.local/bin/codex` 0.163;
-   modelos `gpt-6.1-sol` / `gpt-6-astra`). Codex NO commitea (D-008): revisar diff, smoke y commitear a mano.
+2. Worktrees (WSL): **1** = `~/code/Paletizador/09_Software/paletizado-autopilot`, **2** = `.../paletizado-autopilot-2`.
+   No usar el checkout principal (`paletizado-caotico-V2`, rama del usuario `study/gantry-orientations`).
+3. Verificar: `git -C <worktree> status -sb`, `git log --oneline -10`; trabajos Codex en
+   `~/code/Paletizador/09_Software/autopilot_logs/` (`<job>.exit` existe ⇒ terminado; `<job>.last.md` = resultado;
+   el 1.er evento de `<job>.jsonl` lleva el thread id para `resume`).
+4. Delegar: `bash scripts/autopilot/codex_job.sh <job> <modelo> <effort> <spec> [thread_id]` (CLI `~/.local/bin/codex` 0.163;
+   modelos `gpt-6.1-sol` / `gpt-6-astra`; worktree 2 con `WT=<ruta>`). Codex NO commitea (D-008).
 5. Continuar por **Siguiente acción**. No repetir nada marcado como completado.
 
 ## Objetivo vigente
-- Fase actual: **2bis completada → Fase 0** (métrica congelada, sweep, cotas).
-- Metas T1/T2/T3: se fijan al terminar la Fase 0 (pendiente de las cotas).
+- Fase 0 casi cerrada (falta B: techo offline). Fase 1 empezada (H1 adoptada).
+- Metas T1/T2/T3: se fijan cuando esté B (gap = techo offline − baseline). Provisional: T3 = 1,5 × 61,89 = **92,84 %**.
 - Configuración oficial: `arm6_4orient` (= `planar+stand_hw`, `accessibility_delta_mm=400`; D-004).
 
-## Mejor resultado actual por configuración (KPI oficial D-005: vol. real / 1240×840×2400, solo palets cerrados)
-| Config | KPI medio | Fuente | Estado |
+## Mejor resultado actual por configuración (KPI congelado v1.0.0: vol. real / 1240×840×2400, palets cerrados, 10 seeds de referencia)
+| Config | KPI | Comando / carpeta | Estado |
 |---|---|---|---|
-| arm6_4orient (baseline) | 61,9 % (101 palets, 10 seeds) | exploración rápida del director | provisional, se re-mide con la métrica congelada (spec 03) |
-| gantry_4orient (contraste) | 66,8 % (95 palets) | ídem | informativo |
+| arm6_4orient (baseline oficial) | 61,89 % ± 1,32 · IC95 [60,95; 62,83] · 75 ms/dec (p95 155) | `run_sweep.py --configs configs/sweeps/baseline.yaml --seeds 10 --workers 15 --name baseline_v1 --baseline arm6_4orient` → out/sweeps/baseline_v1 (wt1) | verificado |
+| **arm6_4orient + H1 (w0,25 b600) — MEJOR** | **64,70 % · IC95 [63,47; 65,92] · +2,81 pp [1,04; 4,57]** · 66 ms/dec (p95 146) | `run_sweep.py --configs configs/sweeps/h1_eval2.yaml --seeds 10 --workers 15 --name h1_eval2 --baseline arm6_4orient` → out/sweeps/h1_eval2 (wt2) | adoptada (D-009/D-011) |
+| gantry_4orient (contraste) | 66,92 % ± 2,26 (+5,03 pp) | baseline_v1 | informativo; H1 no actúa con delta 0 |
+| arm6_planar (control) | 47,42 % | baseline_v1 | control |
+
+## Cotas y palancas (Fase 0)
+| Cota / palanca | Resultado | Fuente |
+|---|---|---|
+| Trivial (Σvol / V) | ≥ 6,716 palets → mínimo 7 | docs/COTAS.md (A) |
+| Formal por palet (DFF + cortes horizontales, sin soporte/accesibilidad) | U* = 100 % flujo; 96,97 % familia dominante → no refuta T3 | docs/COTAS.md (A), `scripts/bound_formal.py` |
+| Buffer k (política de producción) | k=30 +1,13 · k=75 +3,04 · **k=186 66,82 % (+4,93 pp)** (cortes 900 ms con k ≥ 75 → conservador) | out/sweeps/bound_buffer_k_v1 (wt1) |
+| N palets abiertos (política de producción) | N=2 −1,98 · N=3 −5,73 · N=4 −5,96 pp: empeora con el scorer actual (no es cota) | out/sweeps/bound_open_pallets_v1 (wt1) |
+| Techo offline clarividente (B) | **PENDIENTE** (job 04B murió por cuota de Codex) | — |
 
 ## Ramas y PRs (apilados, D-003)
 | Rama | Base | Objetivo | PR | Estado |
 |---|---|---|---|---|
-| feat/parametros-congelados | feat/fifo-scorer-coherencia | PARAMETROS.md, preset arm6_4orient, test de caras, perfil del flujo | — | revisado, commit + PR en curso |
-| feat/metrica-congelada | feat/parametros-congelados | métrica congelada + validador físico | — | spec 02 lista |
-| feat/sweep-paralelo | feat/metrica-congelada | run_sweep.py + baseline re-medido | — | spec 03 lista |
-| feat/cotas-superiores | feat/sweep-paralelo | cota formal, offline, buffer k, N palets | — | spec 04 lista |
+| feat/parametros-congelados | feat/fifo-scorer-coherencia | parámetros, preset arm6_4orient, caras | #141 | abierto |
+| feat/metrica-congelada | feat/parametros-congelados | métrica v1.0.0 + validador | #142 | abierto |
+| feat/sweep-paralelo | feat/metrica-congelada | run_sweep + baseline oficial | #143 | abierto |
+| feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + C (B pendiente) | — | commits 2483261 (C), 382ee4f (A); PR a abrir con A+C, B se añade después |
+| wip/h1-deuda-accesibilidad (wt2) | feat/sweep-paralelo | H1 | — | listo para commit; rebasar sobre feat/cotas-superiores → feat/h1-deuda-accesibilidad + PR |
+| wip/cota-formal | — | (integrada en cotas, ya no se usa) | — | — |
 
 ## Trabajos Codex
-| Job | Spec | Modelo / effort | Estado |
-|---|---|---|---|
-| 01_parametros | specs/01_parametros_congelados.md | gpt-6.1-sol / high | terminado, revisado |
+| Job | Spec | Modelo / effort | WT | Estado |
+|---|---|---|---|---|
+| 01_parametros, 02_metrica, 03_sweep | specs/01–03 | sol / high | 1 | terminados → #141–#143 |
+| 04A_formal | specs/04A | astra / xhigh | 2 | terminado → 382ee4f |
+| 04C_palancas | specs/04C | sol / high | 1 | terminado → 2483261 |
+| 05_h1 (+05b resume) | specs/05 + autopilot_logs/05b_delta.md | sol / high | 2 | terminado (05b cortado por cuota; completado por el director, D-011) |
+| **04B_offline** | autopilot_logs/04B_spec.md | astra / xhigh | 1 | **CORTADO por cuota de Codex** (14:4x). Dejó `src/palca/study/offline_search.py` sin terminar (sin trackear). Relanzar tras las 19:01 con resume del thread de `04B_offline.jsonl` |
+
+**Codex sin cuota hasta las 19:01 CEST (2026-10-16).** Delegaciones pendientes, en orden: 04B (resume), 07 H2 carriles
+(sobre H1), 06 orientación canto (palanca PLAN_B + contraste gantry 6 orientaciones reales).
 
 ## Sweeps lanzados
-(ninguno todavía)
+| Sweep | WT | Estado |
+|---|---|---|
+| baseline_v1 | 1 | hecho |
+| bound_buffer_k_v1, bound_open_pallets_v1 | 1 | hechos |
+| h1_tune (130), h1_eval (30) | 2 | hechos (Codex) |
+| h1_tune2 (170), h1_tune3 (30), h1_eval2 (20) | 2 | hechos (director, D-011) |
 
 ## Hallazgos ya establecidos (no rehacer)
-- Flujo canónico: 186 cajas, 111 referencias, 35 familias a 25 mm, Σ vol = 16,79 m³ → cota trivial 6,72 palets de
-  1240×840×2400. Referencia más frecuente 605×445×350 (16).
-- Envolvente real del código: **1240 × 840** (el 1240×820 histórico era un error).
-- Línea base: ~80–120 ms por decisión, 15–23 s por flujo; los palets cierran casi siempre por `CLOSE_HEIGHT_FULL`.
-- **Causa dominante de la pérdida (RESEARCH §1bis):** 36 % de la envolvente es espacio libre sobre el perfil
-  (torres), solo 2 % son huecos internos; 18,7 % del suelo queda sin cubrir. La regla de accesibilidad (delta 400) deja
-  zonas bajas inaccesibles para siempre.
-- `stand_hl` (PR #139) duplica la geometría de `stand_hw` (D-004).
-- Palets llenos del operario real ≈ 74–76 % equivalentes (si altura ≤ 2400; no verificado).
+- Flujo: 186 cajas, 111 referencias, Σ vol 16,79 m³; envolvente real 1240 × 840 (el 820 histórico era un error).
+- Causa dominante de pérdida (RESEARCH §1bis): 36 % espacio libre sobre el perfil (torres), 2 % huecos internos, 18,7 % del
+  suelo sin cubrir; la regla de accesibilidad (400 mm) deja zonas bajas inaccesibles → H1 la ataca (+2,8 pp).
+- `stand_hl` (PR #139) duplica `stand_hw` (D-004). Gate stand_hw no es palanca. Simulador determinista.
+- H1: banda 200 mm empeora; banda ≥ 445 mejora; paisaje plano con ruido ~2 pp/seed.
 
 ## Siguiente acción
-1. Commit del PR 1 (smoke antes), push y `gh pr create --base feat/fifo-scorer-coherencia`.
-2. Crear `feat/metrica-congelada` y lanzar job 02 (`gpt-6.1-sol`, high).
-3. Mientras: preparar la división de la spec 04 en jobs 04A (formal, astra xhigh), 04B (offline, astra xhigh), 04C (palancas, sol high).
+1. (ahora, sin Codex) Commit de docs en wt1 → push feat/cotas-superiores → PR 4 (A + C; B pendiente) con base feat/sweep-paralelo.
+2. (ahora) Commit de H1 en wt2 → rebase sobre feat/cotas-superiores → rama feat/h1-deuda-accesibilidad → smoke → push → PR 5.
+3. (ahora) Análisis de los peores palets con H1 para orientar H2/H3 (sin código de producción).
+4. (≥ 19:01) Resume 04B; después 07 (H2) y 06 (canto).
 
 ## Registro de técnicas cerradas
-(ninguna todavía)
+| Técnica | Resultado (seeds de referencia) | Decisión |
+|---|---|---|
+| Gate stand_hw 800/1600/2400 | +0,5 / −1,0 / −0,5 pp, n.s. | descartada (no es palanca) |
+| H1 deuda de accesibilidad (w0,25, b600) | +2,81 pp [1,04; 4,57], 0 violaciones, sin coste de tiempo | **adoptada** |
