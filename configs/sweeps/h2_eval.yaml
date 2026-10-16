@@ -1,0 +1,30 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_h3
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 100
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+- name: h2_w0.1_m250
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 100
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    slot_weight: 0.1
+    slot_min_mm: 250

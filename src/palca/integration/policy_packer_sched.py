@@ -182,6 +182,8 @@ class PolicyPackerScheduler:
         access_debt_weight: float = 0.0,
         access_debt_band_mm: int = 300,
         access_debt_mode: str = "penalty",
+        slot_weight: float = 0.0,
+        slot_min_mm: int = 355,
         tower_z_band_mm: int = 0,
         tower_z_penalty_weight: float = 0.0,
         spatial_xy_bin_mm: int = 150,
@@ -233,6 +235,8 @@ class PolicyPackerScheduler:
             access_debt_weight=access_debt_weight,
             access_debt_band_mm=access_debt_band_mm,
             access_debt_mode=access_debt_mode,
+            slot_weight=slot_weight,
+            slot_min_mm=slot_min_mm,
             tower_z_band_mm=tower_z_band_mm,
             tower_z_penalty_weight=tower_z_penalty_weight,
             spatial_xy_bin_mm=spatial_xy_bin_mm,
@@ -839,6 +843,7 @@ class PolicyPackerScheduler:
         )
 
         kpis["access_debt"] = self._scheduler.collect_access_debt_metrics()
+        kpis["slots"] = self._scheduler.collect_slot_metrics()
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
         kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)
