@@ -46,6 +46,9 @@ PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_PATH = Path("configs/benchmarks/one_pallet_canonical.json")
 
 REQUIRED_PARAM_KEYS = {
+    "access_debt_weight",
+    "access_debt_band_mm",
+    "access_debt_mode",
     "arrival_mode",
     "balance_weight",
     "batchfill_budget_ms",

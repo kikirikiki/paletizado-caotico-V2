@@ -23,7 +23,7 @@ import re
 import shlex
 import subprocess
 import sys
-from time import perf_counter
+from time import perf_counter, sleep
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -111,13 +111,18 @@ def write_json(path: Path, value) -> None:
 
 
 @contextmanager
-def sweep_lock(path: Path = LOCK_PATH):
+def sweep_lock(path: Path = LOCK_PATH, retry_seconds: float = 0):
     # Nunca borrar el inode: otro proceso podría conservar un descriptor abierto.
     with Path(path).open("a+") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError(f"Ya hay un sweep activo: bloqueo {path} ocupado") from exc
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if retry_seconds <= 0:
+                    raise RuntimeError(f"Ya hay un sweep activo: bloqueo {path} ocupado") from exc
+                print(f"[sweep] bloqueo {path} ocupado; reintento en {retry_seconds:g} s", flush=True)
+                sleep(retry_seconds)
         try:
             yield
         finally:
@@ -171,6 +176,7 @@ def run_task(task: dict) -> dict:
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
     result.update(n_violations=len(violations), violations=violations,
                   decision_timing=payload["metrics"]["decision_timing"],
+                  access_debt=payload["metrics"]["pallet_kpis"].get("access_debt", {}),
                   n_boxes_input=len(originals), n_unplaced=len(originals) - result["boxes_placed"],
                   deadline_cutoffs_count=payload["metrics"]["pallet_kpis"]["deadline_cutoffs_count"],
                   wall_time_s=perf_counter() - started, worker_pid=os.getpid(),
@@ -291,6 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     seeds.add_argument("--seeds", type=int, default=10)
     seeds.add_argument("--seed-list")
     parser.add_argument("--workers", type=int, default=15)
+    parser.add_argument("--lock-retry-seconds", type=float, default=0, help="Espera entre reintentos de flock (0: error inmediato)")
     parser.add_argument("--name", default="sweep")
     parser.add_argument("--baseline")
     return parser
@@ -307,7 +314,7 @@ def main(argv=None) -> None:
         if args.baseline and args.baseline not in {config["name"] for config in configs}:
             raise ValueError("--baseline no figura en configs")
         folder = ROOT / "out" / "sweeps" / safe_name(args.name)
-        with sweep_lock():
+        with sweep_lock(retry_seconds=args.lock_retry_seconds):
             head = subprocess.check_output(["git", "--no-pager", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
             code_hash = source_hash()
             tasks = [make_task(config, seed, folder, head, code_hash) for config in configs for seed in seeds]

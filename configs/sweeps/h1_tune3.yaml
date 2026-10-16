@@ -1,0 +1,13 @@
+# Ampliación única del peso para banda 600 (ganadora de h1_tune2 en el borde del peso). Ver docs/autopilot/H1_ACCESS_DEBT.md.
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_w0.35_b600
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.35, access_debt_band_mm: 600, access_debt_mode: penalty}
+- name: h1_w0.5_b600
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.5, access_debt_band_mm: 600, access_debt_mode: penalty}

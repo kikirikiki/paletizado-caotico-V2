@@ -1,0 +1,86 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_w0.25_b200
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 0.25
+    access_debt_band_mm: 200
+    access_debt_mode: penalty
+- name: h1_w0.25_b445
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 0.25
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
+- name: h1_w0.5_b200
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 0.5
+    access_debt_band_mm: 200
+    access_debt_mode: penalty
+- name: h1_w0.5_b445
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 0.5
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
+- name: h1_w1_b200
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 1
+    access_debt_band_mm: 200
+    access_debt_mode: penalty
+- name: h1_w1_b445
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 1
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
+- name: h1_w2_b200
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 2
+    access_debt_band_mm: 200
+    access_debt_mode: penalty
+- name: h1_w2_b445
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 2
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
+- name: h1_w4_b200
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 4
+    access_debt_band_mm: 200
+    access_debt_mode: penalty
+- name: h1_w4_b445
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_weight: 4
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
+- name: h1_filter_b200
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_band_mm: 200
+    access_debt_mode: filter
+- name: h1_filter_b445
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_band_mm: 445
+    access_debt_mode: filter

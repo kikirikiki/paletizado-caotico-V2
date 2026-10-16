@@ -11,6 +11,7 @@ from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring_coherencia import CoherenciaCapaScorer
+from ..scoring.access_debt import HeightField, access_debt, build_heightfield
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -39,6 +40,9 @@ class SchedulerConfig:
     heartbeat_sec: float = 1.0
     score_mode: str = "gain_frag"
     height_slack_mm: int = 0
+    access_debt_weight: float = 0.0
+    access_debt_band_mm: int = 300
+    access_debt_mode: str = "penalty"
     tower_z_band_mm: int = 0
     tower_z_penalty_weight: float = 0.0
     spatial_xy_bin_mm: int = 150
@@ -62,6 +66,10 @@ class SchedulerConfig:
     batchfill_greedy_topk: int = 12
 
     def __post_init__(self) -> None:
+        if self.access_debt_mode not in ("penalty", "filter"):
+            raise ValueError("access_debt_mode must be penalty or filter")
+        if not 0 <= self.access_debt_weight < float("inf") or self.access_debt_band_mm < 0:
+            raise ValueError("access debt weight/band must be finite and nonnegative")
         lookahead = max(1, int(self.lookahead_k))
         alias = self.pick_window
         if alias is not None:
@@ -159,6 +167,9 @@ class _ScoreTerms:
     priority_score: float
     scalar_score: float
     height_after_mm: int
+    access_dead_volume_mm3: float = 0.0
+    access_dead_area_mm2: float = 0.0
+    access_debt_penalty: float = 0.0
     tower_z_delta_mm: int = 0
     tower_z_penalty: float = 0.0
     spatial_tower_delta: int = 0
@@ -212,6 +223,11 @@ class _HardFloorScoredExpansion:
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
+        self.access_debt_selected_count = 0
+        self.access_debt_volume_sum = 0.0
+        self.access_debt_area_sum = 0.0
+        self.access_debt_changed_choices = 0
+        self.access_debt_candidate_ms: list[float] = []
         self.last_blocked_pallets: dict[int | str, str] = {}
         self.deadline_cutoffs_count = 0
         self.last_deadlock = False
@@ -363,6 +379,7 @@ class SchedulerV1:
         feasible_candidates: list[_ScoredCandidate] = []
         evaluated_by_pallet: dict[int | str, int] = {}
         feasible_by_pallet: dict[int | str, int] = {}
+        access_fields: dict[int | str, HeightField] = {}
         window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
 
@@ -482,6 +499,8 @@ class SchedulerV1:
                     preview=preview,
                     max_priority=max_priority,
                     height_after_mm=height_after_mm,
+                    pallet=pallet,
+                    access_fields=access_fields,
                 )
                 feasible_candidates.append(
                     _ScoredCandidate(
@@ -567,35 +586,17 @@ class SchedulerV1:
                     candidates=feasible_candidates,
                     min_feasible_height_after_mm=int(min_feasible_height_after_mm),
                 )
-                best_by_slack, slack_stats = choose_with_height_slack(
-                    candidates=feasible_candidates,
-                    score_mode=self.config.score_mode,
-                    height_slack_mm=int(self.config.height_slack_mm),
-                    height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
-                    gain_frag_key_fn=self._gain_frag_candidate_key,
-                )
-                if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
-                    selected = min(
-                        feasible_candidates,
-                        key=lambda candidate: self._min_height_then_gain_key(terms=candidate.terms, box=candidate.box),
-                    )
-                elif self.config.score_mode == ScoreMode.COHERENCIA_CAPA.value:
-                    _coherencia_scorer = CoherenciaCapaScorer()
-                    selected = max(
-                        feasible_candidates,
-                        key=lambda c: _coherencia_scorer.score_placement(
-                            c.plan.preview.placement,
-                            colocadas=list(
-                                getattr(sim_state.pallets.get(c.plan.pallet_id), "placements", []) or []
-                            ),
-                        )
-                        if c.plan.preview.placement is not None
-                        else -1.0,
-                    )
-                else:
-                    selected = best_by_slack
+                reference_choice = None
+                if self._access_debt_enabled():
+                    reference_choice, _ = self._choose_scored_candidate(feasible_candidates, sim_state, undo_debt=True)
+                if self.config.access_debt_mode == "filter":
+                    feasible_candidates = self._filter_access_debt(feasible_candidates)
+                selected, slack_stats = self._choose_scored_candidate(feasible_candidates, sim_state)
+                if self._access_debt_enabled() and selected is not None:
+                    self.access_debt_changed_choices += int(reference_choice.plan != selected.plan)
 
             if selected is not None:
+                self._record_access_debt_choice(selected.terms)
                 best_plan = selected.plan
                 self._record_height_decision(
                     selected_height=selected.terms.height_after_mm,
@@ -705,6 +706,9 @@ class SchedulerV1:
                     batchfill_applied_local += int(batchfill_stats["batchfill_applied"])
                     batchfill_selected_boxes_sum_local += int(batchfill_stats["selected_boxes_sum"])
                     batchfill_selected_boxes_count_local += int(batchfill_stats["selected_boxes_count"])
+
+                if self.config.access_debt_mode == "filter":
+                    expansions = self._filter_access_debt(expansions)
 
                 if depth == 0 and node.first_plan is None and expansions:
                     expansions = self._apply_spatial_tower_penalty_to_expansions(
@@ -986,6 +990,7 @@ class SchedulerV1:
             preview=preview,
             max_priority=float(action.max_priority),
             height_after_mm=height_after_mm,
+            pallet=pallet,
         )
 
         first_plan = node.first_plan
@@ -2060,6 +2065,8 @@ class SchedulerV1:
         preview: PlacementPreview,
         max_priority: float,
         height_after_mm: int,
+        pallet: PalletModel | None = None,
+        access_fields: dict[int, HeightField] | None = None,
     ) -> _ScoreTerms:
         dt_extra = selection_dt(idx, self.config.t_select_base, self.config.t_select_step)
         time_cost = time_penalty(dt_extra, self.config.time_penalty_weight)
@@ -2077,7 +2084,34 @@ class SchedulerV1:
             - starv_cost
             + priority_score
         )
+        debt_volume = debt_area = penalty = 0.0
+        if self._access_debt_enabled() and pallet is not None and preview.placement is not None:
+            placement = preview.placement
+            delta = int(getattr(pallet, "accessibility_delta_mm", 0))
+            if delta > 0:
+                started = time.perf_counter()
+                fields = access_fields if access_fields is not None else {}
+                key = id(pallet)
+                if key not in fields:
+                    spec = pallet.spec
+                    fields[key] = build_heightfield(
+                        pallet.placements, spec.bin_length_mm, spec.bin_width_mm,
+                        origin_mm=(spec.offset_mm, spec.offset_mm),
+                    )
+                debt = access_debt(
+                    fields[key], (placement.x_mm, placement.y_mm, placement.length_mm, placement.width_mm),
+                    placement.z_mm + placement.height_mm, delta, self.config.access_debt_band_mm,
+                )
+                debt_volume, debt_area = debt.dead_volume_mm3, debt.dead_area_mm2
+                if self.config.access_debt_mode == "penalty":
+                    volume = placement.length_mm * placement.width_mm * placement.height_mm
+                    penalty = self.config.access_debt_weight * debt_volume / max(1, volume)
+                    score -= penalty
+                self.access_debt_candidate_ms.append((time.perf_counter() - started) * 1000)
         return _ScoreTerms(
+            access_dead_volume_mm3=debt_volume,
+            access_dead_area_mm2=debt_area,
+            access_debt_penalty=penalty,
             packing_gain=float(preview.packing_gain),
             fragmentation=float(preview.fragmentation),
             score_adjustment=float(getattr(preview, "score_adjustment", 0.0) or 0.0),
@@ -2087,6 +2121,56 @@ class SchedulerV1:
             priority_score=float(priority_score),
             scalar_score=float(score),
             height_after_mm=int(height_after_mm),
+        )
+
+    def _access_debt_enabled(self) -> bool:
+        return self.config.access_debt_weight > 0 or self.config.access_debt_mode == "filter"
+
+    @staticmethod
+    def _filter_access_debt(candidates):
+        zero = [c for c in candidates if c.terms.access_dead_volume_mm3 == 0]
+        return zero or candidates
+
+    def _choose_scored_candidate(self, candidates, sim_state, *, undo_debt=False):
+        if undo_debt:
+            candidates = [replace(c, terms=replace(
+                c.terms, scalar_score=c.terms.scalar_score + c.terms.access_debt_penalty
+            )) for c in candidates]
+        selected, stats = choose_with_height_slack(
+            candidates=candidates, score_mode=self.config.score_mode,
+            height_slack_mm=self.config.height_slack_mm,
+            height_after_mm_fn=lambda c: c.terms.height_after_mm,
+            gain_frag_key_fn=self._gain_frag_candidate_key,
+        )
+        if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+            selected = min(candidates, key=lambda c: self._min_height_then_gain_key(c.terms, c.box))
+        elif self.config.score_mode == ScoreMode.COHERENCIA_CAPA.value:
+            scorer = CoherenciaCapaScorer()
+            selected = max(candidates, key=lambda c: scorer.score_placement(
+                c.plan.preview.placement,
+                colocadas=list(getattr(sim_state.pallets.get(c.plan.pallet_id), "placements", []) or []),
+            ) if c.plan.preview.placement is not None else -1.0)
+        return selected, stats
+
+    def _record_access_debt_choice(self, terms: _ScoreTerms) -> None:
+        if self._access_debt_enabled():
+            self.access_debt_selected_count += 1
+            self.access_debt_volume_sum += terms.access_dead_volume_mm3
+            self.access_debt_area_sum += terms.access_dead_area_mm2
+
+    def collect_access_debt_metrics(self) -> dict[str, Any]:
+        import numpy as np
+        n = self.access_debt_selected_count
+        times = self.access_debt_candidate_ms
+        return dict(
+            enabled=self._access_debt_enabled(), mode=self.config.access_debt_mode,
+            weight=self.config.access_debt_weight, band_mm=self.config.access_debt_band_mm,
+            selected_count=n, selected_dead_volume_mm3_mean=self.access_debt_volume_sum / max(1, n),
+            selected_dead_area_mm2_mean=self.access_debt_area_sum / max(1, n),
+            changed_choices=self.access_debt_changed_choices,
+            measured_candidates=len(times), candidate_mean_ms=float(np.mean(times)) if times else 0.0,
+            candidate_p95_ms=float(np.percentile(times, 95)) if times else 0.0,
+            choice_comparison="same feasible slate before H1; greedy selection",
         )
 
     @staticmethod

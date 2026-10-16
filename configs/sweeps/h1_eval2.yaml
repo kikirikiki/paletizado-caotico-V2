@@ -1,0 +1,9 @@
+# Segunda (y última) evaluación de H1 con seeds de referencia: ganadora combinada de h1_tune/h1_tune2/h1_tune3.
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_w0.25_b600
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty}
