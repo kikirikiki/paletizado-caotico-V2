@@ -25,6 +25,7 @@
 |---|---|---|---|
 | arm6_4orient (baseline oficial) | 61,89 % ± 1,32 · IC95 [60,95; 62,83] · 75 ms/dec (p95 155) | `run_sweep.py --configs configs/sweeps/baseline.yaml --seeds 10 --workers 15 --name baseline_v1 --baseline arm6_4orient` → out/sweeps/baseline_v1 (wt1) | verificado |
 | **arm6_4orient + H1 (w0,25 b600) — MEJOR** | **64,70 % · IC95 [63,47; 65,92] · +2,81 pp [1,04; 4,57]** · 66 ms/dec (p95 146) | `run_sweep.py --configs configs/sweeps/h1_eval2.yaml --seeds 10 --workers 15 --name h1_eval2 --baseline arm6_4orient` → out/sweeps/h1_eval2 (wt2) | adoptada (D-009/D-011) |
+| *PALANCA* H1 + micro_plan (d3 w8, corte por tiempo) | 70,90 % ± 1,64 · +9,01 pp [7,77; 10,25] vs baseline · 722 ms/dec (p95 911) | `run_sweep.py --configs configs/sweeps/lever_microplan_eval.yaml --seeds 10 --workers 15 --name lever_microplan_eval --baseline arm6_4orient` (wt2) | NO cuenta para T1 (micro_plan=False es restricción, D-012) y NO es determinista (8/10 seeds cambian al repetir) → H3 |
 | gantry_4orient (contraste) | 66,92 % ± 2,26 (+5,03 pp) | baseline_v1 | informativo; H1 no actúa con delta 0 |
 | arm6_planar (control) | 47,42 % | baseline_v1 | control |
 
@@ -58,8 +59,10 @@
 
 **Codex sin cuota hasta las 19:01 CEST (2026-10-16).** Delegaciones pendientes, en orden:
 1. 04B (resume del thread de `04B_offline.jsonl`, wt1, astra xhigh, ≤ 8 procesos).
-2. 07 H2 **ranuras estrechas** (spec reescrita tras RESEARCH §1ter; wt2, rama nueva `feat/h2-ranuras` desde feat/h1-deuda-accesibilidad; sol high).
-3. 06 orientación canto (palanca PLAN_B + contraste gantry 6 orientaciones reales).
+2. **08 H3 búsqueda determinista** (wt2, rama nueva `feat/h3-busqueda-determinista` desde feat/h1-deuda-accesibilidad; astra high):
+   mayor ganancia medida disponible (micro_plan sobre H1: +6,2 pp, pero no determinista y prohibido tal cual, D-012).
+3. 07 H2 ranuras estrechas (spec reescrita tras RESEARCH §1ter; se evalúa encima de la mejor configuración vigente).
+4. 06 orientación canto (palanca PLAN_B + contraste gantry 6 orientaciones reales).
 
 ## Sweeps lanzados
 | Sweep | WT | Estado |
@@ -78,7 +81,7 @@
 
 ## Siguiente acción
 1. (hecho) PR #144 (cotas A+C) y PR #145 (H1). Autopsia con H1 → RESEARCH §1ter → spec 07 reescrita (H2 ranuras estrechas).
-2. (≥ 19:01) Resume 04B en wt1; crear `feat/h2-ranuras` en wt2 y lanzar 07.
+2. (≥ 19:01) Resume 04B en wt1; crear `feat/h3-busqueda-determinista` en wt2 y lanzar 08 (astra, high).
 3. Cuando esté B: tabla de headroom en docs/COTAS.md (wt1), T1/T2/T3 aquí, push a #144.
 
 ## Registro de técnicas cerradas
@@ -86,3 +89,5 @@
 |---|---|---|
 | Gate stand_hw 800/1600/2400 | +0,5 / −1,0 / −0,5 pp, n.s. | descartada (no es palanca) |
 | H1 deuda de accesibilidad (w0,25, b600) | +2,81 pp [1,04; 4,57], 0 violaciones, sin coste de tiempo | **adoptada** |
+| Re-ajuste de mandos existentes con H1 (height_slack 0–500, score_mode, heurística 2D, tower_z) | ajuste: todos ≤ H1; heurística y tower_z inertes en heightfield (KPI idéntico) | cerrada (out/sweeps/h1_knobs_tune, wt2) |
+| micro_plan sobre H1 (palanca) | +6,2 pp sobre H1 en referencia, no determinista | palanca [REVISAR] D-012 → origina H3 |

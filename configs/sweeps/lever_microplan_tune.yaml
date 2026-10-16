@@ -1,0 +1,13 @@
+# PALANCA informativa (micro_plan=True relaja una restricción del prompt §2/§7): no cuenta para T1. Ejecutado por el director (D-011).
+- name: h1_ref
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty}
+- name: h1_micro_d3_w8
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, micro_plan: true, micro_depth: 3, micro_width: 8, micro_topk: 15}
+- name: h1_micro_d4_w40
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, micro_plan: true, micro_depth: 4, micro_width: 40, micro_topk: 15}
