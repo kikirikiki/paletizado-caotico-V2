@@ -15,6 +15,9 @@ dependencies = [
   "PyYAML>=6.0"
 ]
 
+[project.optional-dependencies]
+study = ["ortools>=9.15,<10"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

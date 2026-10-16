@@ -1,4 +1,256 @@
-# C. Buffer/lookahead y posiciones de palet abiertas
+# Cotas superiores — parte A: cota formal
+
+Este trabajo calcula cotas superiores de la utilización de **un palet** en
+`arm6_4orient`. No calcula una solución alcanzable ni ejecuta las partes B/C.
+`U*` designa la mejor **cota superior válida obtenida**, no el óptimo físico.
+Una cota por encima del objetivo no demuestra que ese objetivo sea alcanzable.
+
+## Datos, población y resultado
+
+Ejecución del 16-10-2026, OR-Tools 9.15.6755, un worker, seed del solver 0 y
+30 s por modelo CP-SAT. Artefacto completo: `out/bounds/formal.json` (ignorado
+por Git). Las dimensiones del contenedor se importan de
+`palca.study.metric.ENVELOPE_MM`; no se duplican en el código del estudio.
+En esta versión son 1240 × 840 × 2400 mm, volumen 2 499 840 000 mm³.
+La métrica y el validador congelados permanecen intactos.
+
+Entrada: `data/Flujo rampas - Editado.xlsx`, 186 cajas, 111 tipos L/W/H,
+volumen real 16 789 012 000 mm³. SHA-256:
+`3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab`.
+La familia dominante es el subconjunto definido por RESEARCH §1:
+**L ∈ [600,610], W ∈ [440,450], H ∈ [345,395] mm**, extremos incluidos,
+sobre las dimensiones originales, sin ordenarlas. Son **85 cajas / 24 tipos**.
+No se sustituye esta familia por la caja ilustrativa 605×445×355.
+
+| Método / referencia | Flujo completo | Familia dominante |
+|---|---:|---:|
+| Baseline provisional, KPI de cerrados | 61,9000 % | No es un baseline de familia |
+| Objetivo 1,5 × baseline | **92,8500 %** | 92,8500 % como referencia |
+| LP DFF con mínimo por orientación | 100,0000 % | 100,0000 % |
+| LP DFF con orientaciones compartidas | 100,0000 % | 97,0150364 % |
+| Cortes horizontales, inventario real, óptimo 2D probado | 100,0000 % | 98,6727151 % |
+| LP DFF + cortes transformados en altura | 100,0000 % | 97,0150364 % |
+| Refuerzo de conteos enteros, cota del solver | 100,0000 % | **96,9697211 %** |
+| **Mejor U*** | **100,0000 %** | **96,9697211 %** |
+
+Fracción certificada de la mejor cota de familia: **19392703 / 19998720**.
+El CP-SAT entero terminó `FEASIBLE`, no `OPTIMAL`: la tabla usa su
+`best_objective_bound`, redondeado hacia arriba, nunca el objetivo de su
+incumbente. El LP certificado ya da una cota independiente de ese timeout.
+El límite por tiempo puede producir ligeras variaciones entre máquinas; cada
+JSON conserva la fracción y el estado correspondientes a su ejecución.
+
+**Veredicto: el moonshot no queda descartado por estas cotas**, ni para el
+flujo ni para la familia aislada. Tampoco queda demostrado alcanzable.
+Los márgenes baseline→cota son 38,1000 pp y 35,0697 pp, respectivamente;
+no son mejoras realizables medidas. Una conclusión exclusiva sobre la familia
+no se podría trasladar al flujo mixto. Estas cotas deterministas no tienen IC95.
+El baseline provisional tampoco tiene un IC95 disponible aquí.
+
+La cota trivial es **Σvol/V = 6,716034626 palets**, luego hacen falta al menos
+**7 palets** para todas las cajas. El 6,88 de la especificación no coincide con
+el Excel y denominador congelado actuales. Este cociente es una cota inferior
+del número de palets, no una utilización del 688 % ni una cota del KPI de
+cerrados. La cota trivial de utilización de un palet es 100 %.
+
+No existía `out/sweeps/baseline_v1/summary.json` en este worktree. Si existe al
+reproducir, el CLI usa `configs.arm6_4orient.kpi.mean` y conserva su IC95;
+también admite resumen de una sola config y listas identificadas por nombre.
+Un archivo ambiguo, mal formado o con porcentajes en vez de ratios falla;
+no activa silenciosamente el valor provisional ni toma el KPI de otro preset.
+
+## Método DFF y validez
+
+Se admiten `(L,W,H)`, `(W,L,H)`, `(H,W,L)` y `(W,H,L)`, deduplicando empates
+y eliminando variantes que no caben. La cara H×L permanece prohibida.
+Se relajan soporte, accesibilidad, gate de altura para poner de pie, cargas,
+orden de llegada y cualquier obligación de consumir el flujo en orden.
+Por tanto toda solución física válida está incluida en las relajaciones.
+Se permite elegir cualquier subconjunto del inventario finito para el palet.
+Una media de palets cerrados también está acotada por la cota individual.
+
+Para longitudes normalizadas t∈[0,1] se usan 60 funciones:
+
+- Identidad `f(t)=t`.
+- `u_k(t)=t` si `(k+1)t` es entero; en otro caso `floor((k+1)t)/k`, k=1..20.
+- `U_e(t)=0` si t<e, `t` si e≤t≤1−e, `1` si t>1−e; e=j/40, j=1..20.
+- `phi_e(t)=0` si t<e, `1/floor(1/e)` si e≤t≤1/2,
+  `1−floor((1−t)/e)/floor(1/e)` si t>1/2; e=j/40, j=1..19.
+
+Son las DFF de las proposiciones 3/4 y teorema 5 de
+[Fekete–Schepers, *A General Framework for Bounds for Higher-Dimensional
+Orthogonal Packing Problems*](https://arxiv.org/abs/cs/0402044).
+Su corolario 8 y lema 9 justifican la restricción de volumen transformado.
+Los extremos de los intervalos se evalúan con `Fraction`, sin tolerancias
+que cambien el lado de una discontinuidad.
+
+Para cada terna (f,g,h) y tipo i, sea
+`a_i = min_o f(l_o/E_x) g(w_o/E_y) h(h_o/E_z)`.
+El volumen transformado de cualquier colocación factible suma como máximo uno.
+Tomar el mínimo por orientación reduce los coeficientes: sigue siendo una
+condición necesaria. El primer LP maximiza `Σ_i (vol_i/V) x_i`, sujeto a
+`Σ_i a_i x_i ≤ 1`, `0 ≤ x_i ≤ cantidad_i`. Agrupar cajas idénticas equivale
+al LP de una variable en [0,1] por caja individual.
+
+El segundo LP usa variables `y_io ≥ 0`, con `Σ_o y_io ≤ cantidad_i` y
+coeficientes específicos de cada orientación en todas las ternas. Evita que
+una caja elija independientemente una orientación distinta para cada corte.
+Sigue relajando la integralidad y la geometría de colocación.
+
+Se consideran todas las ternas del conjunto. Las funciones iguales o dominadas
+en todas las longitudes de un eje, y las filas duplicadas, se eliminan sin
+perder fuerza. En el flujo quedan 29/35/19 evaluaciones distintas no dominadas
+por eje y 18 064 filas orientadas, antes de las 111 restricciones de inventario.
+GLOP añade por separación los cortes violados, comprobando el conjunto completo
+tras cada solución restringida.
+
+### Certificado numérico
+
+Cada evaluación racional se redondea **hacia abajo** a una rejilla Q=10⁶;
+el producto se vuelve a redondear hacia abajo usando enteros de 64 bits. Esto
+solo debilita restricciones. La cota final no se toma del objetivo primal
+aproximado de GLOP. Para el LP `Ax≤b, 0≤x≤n`, cualquier λ≥0 cumple:
+
+```text
+c·x ≤ λ·b + Σ_j n_j max(0, c_j − (λA)_j).
+```
+
+Se convierten los multiplicadores del solver a racionales no negativos de
+denominador 10⁹ y se calcula esta expresión exactamente. Así se corrigen incluso
+los residuos de factibilidad dual. El JSON incluye filas activas, multiplicadores,
+corrección positiva y fracción final. Las filas se reconstruyen de forma
+determinista con el inventario del JSON y `build_dff_system`; para el LP reforzado
+se añaden las filas de cortes de altura antes de ordenar/deduplicar. Los valores
+decimales son de presentación; las fracciones son el certificado.
+El mínimo con la cota geométrica exacta 1 también es válido.
+
+## Cortes horizontales y refuerzos
+
+En casi toda altura z, las huellas de las cajas que la atraviesan forman un
+packing 2D sin solapes. CP-SAT maximiza su área en la base de la envolvente,
+con todas las huellas permitidas, giros y cantidades por tipo. Se usan intervalos
+opcionales, `NoOverlap2D`, restricciones acumulativas y una tabla que vincula
+huella, área y tipo. El número de posiciones opcionales es
+`floor(área_base / menor_área_huella)`, suficiente para cualquier corte factible.
+
+Las coordenadas enteras no son una discretización que recorte soluciones:
+fijadas las separaciones de cada par en una disposición ortogonal, compactar
+por caminos más largos produce coordenadas que son sumas de dimensiones.
+Puede dividirse por su máximo común divisor con los lados del contenedor
+(5 mm en estos datos). No se imponen franjas, capas uniformes ni cortes guillotina.
+
+Si A es una cota superior del área máxima, integrar en z da `volumen ≤ A·E_z`,
+y por tanto `U≤A/área_base`. En esta ejecución los máximos 2D están probados:
+**1 041 600 mm²** (flujo) y **1 027 775 mm²** (familia). El JSON conserva una
+disposición 2D testigo; no es una solución 3D ni de producción. Si el solver
+termina antes de probar el óptimo, se usa su cota superior; sin resultado
+utilizable se conserva la cota de área de la envolvente.
+
+Además, aplicar una DFF solo a z conserva la existencia de un packing con las
+mismas huellas. Integrar en esa altura transformada justifica, para cada f:
+`Σ_io área_io f(h_io/E_z) y_io ≤ A`. Se añaden estas filas al LP; en los datos
+canónicos no mejoran la cota obtenida con orientaciones compartidas.
+
+El último refuerzo exige conteos enteros por orientación en CP-SAT, preserva
+cantidades y volumen real y utiliza las filas DFF activas del certificado del
+LP reforzado. Quitar otras filas es otra relajación válida. Sus incumbentes
+son soluciones de conteos, **sin garantía de packing 3D**. Solo se usa la cota
+superior de maximización. La mejora sobre el LP de familia es pequeña:
+aproximadamente 0,0453 pp; no se ha demostrado una cota <95 %.
+
+Como exploración también se resolvió el catálogo horizontal con copias
+ilimitadas: dio exactamente 100 % y 99,3303571 %. Una disposición escalonada
+de seis huellas explica el segundo valor; limitar las copias al inventario
+real baja a 98,6727151 %. Esto muestra por qué no sería válido imponer los
+patrones por franjas de RESEARCH como si fueran todos los packings posibles.
+
+## Verificación y reproducción
+
+Desde la raíz, con el entorno del proyecto y el extra `study` de `pyproject.toml`
+(OR-Tools 9.15 instalado en el entorno de esta ejecución):
+
+```bash
+export PYTHONPATH="$PWD/src"
+.venv/bin/python scripts/bound_formal.py --seconds 30
+.venv/bin/python -m pytest tests/test_bounds_formal.py --disable-warnings -ra
+./scripts/smoke_offline.sh
+```
+
+Resultado: **76 tests nuevos OK** (`76 passed in 1.49s`); smoke completo
+**OK**, incluida la suite del repositorio y el escenario de height-slack.
+La validación del baseline devuelve `boxes_placed=186`, `n_violations=0`.
+También se comprobaron contención y ausencia de solapes exactas del fixture,
+sin aprovechar tolerancias, y los dos testigos horizontales canónicos.
+
+El CLI escribe `out/bounds/formal.json`; no requiere `scripts/run_sweep.py`.
+Para explorar el catálogo horizontal ilimitado por separado:
+
+```bash
+PYTHONPATH=src .venv/bin/python - <<'PY'
+from palca.study.bounds_formal import horizontal_bound, is_dominant
+from palca.study.params import REFERENCE_EXCEL
+from sim.io import load_arrivals
+boxes = [(a.length_mm, a.width_mm, a.height_mm) for a in load_arrivals(REFERENCE_EXCEL)]
+for subset in (boxes, [d for d in boxes if is_dominant(d)]):
+    print(horizontal_bound(subset, seconds=30, finite_inventory=False))
+PY
+```
+
+Los tests comprueban cada una de las 60 DFF mediante programación dinámica
+de mochila ilimitada: exploran **todos los multiconjuntos de una rejilla** cuya
+suma es ≤1, no solo parejas. Cubren todos los saltos de epsilon y las igualdades
+de `u_k`, con pruebas adicionales a ambos lados de las discontinuidades.
+No se presupone que `phi` sea superaditiva. El test finito sirve de regresión;
+la justificación en todo [0,1] es el resultado matemático citado.
+
+También verifican llenados exactos, el óptimo de ocho cubos de lado 4 en un
+cubo de lado 10, certificados duales con residuos, inventario, timeout seguro,
+selección del baseline y todas las cotas frente a:
+
+- **12 cajas planas** 605×445×355: 45,8788762 %.
+- **18 cajas planas + de pie**: 68,8183144 %.
+- Un **palet real de baseline**, leído desde
+  `tests/fixtures/bounds_baseline_pallet.json`: 19 cajas, **72,9295875 %**.
+
+Los patrones tienen coordenadas explícitas y pasan el validador congelado.
+El fixture conserva el palet físico 10 del dump del preset `arm6_4orient`,
+seed 50021, presupuesto original 900 ms. Sus dimensiones originales se
+contrastan de nuevo con el Excel, shuffle e identidad DES, y tiene 0 violaciones.
+El run completo utilizado para extraerlo colocó 186 cajas en 11 palets,
+10 cerrados, KPI **64,0956641 %**, y 0 violaciones del validador en los 11.
+Ese resultado de una seed no sustituye al baseline provisional de diez seeds.
+El validador congelado comprueba geometría y soporte; no certifica trayectoria
+ni accesibilidad del brazo.
+
+Para regenerar ese run y su dump, sin depender del fixture:
+
+```bash
+PYTHONPATH=src .venv/bin/python - <<'PY'
+from pathlib import Path
+from palca.study.params import preset_params
+from sim.run import run_simulation
+folder = Path('out/bounds')
+folder.mkdir(parents=True, exist_ok=True)
+run_simulation(**preset_params(
+    'arm6_4orient', episode_seed=50021,
+    out_path=str(folder / 'baseline_50021_run.json'),
+    dump_placements_path=str(folder / 'baseline_50021_dump.json'),
+))
+PY
+.venv/bin/python scripts/kpi_from_run.py \
+  --run out/bounds/baseline_50021_run.json \
+  --dump out/bounds/baseline_50021_dump.json --validate
+```
+
+Supuesto geométrico: dimensiones enteras y cajas rígidas ortogonales sin
+penetración física. Las tolerancias del validador (0,5 mm en geometría) se
+interpretan como tolerancias de medición, no como capacidad adicional que
+permita solapes físicos. Los patrones y el dump de regresión cumplen la
+geometría exacta. Las cotas no certifican cualquier disposición artificial
+que aproveche sistemáticamente dichas tolerancias.
+
+
+# Cotas superiores — parte C: palancas de información
 
 Esta sección mide solo la parte C de `autopilot/specs/04_cotas_superiores.md`.
 Las partes A, B y la tabla final de headroom se integran en otros trabajos.

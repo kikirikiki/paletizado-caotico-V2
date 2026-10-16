@@ -1,0 +1,531 @@
+{
+  "provenance": {
+    "preset": "arm6_4orient",
+    "seed": 50021,
+    "excel": "data/Flujo rampas - Editado.xlsx",
+    "pallet_index": 10,
+    "metric_version": "1.0.0",
+    "params": {
+      "n_per_pallet": 999999,
+      "t_pick_place": 14.0,
+      "t_changeover": 60.0,
+      "t_stage": 6.0,
+      "t_unstage": 10.0,
+      "ramp_cap": 15,
+      "staging_cap": 0,
+      "policy": "palca",
+      "lookahead_k": 15,
+      "time_scale": 1.0,
+      "arrival_mode": "immediate",
+      "episode_seed": 50021,
+      "shuffle_window": 15,
+      "shuffle_strength": 1.0,
+      "episode_id": null,
+      "overhang_mm": 20,
+      "heuristic": "bssf",
+      "stacking_mode": "heightfield",
+      "z_band_mm": null,
+      "t_select_base": 0.0,
+      "t_select_step": 0.0,
+      "time_penalty_weight": 1.0,
+      "starvation_weight": 0.0,
+      "stability_mode": "ratio+corners+settle",
+      "min_support": 0.85,
+      "stability_eps_mm": 1.0,
+      "settle_snap_grid": false,
+      "settle_max_iter": 0,
+      "settle_timeout_ms": 0,
+      "grid_mm": null,
+      "heavy_bottom": false,
+      "max_overweight_ratio": 1.5,
+      "loadbear_penalty_weight": 1.0,
+      "loadbear_factor": 1.0,
+      "priority_mode": "none",
+      "priority_weight": 1.0,
+      "balance_weight": 0.0,
+      "accessibility_delta_mm": 400,
+      "coverage_grid_x": 0,
+      "coverage_grid_y": 0,
+      "coverage_weight": 0.0,
+      "dominant_free_rect_weight": 0.0,
+      "dominant_free_rect_ratio_gate": 0.35,
+      "score_mode": "min_height_slack_then_gain",
+      "height_slack_mm": 120,
+      "tower_z_band_mm": 0,
+      "tower_z_penalty_weight": 0.0,
+      "spatial_xy_bin_mm": 150,
+      "spatial_tower_penalty_weight": 0.0,
+      "spatial_tower_penalty_end_step": 0,
+      "spatial_tower_target_base": 2,
+      "spatial_tower_target_step_div": 6,
+      "hard_floor_phase_end_step": 0,
+      "hard_floor_phase_min_base_candidates": 1,
+      "hard_floor_phase_lookahead_items": 8,
+      "hard_floor_phase_stand_mix_bonus": 0.0,
+      "orientation_mode": "planar+stand_hw",
+      "stand_hw_height_margin_gate_mm": 400,
+      "time_budget_ms": 900,
+      "micro_plan": false,
+      "micro_depth": 3,
+      "micro_width": 8,
+      "micro_topk": 15,
+      "batchfill_layer_starter": false,
+      "batchfill_starters_max": 6,
+      "batchfill_budget_ms": 150,
+      "batchfill_greedy_topk": 12,
+      "online_controller": false,
+      "controller_debug": false,
+      "weight_col": null,
+      "max_tries_per_item": 0,
+      "max_candidates": 0,
+      "max_seconds_per_item": 0.0,
+      "watchdog_heartbeat_sec": 1.0,
+      "force_destination": 1,
+      "continuous_pallets": true,
+      "max_pallets": 0,
+      "viz_dest": 0
+    }
+  },
+  "original_dimensions_by_box_id": {
+    "149": [
+      605,
+      445,
+      405
+    ],
+    "153": [
+      605,
+      445,
+      350
+    ],
+    "165": [
+      605,
+      445,
+      350
+    ],
+    "145": [
+      600,
+      445,
+      350
+    ],
+    "148": [
+      600,
+      445,
+      350
+    ],
+    "169": [
+      600,
+      450,
+      350
+    ],
+    "174": [
+      505,
+      390,
+      400
+    ],
+    "179": [
+      640,
+      445,
+      375
+    ],
+    "181": [
+      505,
+      395,
+      375
+    ],
+    "182": [
+      610,
+      450,
+      355
+    ],
+    "184": [
+      625,
+      450,
+      390
+    ],
+    "173": [
+      605,
+      450,
+      355
+    ],
+    "154": [
+      600,
+      445,
+      355
+    ],
+    "171": [
+      605,
+      450,
+      410
+    ],
+    "155": [
+      600,
+      445,
+      355
+    ],
+    "166": [
+      600,
+      445,
+      355
+    ],
+    "186": [
+      600,
+      450,
+      355
+    ],
+    "156": [
+      600,
+      445,
+      350
+    ],
+    "183": [
+      600,
+      445,
+      355
+    ]
+  },
+  "run": {
+    "metrics": {
+      "pallet_kpis": {
+        "continuous_pallet_sequence": {
+          "1": [
+            19
+          ]
+        },
+        "continuous_closure_sequence": {
+          "1": [
+            "CLOSE_HEIGHT_FULL"
+          ]
+        }
+      }
+    }
+  },
+  "dump": {
+    "pallets": {
+      "1": [
+        {
+          "pallet_id": 1,
+          "step_index": 159,
+          "box_id": 149,
+          "length_mm": 605,
+          "width_mm": 445,
+          "height_mm": 405,
+          "x_mm": -20,
+          "y_mm": -20,
+          "z_mm": 0,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2780.0,
+          "weight_kg": 10160.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 160,
+          "box_id": 153,
+          "length_mm": 605,
+          "width_mm": 445,
+          "height_mm": 350,
+          "x_mm": 615,
+          "y_mm": -20,
+          "z_mm": 0,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2794.0,
+          "weight_kg": 9940.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 161,
+          "box_id": 165,
+          "length_mm": 605,
+          "width_mm": 445,
+          "height_mm": 350,
+          "x_mm": 10,
+          "y_mm": -20,
+          "z_mm": 405,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2808.0,
+          "weight_kg": 9700.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 162,
+          "box_id": 145,
+          "length_mm": 600,
+          "width_mm": 445,
+          "height_mm": 350,
+          "x_mm": 15,
+          "y_mm": -20,
+          "z_mm": 755,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2822.0,
+          "weight_kg": 10220.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 163,
+          "box_id": 148,
+          "length_mm": 600,
+          "width_mm": 445,
+          "height_mm": 350,
+          "x_mm": 620,
+          "y_mm": -20,
+          "z_mm": 350,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2836.0,
+          "weight_kg": 11020.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 164,
+          "box_id": 169,
+          "length_mm": 600,
+          "width_mm": 450,
+          "height_mm": 350,
+          "x_mm": 620,
+          "y_mm": -20,
+          "z_mm": 700,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2850.0,
+          "weight_kg": 10480.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 165,
+          "box_id": 174,
+          "length_mm": 505,
+          "width_mm": 390,
+          "height_mm": 400,
+          "x_mm": -20,
+          "y_mm": 430,
+          "z_mm": 0,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2864.0,
+          "weight_kg": 6440.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 166,
+          "box_id": 179,
+          "length_mm": 640,
+          "width_mm": 445,
+          "height_mm": 375,
+          "x_mm": -20,
+          "y_mm": -15,
+          "z_mm": 1105,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2878.0,
+          "weight_kg": 11400.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 167,
+          "box_id": 181,
+          "length_mm": 505,
+          "width_mm": 395,
+          "height_mm": 375,
+          "x_mm": 715,
+          "y_mm": 35,
+          "z_mm": 1050,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2892.0,
+          "weight_kg": 6760.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 168,
+          "box_id": 182,
+          "length_mm": 610,
+          "width_mm": 450,
+          "height_mm": 355,
+          "x_mm": 5,
+          "y_mm": -20,
+          "z_mm": 1480,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2906.0,
+          "weight_kg": 11940.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 169,
+          "box_id": 184,
+          "length_mm": 625,
+          "width_mm": 450,
+          "height_mm": 390,
+          "x_mm": -10,
+          "y_mm": -20,
+          "z_mm": 1835,
+          "rot90": false,
+          "layer_id": 0,
+          "orientation_family": "planar",
+          "orientation_name": "LWH",
+          "timestamp": 2920.0,
+          "weight_kg": 9460.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 170,
+          "box_id": 173,
+          "length_mm": 450,
+          "width_mm": 355,
+          "height_mm": 605,
+          "x_mm": -20,
+          "y_mm": 465,
+          "z_mm": 400,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 2934.0,
+          "weight_kg": 9140.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 171,
+          "box_id": 154,
+          "length_mm": 445,
+          "width_mm": 355,
+          "height_mm": 600,
+          "x_mm": -20,
+          "y_mm": 465,
+          "z_mm": 1005,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 2948.0,
+          "weight_kg": 11100.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 172,
+          "box_id": 171,
+          "length_mm": 450,
+          "width_mm": 410,
+          "height_mm": 605,
+          "x_mm": 715,
+          "y_mm": 20,
+          "z_mm": 1425,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 2962.0,
+          "weight_kg": 11840.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 173,
+          "box_id": 155,
+          "length_mm": 445,
+          "width_mm": 355,
+          "height_mm": 600,
+          "x_mm": -15,
+          "y_mm": 465,
+          "z_mm": 1605,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 2976.0,
+          "weight_kg": 11300.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 174,
+          "box_id": 166,
+          "length_mm": 445,
+          "width_mm": 355,
+          "height_mm": 600,
+          "x_mm": 485,
+          "y_mm": 465,
+          "z_mm": 0,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 2990.0,
+          "weight_kg": 11260.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 175,
+          "box_id": 186,
+          "length_mm": 450,
+          "width_mm": 355,
+          "height_mm": 600,
+          "x_mm": 480,
+          "y_mm": 465,
+          "z_mm": 600,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 3004.0,
+          "weight_kg": 9500.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 176,
+          "box_id": 156,
+          "length_mm": 445,
+          "width_mm": 350,
+          "height_mm": 600,
+          "x_mm": 480,
+          "y_mm": 465,
+          "z_mm": 1200,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 3018.0,
+          "weight_kg": 10540.0
+        },
+        {
+          "pallet_id": 1,
+          "step_index": 177,
+          "box_id": 183,
+          "length_mm": 445,
+          "width_mm": 355,
+          "height_mm": 600,
+          "x_mm": 480,
+          "y_mm": 460,
+          "z_mm": 1800,
+          "rot90": true,
+          "layer_id": 0,
+          "orientation_family": "stand_hw",
+          "orientation_name": "WHL",
+          "timestamp": 3032.0,
+          "weight_kg": 12140.0
+        }
+      ]
+    }
+  }
+}
