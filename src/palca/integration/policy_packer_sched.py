@@ -182,6 +182,9 @@ class PolicyPackerScheduler:
         access_debt_weight: float = 0.0,
         access_debt_band_mm: int = 300,
         access_debt_mode: str = "penalty",
+        column_template: str = "off",
+        column_min_fill: float = 0.85,
+        column_fallback: str = "free",
         tower_z_band_mm: int = 0,
         tower_z_penalty_weight: float = 0.0,
         spatial_xy_bin_mm: int = 150,
@@ -215,6 +218,8 @@ class PolicyPackerScheduler:
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
+        if column_template != "off" and (stacking_mode != "heightfield" or overhang_mm != 20):
+            raise ValueError("Columns require heightfield and the 1240 x 840 mm envelope (overhang=20)")
         if micro_plan_enabled and micro_plan_node_budget > 0 and settle_timeout_ms > 0:
             raise ValueError("Deterministic microplan requires settle_timeout_ms=0")
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
@@ -233,6 +238,9 @@ class PolicyPackerScheduler:
             access_debt_weight=access_debt_weight,
             access_debt_band_mm=access_debt_band_mm,
             access_debt_mode=access_debt_mode,
+            column_template=column_template,
+            column_min_fill=column_min_fill,
+            column_fallback=column_fallback,
             tower_z_band_mm=tower_z_band_mm,
             tower_z_penalty_weight=tower_z_penalty_weight,
             spatial_xy_bin_mm=spatial_xy_bin_mm,
@@ -839,6 +847,7 @@ class PolicyPackerScheduler:
         )
 
         kpis["access_debt"] = self._scheduler.collect_access_debt_metrics()
+        kpis["columns"] = self._scheduler.collect_column_metrics()
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
         kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)

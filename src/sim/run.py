@@ -246,6 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--micro-plan-hard-cap-ms", type=int, default=10000, help="Salvaguarda H3; cualquier hit invalida determinismo")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
     parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
+    parser.add_argument("--column-template", choices=("off", "w445", "w450", "w455", "auto"), default="off")
+    parser.add_argument("--column-min-fill", type=float, default=0.85)
+    parser.add_argument("--column-fallback", choices=("free", "none"), default="free")
     parser.add_argument(
         "--micro-topk",
         type=int,
@@ -463,6 +466,9 @@ def run_simulation(
     access_debt_weight: float = 0.0,
     access_debt_band_mm: int = 300,
     access_debt_mode: str = "penalty",
+    column_template: str = "off",
+    column_min_fill: float = 0.85,
+    column_fallback: str = "free",
     tower_z_band_mm: int = 0,
     tower_z_penalty_weight: float = 0.0,
     spatial_xy_bin_mm: int = 150,
@@ -519,6 +525,8 @@ def run_simulation(
                 or arrival_mode != "immediate" or max_pallets or multi_ramp or viz):
             raise ValueError("open_pallets > 1 requiere palca, continuous_pallets, M1, immediate, "
                              "sin max_pallets, multi_ramp ni viz")
+        if column_template != "off":
+            raise ValueError("Columns require open_pallets=1")
         if micro_plan or online_controller:
             raise ValueError("open_pallets > 1 requiere micro_plan y online_controller desactivados")
         if t_changeover < 0:
@@ -690,6 +698,9 @@ def run_simulation(
             access_debt_weight=access_debt_weight,
             access_debt_band_mm=access_debt_band_mm,
             access_debt_mode=access_debt_mode,
+            column_template=column_template,
+            column_min_fill=column_min_fill,
+            column_fallback=column_fallback,
             tower_z_band_mm=max(0, int(tower_z_band_mm)),
             tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
             spatial_xy_bin_mm=max(1, int(spatial_xy_bin_mm)),
@@ -816,6 +827,9 @@ def run_simulation(
             "access_debt_weight": float(access_debt_weight),
             "access_debt_band_mm": int(access_debt_band_mm),
             "access_debt_mode": str(access_debt_mode),
+            "column_template": column_template,
+            "column_min_fill": column_min_fill,
+            "column_fallback": column_fallback,
             "tower_z_band_mm": int(max(0, int(tower_z_band_mm))),
             "tower_z_penalty_weight": float(max(0.0, float(tower_z_penalty_weight))),
             "spatial_xy_bin_mm": int(max(1, int(spatial_xy_bin_mm))),
@@ -944,6 +958,9 @@ def main() -> None:
         micro_depth=int(args.micro_depth),
         micro_width=int(args.micro_width),
         micro_topk=int(args.micro_topk),
+        column_template=args.column_template,
+        column_min_fill=args.column_min_fill,
+        column_fallback=args.column_fallback,
         batchfill_layer_starter=bool(args.batchfill_layer_starter),
         batchfill_starters_max=int(args.batchfill_starters_max),
         batchfill_budget_ms=int(args.batchfill_budget_ms),
