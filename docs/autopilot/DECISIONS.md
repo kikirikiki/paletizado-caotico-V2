@@ -15,6 +15,10 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   Logs de cada delegación fuera del repo: `~/code/Paletizador/09_Software/autopilot_logs/<job>.*`.
   Las especificaciones enviadas se commitean en `docs/autopilot/specs/` (trazabilidad de delegaciones).
 - Justificación: es la única forma de que Codex ejecute smoke y tests reales.
+- Actualización (2026-10-16): el CLI de WSL (0.104, `/usr/local/bin`) y el modelo de su config (`gpt-5.4`) ya no
+  sirven con la cuenta. Se instaló `@openai/codex@latest` (0.163.0) en `~/.local` (sin sudo) y el wrapper pasa el
+  modelo explícito: `gpt-6.1-sol` para implementar, `gpt-6-astra` para algoritmos difíciles (cotas, búsqueda) y
+  revisiones adversariales. No se tocó `~/.codex/config.toml`.
 
 ## D-002 · Worktree aislado en lugar de cambiar de rama el checkout del usuario (2026-10-16)
 - Contexto: el checkout principal está en `study/gantry-orientations` con archivos sin trackear del usuario
@@ -44,18 +48,28 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   (`scheduler_v1.py::_placement_is_stand_hw`). Además el 72,1 % usa la métrica antigua (ver D-005).
   El "gantry 6 orientaciones" real (con canto) no existe en el código.
 
-## D-005 · Métrica: volumen real de las cajas y envolvente 1240 × 820 × 2400 (2026-10-16)
+## D-005 · Métrica: volumen real de las cajas y envolvente 1240 × 840 × 2400 (2026-10-16)
 - Contexto: las cifras históricas (64,6 % brazo, 72,1 % gantry) son `media_cajas × vol_medio_supuesto / (1240·820·2400)`.
-  Con el volumen real de cada caja y solo palets cerrados, exploración rápida (10 seeds de referencia):
-  brazo `planar+stand_hw`/400 = 63,4 % (media por palet), gantry `planar+stand_hw`/0 = 68,5 %.
-- Opción: KPI oficial = Σ volumen real de cajas de palets cerrados / (nº palets cerrados × 1240 × 820 × 2400),
+  Además 1240×820 es un error aritmético: el código (`PalletSpec.bin_width_mm`) usa 800 + 2×20 = **840**
+  (detectado por Codex, PARAMETROS discrepancia 8). Con el volumen real de cada caja, solo palets cerrados y
+  1240×840×2400, exploración rápida (10 seeds de referencia): brazo `planar+stand_hw`/400 = **61,9 %**
+  (media por palet), gantry `planar+stand_hw`/0 = 66,8 %.
+- Opción: KPI oficial = Σ volumen real de cajas de palets cerrados / (nº palets cerrados × 1240 × 840 × 2400),
   con la envolvente = palet nominal 1200 × 800 + 2 × overhang 20 mm, **congelada como constante** (no se
   recalcula si en un experimento cambia el overhang). Se reporta además con el palet nominal 1200 × 800
-  (×1,059) para comparabilidad.
-- Justificación: la envolvente es el volumen físico que el algoritmo puede ocupar; no se puede "ganar" KPI
-  aumentando el overhang; es coherente con el 68,8 % de CONTEXT.md. Es la opción más exigente para T2 (80 % absoluto).
-- **[REVISAR]** El cambio de denominador (1240×820 vs 1200×800) mueve el KPI absoluto ~3,7 pp. Las ganancias
-  relativas y el % de gap cerrado no dependen de esta elección.
+  (×1,085) para comparabilidad.
+- Justificación: la envolvente es el volumen físico que el algoritmo puede ocupar (igual que el código); no se
+  puede "ganar" KPI aumentando el overhang. Es la opción más exigente para T2 (80 % absoluto).
+- **[REVISAR]** El denominador (1240×840 vs 1200×800 vs el histórico 1240×820) mueve el KPI absoluto entre 1,5 y
+  5 pp. Las ganancias relativas y el % de gap cerrado no dependen de esta elección.
+
+## D-008 · Codex no puede commitear: commitea el director tras revisar (2026-10-16)
+- Contexto: el sandbox `workspace-write` de Codex deja `.git` en solo lectura (incluso con `--add-dir`):
+  `git add` falla con "Read-only file system".
+- Opción: Codex deja los cambios en el working tree; el director revisa el diff, ejecuta smoke y commitea por ruta
+  explícita, separando el trabajo de Codex de los documentos del autopiloto. No se usa
+  `--dangerously-bypass-approvals-and-sandbox`.
+- Justificación: mantiene el sandbox y obliga a revisar antes de cada commit (requisito §1: no aceptar "hecho" sin diff).
 
 ## D-006 · Escenario de referencia del estudio (2026-10-16)
 - Contexto: el "baseline producción ~64–65 %" es la config `brazo_hw` del estudio gantry: `BASE_PARAMS` de
