@@ -1,8 +1,10 @@
 # PROGRESS — autopiloto de compactidad (fuente única de verdad del estado)
 
-Última actualización: 2026-10-16 ~15:15 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
+Última actualización: 2026-10-16 ~15:40 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
 
 ## Cómo reanudar
+0. **La versión vigente de este archivo está en la rama más alta del apilado.** Puntero fuera de git:
+   `~/code/Paletizador/09_Software/autopilot_logs/CURRENT.md` (dice qué rama/worktree es la tope).
 1. Leer este archivo entero, `docs/autopilot/DECISIONS.md` y `docs/autopilot/RESEARCH.md`.
 2. Worktrees (WSL): **1** = `~/code/Paletizador/09_Software/paletizado-autopilot`, **2** = `.../paletizado-autopilot-2`.
    No usar el checkout principal (`paletizado-caotico-V2`, rama del usuario `study/gantry-orientations`).
@@ -42,8 +44,8 @@
 | feat/metrica-congelada | feat/parametros-congelados | métrica v1.0.0 + validador | #142 | abierto |
 | feat/sweep-paralelo | feat/metrica-congelada | run_sweep + baseline oficial | #143 | abierto |
 | feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + C (B pendiente) | — | commits 2483261 (C), 382ee4f (A); PR a abrir con A+C, B se añade después |
-| wip/h1-deuda-accesibilidad (wt2) | feat/sweep-paralelo | H1 | — | listo para commit; rebasar sobre feat/cotas-superiores → feat/h1-deuda-accesibilidad + PR |
-| wip/cota-formal | — | (integrada en cotas, ya no se usa) | — | — |
+| feat/h1-deuda-accesibilidad (wt2, TOPE) | feat/cotas-superiores | H1 | #145 | abierto (rebase verificado: 20 KPIs idénticos) |
+| feat/cotas-superiores | — | (PR #144 abierto con A + C; B pendiente en wt1) | #144 | abierto |
 
 ## Trabajos Codex
 | Job | Spec | Modelo / effort | WT | Estado |
@@ -54,8 +56,10 @@
 | 05_h1 (+05b resume) | specs/05 + autopilot_logs/05b_delta.md | sol / high | 2 | terminado (05b cortado por cuota; completado por el director, D-011) |
 | **04B_offline** | autopilot_logs/04B_spec.md | astra / xhigh | 1 | **CORTADO por cuota de Codex** (14:4x). Dejó `src/palca/study/offline_search.py` sin terminar (sin trackear). Relanzar tras las 19:01 con resume del thread de `04B_offline.jsonl` |
 
-**Codex sin cuota hasta las 19:01 CEST (2026-10-16).** Delegaciones pendientes, en orden: 04B (resume), 07 H2 carriles
-(sobre H1), 06 orientación canto (palanca PLAN_B + contraste gantry 6 orientaciones reales).
+**Codex sin cuota hasta las 19:01 CEST (2026-10-16).** Delegaciones pendientes, en orden:
+1. 04B (resume del thread de `04B_offline.jsonl`, wt1, astra xhigh, ≤ 8 procesos).
+2. 07 H2 **ranuras estrechas** (spec reescrita tras RESEARCH §1ter; wt2, rama nueva `feat/h2-ranuras` desde feat/h1-deuda-accesibilidad; sol high).
+3. 06 orientación canto (palanca PLAN_B + contraste gantry 6 orientaciones reales).
 
 ## Sweeps lanzados
 | Sweep | WT | Estado |
@@ -73,10 +77,9 @@
 - H1: banda 200 mm empeora; banda ≥ 445 mejora; paisaje plano con ruido ~2 pp/seed.
 
 ## Siguiente acción
-1. (ahora, sin Codex) Commit de docs en wt1 → push feat/cotas-superiores → PR 4 (A + C; B pendiente) con base feat/sweep-paralelo.
-2. (ahora) Commit de H1 en wt2 → rebase sobre feat/cotas-superiores → rama feat/h1-deuda-accesibilidad → smoke → push → PR 5.
-3. (ahora) Análisis de los peores palets con H1 para orientar H2/H3 (sin código de producción).
-4. (≥ 19:01) Resume 04B; después 07 (H2) y 06 (canto).
+1. (hecho) PR #144 (cotas A+C) y PR #145 (H1). Autopsia con H1 → RESEARCH §1ter → spec 07 reescrita (H2 ranuras estrechas).
+2. (≥ 19:01) Resume 04B en wt1; crear `feat/h2-ranuras` en wt2 y lanzar 07.
+3. Cuando esté B: tabla de headroom en docs/COTAS.md (wt1), T1/T2/T3 aquí, push a #144.
 
 ## Registro de técnicas cerradas
 | Técnica | Resultado (seeds de referencia) | Decisión |

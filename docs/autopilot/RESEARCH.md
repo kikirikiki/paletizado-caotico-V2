@@ -61,6 +61,28 @@ Hipótesis de la Fase 1, por orden:
   sincronización de alturas entre carriles para que las capas puente cumplan el soporte.
 - H3 búsqueda sobre el buffer con rollouts, con el valor del estado = volumen colocado − penalización por zonas muertas.
 
+## 1ter. Autopsia con H1 (h1_eval2, 99 palets cerrados): ranuras estrechas
+Con H1 el mínimo por palet sube del 28,6 % al 45,9 % (desaparecen los palets catastróficos), pero sigue habiendo un 32,7 % de
+espacio libre sobre el perfil, un 16,2 % de suelo sin cubrir (24,8 % en el peor cuartil) y 1/3 de los cierres son
+`DEADLOCK_STABILITY`.
+
+Mapa promedio de suelo vacío (celdas de 100×105 mm): **no** está en la franja de 395 mm en y (y∈[425,820): 23 %, y∈[−20,425):
+10 %), sino en un **valle a lo largo de x ≈ 380–780 mm** (25–52 % de suelo vacío, perfil medio ≈ 1,0–1,1 m frente a ≈ 2,1 m en
+los extremos de x) y en la esquina x∈[−20,380], y∈[600,820] (49 %, perfil 0,57 m). La primera caja siempre va a la esquina de
+origen.
+
+Lectura geométrica: cuando las cajas planas se giran (W=445 a lo largo de x) y se apilan en los dos extremos de x, queda
+1240 − 2 × 445 = **350 mm**, menos que cualquier caja de pie de la familia dominante (H ≥ 345–395) y que casi todo el flujo
+(solo la familia W400.L400, 330 de ancho, cabe). Esa ranura no se puede llenar y además, al crecer las columnas laterales,
+la regla de accesibilidad la cierra del todo. La orientación "buena" en x es L=605 a lo largo de x (605 + 605 = 1210).
+
+→ **H2 (revisada): penalizar las ranuras estrechas**: al colocar una caja, si queda entre ella y un obstáculo (pared u otra
+pila más alta que su base) un hueco de ancho 0 < g < s_min, penalizar el área de esa ranura. Generaliza la idea de carriles y
+ataca directamente el valle observado. La spec 07 se reescribe en este sentido.
+
+Herramientas de análisis (fuera del repo, en el scratchpad del director): descomposición cajas/huecos/espacio libre por palet y
+mapa de suelo vacío, ambos sobre `out/sweeps/<sweep>/<config>/<seed>/{run,dump}.json` con `split_pallets`.
+
 ## 2. Literatura relevante (2021–2026)
 - Zhao et al., PCT (ICLR 2022) y *Deliberate Planning of 3D Bin Packing on Packing Configuration Trees*
   (arXiv 2504.04421): hojas por corner points / extreme points / EMS; planificación con lookahead, buffer y offline
