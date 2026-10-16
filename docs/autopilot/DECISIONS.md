@@ -126,3 +126,39 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Justificación: respeta la letra de §2/§7 y a la vez explora la línea con más ganancia medida.
 - **[REVISAR]** ¿Por qué `micro_plan=True` es inválido en producción? Si el motivo era el no determinismo o el tiempo, H3 lo
   resuelve y su ganancia contaría para T1; si es otro (p. ej. un problema físico del plan), hay que saberlo.
+
+## D-013 · Techo de referencia para el gap = testigo offline verificado de 80,40 % (2026-10-16)
+- Contexto: el job 04B (techo offline) se cortó dos veces por cuota. Dejó soluciones válidas: columnas 78,87 % reproducible con
+  `scripts/bound_offline.py`, y un testigo de 80,40 % generado por una versión intermedia del script que ya no existe (la actual
+  reproduce 78,35 %). Ambos pasan `scripts/autopilot/verify_offline_witness.py` (mismas cajas que el Excel, 0 violaciones,
+  0 accesibilidad).
+- Opción: gap = 80,40 − 61,89 = 18,51 pp (el techo mayor verificado; el testigo se commitea en `docs/autopilot/evidence/`).
+  T1 ≥ 71,15 %, T2 ≥ 78,55 % (o ≥ 80 % absoluto con palancas), T3 ≥ 92,84 %. Si se encuentra un techo offline mayor, las metas
+  se recalculan al alza.
+- Justificación: usar el techo más alto hace las metas más exigentes (criterio conservador); la validez de un testigo no depende
+  de cómo se generó.
+
+## D-014 · Commits con smoke fallido por lock de sweeps ocupado (2026-10-16)
+- Contexto: acd5bda y 956f527 (feat/cotas-superiores) se commitearon con dos tests de `test_run_sweep.py` en rojo, porque el
+  sweep h3_tune_v2 (otro worktree) tenía `/tmp/palca_sweep.lock` cogido ("Ya hay un sweep activo"). El script de commit del
+  director usaba `smoke && tail` bajo `set -e`, que no aborta.
+- Opción: se re-ejecuta el smoke de esa rama cuando el lock quede libre y el resultado se anota en PROGRESS. Los scripts de commit
+  pasan a `smoke || exit 1`. La rama de H1 ya añade reintentos de lock a esos tests (no hay regresión de código).
+- Justificación: transparencia sobre la regla "smoke antes de cada commit".
+
+## D-015 · La regla de accesibilidad ignora vecinas casi pegadas: se mide la robustez, no se cambia la regla (2026-10-16)
+- Contexto: `RobotAccessibilityControl` solo considera adyacente una caja que toca o solapa la huella (hueco ≤ 0 en x e y). El
+  método offline de columnas separa las columnas 2 mm a propósito. Recuento de colocaciones que serían infactibles si
+  "adyacente" incluyera huecos de hasta G mm:
+  | Fuente | G=5 | G=20 | G=50 | G=100 |
+  |---|---|---|---|---|
+  | Testigo offline 80,40 % (186 cajas) | 19 | 97 | **117 (63 %)** | 119 |
+  | Baseline producción (1860 cajas, 10 seeds) | 207 | 377 | **557 (30 %)** | 613 |
+  | H1 (1860 cajas) | 145 | 386 | **611 (33 %)** | 667 |
+  Todas las políticas, incluida la de producción, dependen de esta lectura de la regla; el testigo offline, mucho más.
+- Opción: la regla es una restricción física congelada (§2) y no se modifica; todas las cifras oficiales usan la regla tal cual.
+  Se añade a los sweeps la métrica de robustez `acc_violations_gap{5,20,50}` y se reporta junto al KPI. Ninguna técnica nueva
+  puede introducir huecos artificiales para esquivar la regla (las especificaciones lo prohíben).
+- **[REVISAR — prioridad alta]** ¿Qué holgura lateral necesita realmente la garra? Si la regla física debe considerar vecinas a
+  pocos centímetros, el baseline, las técnicas y el techo offline cambian (el techo, previsiblemente, mucho). Con la respuesta
+  se puede fijar `adjacency_gap_mm` y re-medir todo con el mismo método.
