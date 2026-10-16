@@ -18,7 +18,7 @@ from ..control.types import ControllerEvent, ControllerMode, DecisionContext, Ov
 from .kpi_hooks import aggregate_pallet_kpis
 
 
-SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15)
+SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15, 30, 75, 186)
 RESCUE_RETRY_REASONS = {"STABILITY", "NO_FEASIBLE"}
 
 

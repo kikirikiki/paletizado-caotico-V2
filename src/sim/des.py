@@ -464,6 +464,8 @@ def simulate(
     def place_box(box: Box, time: float) -> None:
         nonlocal processed_boxes
         processed_boxes += 1
+        if getattr(policy, "manages_open_pallets", False):
+            return  # La política registra cada palet físico, no un contador por destino.
         dest_state = destinations[box.destination]
         dest_state.count += 1
         if dest_state.count >= config.n_per_pallet:
@@ -750,6 +752,9 @@ def simulate(
                 record_accessible_window_decision()
                 plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time)
                 if plan is None:
+                    wakeup = getattr(policy, "next_wakeup", lambda now: None)(current_time)
+                    if wakeup is not None and system_has_boxes():
+                        schedule_event(Event(time=wakeup, kind="POLICY_WAKE", seq=next_seq()))
                     closures_started = False
                     pending = getattr(policy, "drain_pending_closures", None)
                     if callable(pending):
@@ -855,6 +860,15 @@ def simulate(
             by_reason = closures_by_reason.setdefault(dest, {})
             by_reason["END"] = int(by_reason.get("END", 0)) + 1
             register_closed_pallet(dest)
+
+    if getattr(policy, "manages_open_pallets", False):
+        counts, reasons = policy.finalize_pallets(current_time)
+        for dest, values in counts.items():
+            closed_pallets[dest] = values
+            closure_sequence[dest] = reasons[dest]
+            closures_by_reason[dest] = {reason: reasons[dest].count(reason) for reason in set(reasons[dest])}
+            changeovers_by_destination[dest] = reasons[dest].count("NO_VISIBLE_FIT")
+            changeover_time_by_destination[dest] = changeovers_by_destination[dest] * policy.t_changeover
 
     pallet_kpis: dict[str, object] = {}
     if policy is not None and hasattr(policy, "collect_kpis"):

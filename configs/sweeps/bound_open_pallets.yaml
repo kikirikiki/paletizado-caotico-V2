@@ -1,0 +1,16 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 15, lookahead_k: 15, open_pallets: 1}
+- name: open_pallets_n2
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 15, lookahead_k: 15, open_pallets: 2}
+- name: open_pallets_n3
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 15, lookahead_k: 15, open_pallets: 3}
+- name: open_pallets_n4
+  preset: arm6_4orient
+  role: bound
+  overrides: {ramp_cap: 15, lookahead_k: 15, open_pallets: 4}
