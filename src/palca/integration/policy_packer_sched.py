@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 import logging
 import os
+from time import perf_counter
 from typing import Any, Iterable, Mapping
 
 from ..domain.box import Box
@@ -111,6 +112,7 @@ class PolicyPackerScheduler:
         self.sum_pick_index = 0
         self.dt_extra_total = 0.0
         self.dt_extra_non_head_total = 0.0
+        self._decision_durations_ms: list[float] = []
 
         scheduler_cfg = self.config.scheduler
         self._online_controller_enabled = bool(self.config.online_controller)
@@ -297,6 +299,33 @@ class PolicyPackerScheduler:
         return cls(config=config)
 
     def choose_action(
+        self,
+        *,
+        ramps: Mapping[int, Any],
+        destinations: Mapping[int, Any],
+        now: float,
+    ) -> PickPlan | None:
+        started = perf_counter()
+        try:
+            return self._choose_action(ramps=ramps, destinations=destinations, now=now)
+        finally:
+            self._decision_durations_ms.append((perf_counter() - started) * 1000.0)
+
+    def collect_decision_timing(self) -> dict[str, object]:
+        """Duraciones de todas las llamadas, incluidas decisiones sin plan."""
+        from numpy import percentile
+
+        values = list(self._decision_durations_ms)
+        return {
+            "durations_ms": values,
+            "n": len(values),
+            "mean_ms": sum(values) / len(values) if values else None,
+            "p50_ms": float(percentile(values, 50)) if values else None,
+            "p95_ms": float(percentile(values, 95)) if values else None,
+            "max_ms": max(values) if values else None,
+        }
+
+    def _choose_action(
         self,
         *,
         ramps: Mapping[int, Any],

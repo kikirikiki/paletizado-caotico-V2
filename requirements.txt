@@ -2,3 +2,4 @@ pandas
 openpyxl
 numpy
 matplotlib
+PyYAML>=6.0

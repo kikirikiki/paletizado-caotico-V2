@@ -717,6 +717,8 @@ def run_simulation(
                 viewer.finalize(block=False)
 
     metrics_payload = result.to_dict()
+    if policy == "palca" and decision_policy is not None and hasattr(decision_policy, "collect_decision_timing"):
+        metrics_payload["decision_timing"] = decision_policy.collect_decision_timing()
     controller_metrics: dict[str, Any] = {"enabled": False}
     if policy == "palca" and decision_policy is not None and hasattr(decision_policy, "collect_controller_metrics"):
         try:
