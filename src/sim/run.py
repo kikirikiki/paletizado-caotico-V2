@@ -12,6 +12,7 @@ from palca.tuning.episodes import apply_shuffle
 from palca.packer.pallet_model import ALLOWED_ORIENTATION_MODES
 
 from .des import Arrival, SimConfig, simulate
+from .arrival_sequence import ARRIVAL_SORT_KEYS, sort_arrival_windows
 from .io import load_arrivals
 from .paths import resolve_repo_path
 
@@ -75,6 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Intensidad de shuffle (<=0 deshabilita)",
     )
+    parser.add_argument("--arrival-sort-window", type=int, default=0,
+                        help="Palanca operativa aguas arriba: ordenar bloques tras shuffle (0 deshabilita); buffer online sin cambios")
+    parser.add_argument("--arrival-sort-key", choices=ARRIVAL_SORT_KEYS, default="family_height")
     parser.add_argument("--episode-id", type=str, default=None, help="ID de episodio para metadata")
 
     # Policy
@@ -435,6 +439,8 @@ def run_simulation(
     episode_seed: int = 0,
     shuffle_window: int = 0,
     shuffle_strength: float = 0.0,
+    arrival_sort_window: int = 0,
+    arrival_sort_key: str = "family_height",
     episode_id: str | None = None,
     # palca
     overhang_mm: int = 0,
@@ -522,6 +528,12 @@ def run_simulation(
     viz_debug: bool = False,
     viz_dest: int = 0,
 ) -> dict[str, Any]:
+    """Simula el flujo; arrival_sort_* es una palanca operativa aguas arriba.
+
+    Requiere que el almacén entregue las cajas secuenciadas en bloques tras
+    el shuffle. No amplía el buffer ni la información de la política online
+    (15 cajas en el estudio). arrival_sort_window=0 conserva el orden actual.
+    """
     if out_path is None and out_json is not None:
         out_path = out_json
 
@@ -613,6 +625,9 @@ def run_simulation(
             )
             for idx, a in enumerate(shuffled, start=1)
         ]
+
+    arrivals = sort_arrival_windows(arrivals, window=arrival_sort_window,
+                                   key=arrival_sort_key, arrival_mode=arrival_mode)
 
     pallet_ids = _detect_destinations(arrivals) if viz else None
 
@@ -801,6 +816,8 @@ def run_simulation(
             "episode_seed": int(episode_seed),
             "shuffle_window": int(shuffle_window),
             "shuffle_strength": float(shuffle_strength),
+            "arrival_sort_window": arrival_sort_window,
+            "arrival_sort_key": arrival_sort_key,
             "episode_id": episode_id,
             "overhang_mm": overhang_mm,
             "heuristic": heuristic,
@@ -918,6 +935,8 @@ def main() -> None:
         episode_seed=int(args.episode_seed),
         shuffle_window=int(args.shuffle_window),
         shuffle_strength=float(args.shuffle_strength),
+        arrival_sort_window=args.arrival_sort_window,
+        arrival_sort_key=args.arrival_sort_key,
         episode_id=args.episode_id,
         overhang_mm=args.overhang_mm,
         heuristic=args.heuristic,

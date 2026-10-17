@@ -40,6 +40,8 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "multi_ramp_seed",
     "accessibility_delta_mm",
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
+    "arrival_sort_window",  # Palanca operativa: el benchmark conserva el flujo actual.
+    "arrival_sort_key",
 })
 
 PROFILE_SCHEMA_VERSION = 1
