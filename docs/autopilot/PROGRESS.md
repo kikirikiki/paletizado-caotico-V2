@@ -30,6 +30,9 @@
 - **T1 ALCANZADO sin condiciones** (H5/H6 solo usan información visible).
 - **MEJOR ACTUAL: H1+H3+H5+H6 sin gate = 77,06 % ± 0,90 (10 seeds de referencia; +3,03 [1,72; 4,35] vs H6 con gate); réplica 20 seeds
   +2,62 [1,52; 3,71] → 77,6 % del gap.** Faltan 2,4 pp para T2 (79,49).
+- **CODEX SIN CUOTA SEMANAL hasta el 2026-10-22 12:40** → solo trabajo sin Codex hasta entonces.
+- **Laterales libres (D-024): NO adoptado** (desempate exacto −1,33 pp significativo en referencia); la oficial ya tiene 94,7 % de
+  cajas con 3–4 laterales libres y 0 % con 0. Rama feat/laterales-libres (borrador).
 - **Tiempo resuelto (feat/h6-rapido):** optimización sin cambiar decisiones (KPI y dumps idénticos 10/10): media 1,156 → 0,957 s,
   p95 2,36 s → cumple D-007. Siguiente: laterales libres como desempate (D-024, spec autopilot_logs/17_spec.md).
 - (histórico) **Problema abierto:** sin gate tarda 1,12 s/decisión de media en 1 proceso (p95 2,52 s): incumple D-007 (media ≤ 1 s). Bajar el

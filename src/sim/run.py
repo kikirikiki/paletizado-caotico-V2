@@ -250,6 +250,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--micro-plan-rollout-leaves", type=int, default=4)
     parser.add_argument("--rollout-future-boxes", type=int, default=0)
     parser.add_argument("--rollout-future-samples", type=int, default=1)
+    parser.add_argument("--free-sides-tiebreak", action="store_true")
+    parser.add_argument("--free-sides-tolerance", type=float, default=0.0)
     parser.add_argument("--rollout-prior", choices=("catalog", "uniform_types", "generic"), default="catalog")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
     parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
@@ -493,6 +495,8 @@ def run_simulation(
     rollout_future_boxes: int = 0,
     rollout_future_samples: int = 1,
     rollout_prior: str = "catalog",
+    free_sides_tiebreak: bool = False,
+    free_sides_tolerance: float = 0.0,
     micro_depth: int = 3,
     micro_width: int = 8,
     micro_topk: int = 15,
@@ -676,6 +680,8 @@ def run_simulation(
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            free_sides_tiebreak=free_sides_tiebreak,
+            free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=int(micro_depth),
             micro_plan_width=int(micro_width),
             micro_plan_topk_per_step=int(micro_topk),
@@ -858,6 +864,8 @@ def run_simulation(
             "rollout_future_boxes": rollout_future_boxes,
             "rollout_future_samples": rollout_future_samples,
             "rollout_prior": rollout_prior,
+            "free_sides_tiebreak": free_sides_tiebreak,
+            "free_sides_tolerance": free_sides_tolerance,
             "micro_depth": int(micro_depth),
             "micro_width": int(micro_width),
             "micro_topk": int(micro_topk),
@@ -972,6 +980,8 @@ def main() -> None:
         rollout_future_boxes=args.rollout_future_boxes,
         rollout_future_samples=args.rollout_future_samples,
         rollout_prior=args.rollout_prior,
+        free_sides_tiebreak=args.free_sides_tiebreak,
+        free_sides_tolerance=args.free_sides_tolerance,
         micro_depth=int(args.micro_depth),
         micro_width=int(args.micro_width),
         micro_topk=int(args.micro_topk),

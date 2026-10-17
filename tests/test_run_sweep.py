@@ -266,3 +266,22 @@ def test_lock_retry_preserves_inode_and_waits(tmp_path, monkeypatch):
         inode = lock.stat().st_ino
     assert calls == ['occupied', 60]
     assert lock.stat().st_ino == inode
+
+
+def test_free_sides_telemetry_summary_counts_and_seed_means(tmp_path):
+    from palca.domain.placement import Placement
+    from palca.scoring.free_sides import free_sides_distribution
+    synthetic_sweep(tmp_path)
+    placement = Placement(0, 0, 0, False, 0, 100, 100, 100)
+    for config in ('base', 'better'):
+        for seed in (1, 2, 3):
+            path = tmp_path / config / str(seed) / 'kpi.json'
+            row = json.loads(path.read_text())
+            row['free_sides'] = free_sides_distribution([[placement] for _ in range(seed)])
+            sweep.write_json(path, row)
+    summary = sweep.generate_summary(tmp_path)
+    observed = summary['configs']['base']['free_sides']
+    assert observed['count'] == observed['counts']['4'] == 6
+    assert observed['proportions']['4'] == 1
+    assert observed['per_seed_proportions']['4']['n'] == 3
+    assert '| base | 6 | 100.000 |' in (tmp_path/'summary.md').read_text()

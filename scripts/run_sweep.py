@@ -30,6 +30,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 import yaml
+from types import SimpleNamespace
+from palca.scoring.free_sides import free_sides_distribution
 from palca.study.accessibility_robustness import accessibility_gap_violations
 from palca.study.metric import aggregate_seeds, paired_comparison, run_kpi, split_pallets
 from palca.study.params import REFERENCE_SEEDS, preset_params
@@ -179,6 +181,8 @@ def run_task(task: dict) -> dict:
                       rec.items, originals, min_support=task["params"]["min_support"],
                       forbidden_faces=task["forbidden_faces"])]
     result = run_kpi(records)
+    result["free_sides"] = free_sides_distribution(
+        [SimpleNamespace(**item) for item in rec.items] for rec in records)
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
     result.update({f"acc_violations_gap{gap}": sum(accessibility_gap_violations(
         rec.items, task["params"]["accessibility_delta_mm"], gap) for rec in records)
@@ -250,6 +254,17 @@ def generate_summary(folder: Path) -> dict:
                        hard_cap_hits_total=sum(row.get("hard_cap_hits", 0) for row in rows),
                        violation_codes={},
                        undefined_kpi_seeds=[row["seed"] for row in rows if row["kpi"] is None])
+        observed = [row["free_sides"] for row in rows if "free_sides" in row]
+        if observed:
+            counts = {str(n): sum(row["counts"][str(n)] for row in observed) for n in (4, 3, 2, 1, 0)}
+            total = sum(counts.values())
+            metrics["free_sides"] = dict(
+                count=total, counts=counts,
+                proportions={k: v / total if total else 0.0 for k, v in counts.items()},
+                per_seed_proportions={str(n): stats([r["proportions"][str(n)] for r in observed])
+                                      for n in (4, 3, 2, 1, 0)},
+                n_seeds=len(observed), gap_mm=20, observation="before_commit",
+                scope="all_placed_including_END")
         for gap in (5, 20, 50):
             key = f"acc_violations_gap{gap}"
             metrics[key] = stats([row.get(key) for row in rows])
@@ -301,6 +316,13 @@ def render_summary(summary: dict) -> str:
             lines.append(f"| {name} | {result['n']} | {number(result['mean_diff_pp'])} | {interval(result['ci95_pp'])} | {'sí' if result['significant'] else 'no'} |")
         else:
             lines.append(f"| {name} | 0 | N/D | N/D | N/D |")
+    lines += ["", "Laterales libres antes de colocar (todos los palets, incluidos END; proporción de cajas):", "",
+              "| Config | Cajas | 4 % | 3 % | 2 % | 1 % | 0 % |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for name, row in summary["configs"].items():
+        distribution = row.get("free_sides")
+        if distribution:
+            lines.append(f"| {name} | {distribution['count']} | " + " | ".join(
+                number(distribution["proportions"][str(n)], 100) for n in (4, 3, 2, 1, 0)) + " |")
     lines += ["", "Validación física (sin relajar):"]
     for name, row in summary["configs"].items():
         lines.append(f"- {name}: hard_cap_hits={row.get('hard_cap_hits_total', 0)}; {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")

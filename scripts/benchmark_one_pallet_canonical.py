@@ -40,6 +40,8 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "multi_ramp_seed",
     "accessibility_delta_mm",
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
+    "free_sides_tiebreak",  # Perfil congelado: conserva False / 0.0; D-024 usa sweeps.
+    "free_sides_tolerance",
 })
 
 PROFILE_SCHEMA_VERSION = 1

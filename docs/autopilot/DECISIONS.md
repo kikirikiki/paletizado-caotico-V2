@@ -260,3 +260,7 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   (3) contigua = vecina que toca o está a < 20 mm del lado, se solapa a lo largo del lado y en altura con [z, z+h); el apoyo y las vecinas
   más bajas que la base no cuentan; (4) el robot puede entrar por cualquier lado libre.
 - Opción: desempate con tolerancia configurable; se adopta solo si el KPI no baja (no inferioridad en referencia y réplica).
+- **Resultado (2026-10-17):** el desempate por laterales libres baja la compactación incluso con tolerancia 0: referencia −1,33 pp
+  [−2,38; −0,27] (significativo), réplica −0,17 [−1,06; 0,73]; tolerancias 0,001 y 0,01 peores o iguales. → **NO se adopta** (el
+  usuario no quiere perder compactación). La configuración oficial ya coloca el 94,7 % de las cajas con 3–4 laterales libres, el 0,4 %
+  con 1 y ninguna con 0 (con desempate: 97,8 % con 3–4). Implementado con `free_sides_tiebreak=False` por defecto (rama feat/laterales-libres).
