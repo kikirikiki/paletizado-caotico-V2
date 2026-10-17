@@ -148,6 +148,24 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   pasan a `smoke || exit 1`. La rama de H1 ya añade reintentos de lock a esos tests (no hay regresión de código).
 - Justificación: transparencia sobre la regla "smoke antes de cada commit".
 
+## D-019 · Ciclo de pensamiento lateral n.º 1 (2026-10-17)
+- Contexto: tras H6 (74,03 %), H7 no aporta y el análisis indica que, con las restricciones oficiales, `arm6_4orient` está cerca de su
+  techo práctico: la franja trasera de 395 mm (y ≥ 425) solo se llena con cajas de pie (la política ya manda allí el 81 % de las de pie
+  y el 76 % de las estrechas), y el gate las retrasa. El techo offline (81,45 %) planifica columnas completas con información total.
+  No se ha llegado aún a 3 técnicas seguidas < 0,5 pp (contador: 1), pero el ciclo se adelanta para no gastar cuota en variantes.
+- Reformulaciones (ganancia esperada / coste / viabilidad física, 1–5):
+  | # | Reformulación | Gan. | Coste | Viab. | Nota |
+  |---|---|---|---|---|---|
+  | R1 | Palets por familia con 2 posiciones (palet de familia dominante + palet mixto) | 3 | 4 | 4 | palanca (2.ª posición); N>1 hoy incompatible con la búsqueda |
+  | R2 | Quitar el gate stand_hw (franja trasera con cajas de pie desde el suelo) | 3 (+3,0 medido) | 1 | ? | pendiente del responsable (D-018) |
+  | R3 | Zona de staging (aparcar cajas para colocarlas después) | 1–2 | 3 | 2 | con búsqueda, más buffer apenas aporta (k30/k75 n.s.) |
+  | R4 | **Secuenciación aguas arriba** (el almacén entrega las cajas agrupadas por familia/altura en ventanas) | 4 | 2 | 3 | palanca operativa: acerca el problema online al offline (81,45 %) |
+  | R5 | Cambiar qué se optimiza: palet "de residuos" que acumula los inencajables hasta el final | 2 | 2 | 3 | sesga el KPI (el último palet no cuenta): solo con métrica de flujo, no se adopta |
+  | R6 | Valor aprendido (PCT/DRL) para los rollouts | 2–3 | 5 | 5 | solo si lo heurístico se estanca de verdad |
+- Opción: atacar R4 (mayor ganancia/coste) como palanca operativa cuantificada: ordenar el flujo de llegada dentro de ventanas de W cajas
+  según una clave (familia, altura) y medir H6 con W ∈ {15, 30, 60, 186}. Después, R1 si queda cuota. R2 depende del responsable.
+- Justificación: protocolo anti-estancamiento §5 y prioridad por ganancia/coste.
+
 ## D-018 · El gate stand_hw es la palanca de software más potente restante: se reporta aparte (2026-10-17)
 - Contexto: el prompt lista `stand_hw_height_margin_gate_mm=400` entre las "restricciones físicas" (§2), aunque §7 no lo menciona entre
   las relajaciones prohibidas, y en el código es una heurística de altura (permite cajas de pie solo si el palet está a ≤ 400 mm del
