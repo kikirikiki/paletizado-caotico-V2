@@ -1,0 +1,25 @@
+# D-019 R1, fase 1: greedy, misma ventana y restricciones; sin H3–H6.
+- name: h1_n1
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty}
+- name: h1_n2_score
+  preset: arm6_4orient
+  role: lever
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, open_pallets: 2, open_pallets_assignment: score}
+- name: h1_n2_family
+  preset: arm6_4orient
+  role: lever
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, open_pallets: 2, open_pallets_assignment: family}
+- name: no_h1_n1
+  preset: arm6_4orient
+  role: contrast
+  overrides: {}
+- name: no_h1_n2_score
+  preset: arm6_4orient
+  role: lever
+  overrides: {open_pallets: 2, open_pallets_assignment: score}
+- name: no_h1_n2_family
+  preset: arm6_4orient
+  role: lever
+  overrides: {open_pallets: 2, open_pallets_assignment: family}

@@ -15,13 +15,19 @@ from .policy_packer_sched import PolicyPackerScheduler
 class OpenPalletScheduler(PolicyPackerScheduler):
     manages_open_pallets = True
 
-    def __init__(self, config, *, open_pallets: int, t_changeover: float):
+    def __init__(self, config, *, open_pallets: int, t_changeover: float,
+                 open_pallets_assignment: str = "score"):
         super().__init__(config)
         if open_pallets < 2:
             raise ValueError("OpenPalletScheduler requiere open_pallets >= 2")
+        if open_pallets_assignment not in ("score", "family"):
+            raise ValueError("open_pallets_assignment debe ser score o family")
+        if open_pallets_assignment == "family" and open_pallets != 2:
+            raise ValueError("open_pallets_assignment=family requiere open_pallets=2")
         if config.micro_plan_enabled or config.online_controller:
             raise ValueError("open_pallets > 1 requiere micro_plan y online_controller desactivados")
         self.open_pallets = open_pallets
+        self.open_pallets_assignment = open_pallets_assignment
         self.t_changeover = t_changeover
         self._choices: dict[int, list[str]] = {}
         self._slot_dest: dict[str, int] = {}
@@ -49,7 +55,8 @@ class OpenPalletScheduler(PolicyPackerScheduler):
         self._retry_at = None
         blocked = {slot for slot, dest in self._slot_dest.items()
                    if dest in sim_state.pallet_blocked or self._ready_at.get(slot, 0) > sim_state.now}
-        state = replace(sim_state, pallet_choices=self._choices, pallet_blocked=blocked)
+        state = replace(sim_state, pallet_choices=self._choices, pallet_blocked=blocked,
+                        open_pallets_assignment=self.open_pallets_assignment)
         plan, fail, _, stop, details = super()._run_scheduler_attempt(sim_state=state, overrides=overrides)
         stats = self._scheduler.last_eval_stats
         closed = False
@@ -122,6 +129,7 @@ class OpenPalletScheduler(PolicyPackerScheduler):
         result.update(aggregate_pallet_kpis(groups))
         result["closures_by_reason"] = dict(Counter(r["reason"] for rows in self._records.values() for r in rows))
         result.update(open_pallets=self.open_pallets,
+                      open_pallets_assignment=self.open_pallets_assignment,
                       open_pallets_lever="operational_extra_pallet_positions",
                       open_pallets_closure_rule="NO_VISIBLE_FIT; terminal DRAIN except last END",
                       physical_pallets={dest: [{k: v for k, v in r.items() if k != "items"} for r in rows]

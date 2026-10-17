@@ -32,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ramp_cap", type=int, default=15)
     parser.add_argument("--open-pallets", type=int, default=1,
                         help="Posiciones de palet por destino (bound operativo; defecto 1)")
+    parser.add_argument("--open-pallets-assignment", choices=("score", "family"), default="score",
+                        help="Asignación con N=2: scorer actual o familia dominante/resto con desbordamiento")
     parser.add_argument("--staging_cap", type=int, default=0)
     parser.add_argument("--time_scale", type=float, default=1.0, help="Escala de tiempo (1,2,3,4,...)")
     parser.add_argument(
@@ -428,6 +430,7 @@ def run_simulation(
     t_unstage: float = 10.0,
     ramp_cap: int = 15,
     open_pallets: int = 1,
+    open_pallets_assignment: str = "score",
     policy: str = "legacy",
     lookahead_k: int = 1,
     time_scale: float = 1.0,
@@ -527,6 +530,10 @@ def run_simulation(
 
     if type(open_pallets) is not int or open_pallets < 1:
         raise ValueError("open_pallets debe ser un entero >= 1")
+    if open_pallets_assignment not in ("score", "family"):
+        raise ValueError("open_pallets_assignment debe ser score o family")
+    if open_pallets_assignment == "family" and open_pallets > 2:
+        raise ValueError("open_pallets_assignment=family requiere open_pallets=2 (o 1 sin efecto)")
     if open_pallets > 1:
         if (policy != "palca" or not continuous_pallets or model.upper() != "M1"
                 or arrival_mode != "immediate" or max_pallets or multi_ramp or viz):
@@ -733,7 +740,8 @@ def run_simulation(
             from palca.integration.policy_open_pallets import OpenPalletScheduler
 
             decision_policy = OpenPalletScheduler(decision_policy.config, open_pallets=open_pallets,
-                                                 t_changeover=t_changeover)
+                                                 t_changeover=t_changeover,
+                                                 open_pallets_assignment=open_pallets_assignment)
 
         if viewer is not None and rect_cls is not None:
             if hasattr(decision_policy, "attach_viewer"):
@@ -793,6 +801,7 @@ def run_simulation(
             "t_unstage": t_unstage,
             "ramp_cap": ramp_cap,
             "open_pallets": open_pallets,
+            "open_pallets_assignment": open_pallets_assignment,
             "staging_cap": staging_cap,
             "policy": policy,
             "lookahead_k": lookahead_k,
@@ -911,6 +920,7 @@ def main() -> None:
         t_unstage=args.t_unstage,
         ramp_cap=args.ramp_cap,
         open_pallets=args.open_pallets,
+        open_pallets_assignment=args.open_pallets_assignment,
         policy=args.policy,
         lookahead_k=args.k,
         time_scale=args.time_scale,
