@@ -12,7 +12,9 @@ from palca.packer.maxrects2d import MaxRects2D
 from palca.packer.pallet_model import (
     ORIENTATION_MODE_PLANAR,
     ORIENTATION_MODE_PLANAR_STAND_HW,
+    ORIENTATION_MODE_PLANAR_STAND_HW_CANTO,
     PalletModel,
+    _orientation_variants_for_mode,
     orientation_dims_for_mode,
 )
 from sim import run as sim_run
@@ -36,6 +38,61 @@ def test_orientation_dims_planar_vs_extended() -> None:
         allow_rotate=True,
     )
     assert extended == [(400, 300, 200), (300, 400, 200), (200, 300, 400), (300, 200, 400)]
+
+
+@pytest.mark.parametrize("allow_rotate", [False, True])
+def test_canto_exact_variants_and_old_modes(allow_rotate):
+    expected = [
+        ("LWH", (600, 400, 300), "planar", False),
+        ("WLH", (400, 600, 300), "planar", True),
+        ("HWL", (300, 400, 600), "stand_hw", False),
+        ("WHL", (400, 300, 600), "stand_hw", True),
+        ("LHW", (600, 300, 400), "canto", False),
+        ("HLW", (300, 600, 400), "canto", True),
+    ]
+    for mode, count in [(ORIENTATION_MODE_PLANAR, 2),
+                        (ORIENTATION_MODE_PLANAR_STAND_HW, 4),
+                        (ORIENTATION_MODE_PLANAR_STAND_HW_CANTO, 6)]:
+        variants = _orientation_variants_for_mode(
+            600, 400, 300, mode=mode, allow_rotate=allow_rotate)
+        assert [(v.name, (v.length_mm, v.width_mm, v.height_mm), v.family, v.rot90)
+                for v in variants] == [v for v in expected[:count] if allow_rotate or not v[3]]
+
+
+@pytest.mark.parametrize("dims,count", [((600, 400, 400), 3), ((400, 400, 400), 1)])
+def test_canto_deduplicates_geometry(dims, count):
+    variants = orientation_dims_for_mode(
+        *dims, mode=ORIENTATION_MODE_PLANAR_STAND_HW_CANTO, allow_rotate=True)
+    assert len(variants) == len(set(variants)) == count
+
+
+@pytest.mark.parametrize("gate,expected", [(400, {"planar", "canto"}),
+                                         (2400, {"planar", "stand_hw", "canto"})])
+def test_canto_is_not_height_gated(gate, expected):
+    model = PalletModel(orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW_CANTO,
+                        stand_hw_height_margin_gate_mm=gate)
+    assert {v.family for v in model._orientations(600, 400, 300)} == expected
+    assert model.stats.stand_hw_gate_blocks_total == (gate == 400)
+    assert model.stats.stand_hw_gate_allows_total == (gate == 2400)
+    args = sim_run.build_parser().parse_args([
+        "--excel", "dummy.xlsx", "--orientation-mode", ORIENTATION_MODE_PLANAR_STAND_HW_CANTO])
+    assert args.orientation_mode == ORIENTATION_MODE_PLANAR_STAND_HW_CANTO
+
+
+def test_canto_placement_and_telemetry():
+    spec = PalletSpec(length_mm=1200, width_mm=800, max_height_mm=2400)
+    box = Box(box_id=1, length_mm=1000, width_mm=1300, height_mm=700,
+              timestamp=0.0, destination=1)
+    model = PalletModel(spec=spec, orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW_CANTO)
+    preview = model.preview_place(box)
+    assert preview.feasible
+    assert preview.placement.orientation_family == "canto"
+    assert preview.placement.orientation_name == "LHW"
+    model.commit_place(preview)
+    kpis = aggregate_pallet_kpis({1: [model]})
+    assert kpis["orientation_counts"] == {"planar": 0, "stand_hw": 0, "canto": 1}
+    assert kpis["orientation_counts_by_dest"][1]["canto"] == 1
+    assert not PalletModel(spec=spec, orientation_mode=ORIENTATION_MODE_PLANAR_STAND_HW).preview_place(box).feasible
 
 
 def test_orientation_mode_parser_and_policy_wiring(monkeypatch: Any) -> None:

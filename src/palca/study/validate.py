@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from .orientation_faces import FORBIDDEN_FACES_ARM6, RestingFace, resting_face
 from .params import PALLET_NOMINAL_MM, pallet_envelope_mm
@@ -33,7 +33,7 @@ def _face(original: tuple, placed: tuple, item: dict) -> RestingFace:
     name = item.get("orientation_name")
     family = item.get("orientation_family")
     family_faces = {"planar": RestingFace.LXW, "stand_hw": RestingFace.HXW,
-                    "stand_hl": RestingFace.HXL}
+                    "stand_hl": RestingFace.HXL, "canto": RestingFace.HXL}
     vertical_faces = {"H": RestingFace.LXW, "L": RestingFace.HXW, "W": RestingFace.HXL}
     named_face = None
     if name is not None:
@@ -76,7 +76,8 @@ def _union_area(rectangles: list[tuple[float, float, float, float]]) -> float:
 
 
 def validate_pallet(items: list[dict], original_dims_by_box_id: Mapping,
-                    min_support: float = 0.85) -> list[Violation]:
+                    min_support: float = 0.85,
+                    forbidden_faces: Iterable[str] = FORBIDDEN_FACES_ARM6) -> list[Violation]:
     """Comprueba estado final: envolvente, dimensiones/cara, solape y soporte.
 
     Tolerancia de envolvente/solape: 0,5 mm; de contacto vertical: ±1 mm.
@@ -85,6 +86,7 @@ def validate_pallet(items: list[dict], original_dims_by_box_id: Mapping,
     """
     if not isfinite(min_support) or not 0 <= min_support <= 1:
         raise ValueError("min_support debe estar en [0, 1]")
+    forbidden_faces = set(forbidden_faces)
     originals = {str(key): dims for key, dims in original_dims_by_box_id.items()}
     violations = []
     geometry = []
@@ -131,7 +133,7 @@ def validate_pallet(items: list[dict], original_dims_by_box_id: Mapping,
         except ValueError as exc:
             add("orientation", str(exc))
             continue
-        if face in FORBIDDEN_FACES_ARM6:
+        if face in forbidden_faces:
             add("forbidden_face", f"Cara apoyada prohibida para arm6: {face.value}")
 
     for i, (box_id, x, y, z, length, width, height) in enumerate(geometry):

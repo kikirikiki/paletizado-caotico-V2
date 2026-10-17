@@ -81,7 +81,11 @@ class _PreviewBudget:
 
 ORIENTATION_MODE_PLANAR = "planar"
 ORIENTATION_MODE_PLANAR_STAND_HW = "planar+stand_hw"
-ALLOWED_ORIENTATION_MODES = (ORIENTATION_MODE_PLANAR, ORIENTATION_MODE_PLANAR_STAND_HW)
+ORIENTATION_MODE_PLANAR_STAND_HW_CANTO = "planar+stand_hw+canto"
+ALLOWED_ORIENTATION_MODES = (
+    ORIENTATION_MODE_PLANAR, ORIENTATION_MODE_PLANAR_STAND_HW,
+    ORIENTATION_MODE_PLANAR_STAND_HW_CANTO,
+)
 DEFAULT_STAND_HW_HEIGHT_MARGIN_GATE_MM = 400
 STACKING_MODE_LAYERS = "layers"
 STACKING_MODE_HEIGHTFIELD = "heightfield"
@@ -172,7 +176,9 @@ def _orientation_variants_for_mode(
             )
         )
 
-    include_stand_hw = normalized_mode == ORIENTATION_MODE_PLANAR_STAND_HW
+    include_stand_hw = normalized_mode in (
+        ORIENTATION_MODE_PLANAR_STAND_HW, ORIENTATION_MODE_PLANAR_STAND_HW_CANTO,
+    )
     if allow_stand_hw is not None:
         include_stand_hw = include_stand_hw and bool(allow_stand_hw)
 
@@ -198,6 +204,18 @@ def _orientation_variants_for_mode(
                     family="stand_hw",
                 )
             )
+
+    # Canto apoya HxL (vertical W), sin gate de altura.
+    if normalized_mode == ORIENTATION_MODE_PLANAR_STAND_HW_CANTO:
+        variants.append(_OrientationVariant(
+            rot90=False, length_mm=l_mm, width_mm=h_mm, height_mm=w_mm,
+            name="LHW", family="canto",
+        ))
+        if allow_rotate and l_mm != h_mm:
+            variants.append(_OrientationVariant(
+                rot90=True, length_mm=h_mm, width_mm=l_mm, height_mm=w_mm,
+                name="HLW", family="canto",
+            ))
 
     deduped: list[_OrientationVariant] = []
     seen: set[tuple[int, int, int]] = set()
@@ -1509,7 +1527,9 @@ class PalletModel:
 
     def _orientations(self, length_mm: int, width_mm: int, height_mm: int) -> list[_OrientationVariant]:
         allow_stand_hw: bool | None = None
-        if self.orientation_mode == ORIENTATION_MODE_PLANAR_STAND_HW:
+        if self.orientation_mode in (
+            ORIENTATION_MODE_PLANAR_STAND_HW, ORIENTATION_MODE_PLANAR_STAND_HW_CANTO,
+        ):
             height_margin_mm = max(0, int(self.spec.max_height_mm) - int(self.current_height_mm()))
             allow_stand_hw = should_allow_stand_hw(height_margin_mm, self.stand_hw_height_margin_gate_mm)
             if allow_stand_hw:

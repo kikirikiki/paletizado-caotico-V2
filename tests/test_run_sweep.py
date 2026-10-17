@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,43 @@ def test_yaml_parsing_and_presets(tmp_path):
     assert [c["name"] for c in configs] == ["arm6_4orient", "gantry_4orient", "arm6_planar"]
     assert [c["role"] for c in configs] == ["official", "contrast", "control"]
     assert sweep.load_configs(config_file(tmp_path, "{min_support: 0.9}"))[0]["overrides"] == {"min_support": 0.9}
+
+
+def test_lever_canto_configs_match_current_h5_reference():
+    configs = sweep.load_configs(ROOT / "configs/sweeps/lever_canto.yaml")
+    reference = next(c["overrides"] for c in sweep.load_configs(ROOT / "configs/sweeps/h5_eval.yaml")
+                     if c["name"] == "h5_rollout_l4")
+    assert [c["preset"] for c in configs] == ["arm6_4orient", "lever_arm_canto", "gantry_6orient"] * 2
+    assert [c["role"] for c in configs] == ["control", "lever", "contrast", "official", "lever", "contrast"]
+    assert all(c["overrides"] == {} for c in configs[:3])
+    assert all(c["overrides"] == reference for c in configs[3:])
+
+
+@pytest.mark.parametrize("preset,forbidden,violations", [
+    ("arm6_4orient", ["HxL"], 1),
+    ("lever_arm_canto", [], 0),
+    ("gantry_6orient", [], 0),
+])
+def test_worker_validates_canto_with_preset_faces(tmp_path, monkeypatch, preset, forbidden, violations):
+    config = dict(name=preset, preset=preset, overrides={}, role="control")
+    task = sweep.make_task(config, 1, tmp_path, "head", "source")
+    assert task["forbidden_faces"] == forbidden
+    item = dict(box_id=1, length_mm=600, width_mm=300, height_mm=400,
+                x_mm=0, y_mm=0, z_mm=0, orientation_name="LHW", orientation_family="canto")
+
+    def simulate(**params):
+        Path(params["dump_placements_path"]).write_text("{}")
+        return dict(metrics=dict(decision_timing={}, pallet_kpis=dict(deadline_cutoffs_count=0)))
+
+    monkeypatch.setattr(sweep, "run_simulation", simulate)
+    monkeypatch.setattr(sweep, "split_pallets", lambda *args: [SimpleNamespace(dest=1, index=0, items=[item])])
+    monkeypatch.setattr(sweep, "original_dims_for_run", lambda *args: {1: (600, 400, 300)})
+    monkeypatch.setattr(sweep, "run_kpi", lambda *args: dict(boxes_placed=1))
+    monkeypatch.setattr(sweep, "accessibility_gap_violations", lambda *args: 0)
+    result = sweep.run_task(task)
+    assert result["forbidden_faces"] == forbidden
+    assert result["n_violations"] == violations
+    assert all(v["code"] == "forbidden_face" for v in result["violations"])
 
 
 @pytest.mark.parametrize("overrides", ["{typo_param: 2}", "{episode_seed: 1}", "{out_path: out.json}", "[]",

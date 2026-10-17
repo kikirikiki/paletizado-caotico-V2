@@ -32,6 +32,8 @@ def test_reference_params_and_complete_simulation_call():
     ("arm6_4orient", "planar+stand_hw", 400),
     ("gantry_4orient", "planar+stand_hw", 0),
     ("arm6_planar", "planar", 400),
+    ("lever_arm_canto", "planar+stand_hw+canto", 400),
+    ("gantry_6orient", "planar+stand_hw+canto", 0),
 ])
 def test_presets(name, mode, delta):
     params = preset_params(name)
@@ -52,6 +54,14 @@ def test_copies_and_overrides_are_independent(monkeypatch):
     assert override == {"tags": ["override"]}
     assert preset_params("gantry_4orient")["ramp_cap"] == BASE_PARAMS["ramp_cap"] == 15
     assert preset_params("arm6_4orient")["min_support"] == 0.85
+
+
+@pytest.mark.parametrize("new,base", [("lever_arm_canto", "arm6_4orient"),
+                                    ("gantry_6orient", "gantry_4orient")])
+def test_canto_presets_only_change_orientation(new, base):
+    params = preset_params(new)
+    params["orientation_mode"] = "planar+stand_hw"
+    assert params == preset_params(base)
 
 
 def test_invalid_override_and_unknown_preset():

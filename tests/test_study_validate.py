@@ -79,6 +79,21 @@ def test_hxl_face_is_forbidden():
     assert codes([item], {1: (200, 100, 50)}) == {"forbidden_face"}
 
 
+@pytest.mark.parametrize("original,placed,name", [
+    ((200, 100, 50), (200, 50, 100), "LHW"),
+    ((200, 100, 50), (50, 200, 100), "HLW"),
+    ((200, 100, 100), (200, 100, 100), "LHW"),
+])
+def test_canto_requires_explicit_face_permission(original, placed, name):
+    item = box(dims=placed, orientation_name=name, orientation_family="canto")
+    assert codes([item], {1: original}) == {"forbidden_face"}
+    assert codes([item], {1: original}, forbidden_faces=set()) == set()
+    item["orientation_name"] = None
+    assert codes([item], {1: original}, forbidden_faces=set()) == set()
+    item["orientation_family"] = "stand_hw"
+    assert codes([item], {1: original}, forbidden_faces=set()) == {"orientation"}
+
+
 @pytest.mark.parametrize("original,placed,name,family", [
     ((200, 100, 100), (200, 100, 100), "LWH", "planar"),
     ((200, 200, 50), (50, 200, 200), "HWL", "stand_hw"),
