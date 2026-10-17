@@ -146,6 +146,16 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   pasan a `smoke || exit 1`. La rama de H1 ya añade reintentos de lock a esos tests (no hay regresión de código).
 - Justificación: transparencia sobre la regla "smoke antes de cada commit".
 
+## D-016 · Resultado limítrofe de H5: réplica preregistrada en 20 seeds nuevas (2026-10-17, antes de ejecutarla)
+- Contexto: H5 (rollout, 4 hojas, 25 nodos) sobre H1+H3 da 72,04 % en las 10 seeds de referencia, +1,105 pp con IC95
+  [−0,004; +2,214]: no significativo al 95 % por muy poco. Añadir seeds a la misma evaluación tras ver el resultado sería parada
+  opcional (sesgo).
+- Opción (fijada ANTES de ver la réplica): una única réplica independiente con 20 seeds nuevas = las 20 seeds extra deterministas del
+  runner (índices 10–29, `SHA256('palca-sweep-seed-v1:<i>')[:4]`), nunca usadas para ajustar ni evaluar. Configs: H1+H3 y H1+H3+H5
+  ganadora, sin cambiar parámetros. Criterio: H5 se adopta si la pareada H5 − H1+H3 en esas 20 seeds es significativa (IC95 > 0). Si no,
+  H5 se descarta (cuenta como técnica < 0,5 pp a efectos del protocolo anti-estancamiento solo si su media en la réplica es < 0,5 pp).
+- Justificación: criterio conservador (§7) sin sobreajuste a las seeds de referencia.
+
 ## D-015 · La regla de accesibilidad ignora vecinas casi pegadas: se mide la robustez, no se cambia la regla (2026-10-16)
 - Contexto: `RobotAccessibilityControl` solo considera adyacente una caja que toca o solapa la huella (hueco ≤ 0 en x e y). El
   método offline de columnas separa las columnas 2 mm a propósito. Recuento de colocaciones que serían infactibles si
