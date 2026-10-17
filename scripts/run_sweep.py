@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
 import yaml
+from palca.study.accessibility_robustness import accessibility_gap_violations
 from palca.study.metric import aggregate_seeds, paired_comparison, run_kpi, split_pallets
 from palca.study.params import REFERENCE_SEEDS, preset_params
 from palca.study.validate import validate_pallet
@@ -174,6 +175,9 @@ def run_task(task: dict) -> dict:
                       rec.items, originals, min_support=task["params"]["min_support"])]
     result = run_kpi(records)
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
+    result.update({f"acc_violations_gap{gap}": sum(accessibility_gap_violations(
+        rec.items, task["params"]["accessibility_delta_mm"], gap) for rec in records)
+        for gap in (5, 20, 50)})
     result.update(n_violations=len(violations), violations=violations,
                   decision_timing=payload["metrics"]["decision_timing"],
                   hard_cap_hits=payload["metrics"]["pallet_kpis"].get("hard_cap_hits", 0),
@@ -240,6 +244,9 @@ def generate_summary(folder: Path) -> dict:
                        hard_cap_hits_total=sum(row.get("hard_cap_hits", 0) for row in rows),
                        violation_codes={},
                        undefined_kpi_seeds=[row["seed"] for row in rows if row["kpi"] is None])
+        for gap in (5, 20, 50):
+            key = f"acc_violations_gap{gap}"
+            metrics[key] = stats([row.get(key) for row in rows])
         for row in rows:
             for violation in row["violations"]:
                 code = violation["code"]
@@ -290,6 +297,10 @@ def render_summary(summary: dict) -> str:
     lines += ["", "Validación física (sin relajar):"]
     for name, row in summary["configs"].items():
         lines.append(f"- {name}: hard_cap_hits={row.get('hard_cap_hits_total', 0)}; {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")
+    lines += ["", "Robustez D-015 (media de colocaciones por seed; no cambia la regla):", "",
+              "| Config | gap5 | gap20 | gap50 |", "|---|---|---|---|"]
+    for name, row in summary["configs"].items():
+        lines.append(f"| {name} | " + " | ".join(number(row[f"acc_violations_gap{gap}"]["mean"]) for gap in (5,20,50)) + " |")
     lines += ["", "Las seeds y parámetros son fijos. Los límites de tiempo del simulador pueden hacer depender decisiones de la carga de CPU; los cortes se registran y el tiempo es observacional."]
     return "\n".join(lines) + "\n"
 

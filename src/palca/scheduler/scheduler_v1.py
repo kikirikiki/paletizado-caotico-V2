@@ -11,6 +11,7 @@ from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring_coherencia import CoherenciaCapaScorer
+from ..scoring.state_value import placed_volume, visible_completion_potential
 from ..scoring.access_debt import HeightField, access_debt, build_heightfield
 from ..scoring.height_slack import (
     ScoreMode,
@@ -57,6 +58,9 @@ class SchedulerConfig:
     micro_plan_enabled: bool = False
     micro_plan_node_budget: int = 0
     micro_plan_hard_cap_ms: int = 10000
+    micro_plan_value: str = "score"
+    micro_plan_value_weight: float = 1.0
+    micro_plan_rollout_leaves: int = 4
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -71,6 +75,12 @@ class SchedulerConfig:
         if (not isinstance(self.micro_plan_node_budget, int) or self.micro_plan_node_budget < 0
                 or not isinstance(self.micro_plan_hard_cap_ms, int) or self.micro_plan_hard_cap_ms <= 0):
             raise ValueError("micro_plan_node_budget must be a nonnegative int and hard_cap_ms a positive int")
+        if self.micro_plan_value not in ("score", "potential", "rollout"):
+            raise ValueError("micro_plan_value must be score, potential or rollout")
+        if not 0 <= self.micro_plan_value_weight < float("inf"):
+            raise ValueError("micro_plan_value_weight must be finite and nonnegative")
+        if not isinstance(self.micro_plan_rollout_leaves, int) or self.micro_plan_rollout_leaves < 1:
+            raise ValueError("micro_plan_rollout_leaves must be a positive int")
         if self.micro_plan_enabled and self.micro_plan_node_budget > 0 and self.max_seconds_per_item > 0:
             raise ValueError("Deterministic microplan requires max_seconds_per_item=0")
         if self.access_debt_mode not in ("penalty", "filter"):
@@ -197,6 +207,7 @@ class _BeamNode:
     height_after_mm: int = 0
     placed_count: int = 0
     first_plan: PickPlan | None = None
+    state_value: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -677,6 +688,18 @@ class SchedulerV1:
             placed_count=0,
             first_plan=None,
         )
+        if self.config.micro_plan_value != "score":
+            # Freeze precisely the initial action window. In particular, never
+            # refill simulated queues from the unknown upstream stream.
+            allocation = self._allocate_micro_window({rid: len(r.queue) for rid, r in root.ramps.items()})
+            root.ramps = {rid: _BeamRampState(list(r.queue[:allocation[rid]]), [], r.capacity)
+                          for rid, r in root.ramps.items()}
+            self._set_state_value(root)
+        visible_count = sum(len(r.queue) for r in root.ramps.values())
+        rollout_reserve = (min(beam_width, self.config.micro_plan_rollout_leaves) * visible_count
+                           if self.config.micro_plan_value == "rollout" else 0)
+        # Leave room for at least the root window when a small budget is used.
+        beam_budget = max(min(visible_count, node_budget), node_budget - rollout_reserve)
         beam: list[_BeamNode] = [root]
         best_node = root
 
@@ -717,7 +740,7 @@ class SchedulerV1:
                         break
                     # One budget unit is one attempted action, including infeasible ones.
                     # Finalize the partial depth; never start attempt budget + 1.
-                    if node_budget > 0 and nodes_expanded >= node_budget:
+                    if node_budget > 0 and nodes_expanded >= beam_budget:
                         cutoff = True
                         cutoff_reason = "node_budget"
                         break
@@ -828,7 +851,8 @@ class SchedulerV1:
                         )
 
                 if expansions:
-                    if self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
+                    if (self.config.micro_plan_value == "score"
+                            and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
                         ordered_expansions = rank_for_expansion_with_height_slack(
                             candidates=expansions,
                             score_mode=self.config.score_mode,
@@ -856,12 +880,31 @@ class SchedulerV1:
             depth_effective = depth + 1
 
             for candidate in beam:
-                if self._beam_rank_key(candidate) > self._beam_rank_key(best_node):
+                if ((self.config.micro_plan_value != "score" and best_node.first_plan is None)
+                        or self._beam_rank_key(candidate) > self._beam_rank_key(best_node)):
                     best_node = candidate
 
             if cutoff:
                 break
 
+        rollout_nodes = 0
+        rollout_completed = 0
+        if self.config.micro_plan_value == "rollout" and beam[0].first_plan is not None:
+            # All compared leaves receive the same deterministic placement quota.
+            leaves = beam[:self.config.micro_plan_rollout_leaves]
+            quota = ((node_budget - nodes_expanded) // len(leaves) if node_budget > 0
+                     else visible_count)
+            evaluated = []
+            for leaf in leaves:
+                value, consumed, completed = self._rollout_value(leaf, sim_state, quota, deadline)
+                rollout_nodes += consumed
+                rollout_completed += int(completed)
+                evaluated.append((value, self._beam_rank_key(leaf), leaf))
+            if evaluated:
+                winner = max(evaluated, key=lambda item: item[:2])
+                best_node = winner[2]
+                best_node.state_value = winner[0]
+        nodes_expanded += rollout_nodes
         best_seq_len = int(best_node.placed_count)
         stats = {
             "enabled": True,
@@ -874,6 +917,10 @@ class SchedulerV1:
             "nodes_expanded": int(nodes_expanded),
             "depth_effective": int(depth_effective),
             "best_seq_len": int(best_seq_len),
+            "value_mode": self.config.micro_plan_value,
+            "state_value": float(best_node.state_value),
+            "rollout_nodes": int(rollout_nodes),
+            "rollout_completed_leaves": int(rollout_completed),
             "feasible_first_candidates": int(feasible_first_candidates),
             "feasible_first_min_height_mm": (
                 int(feasible_first_min_height) if feasible_first_min_height is not None else None
@@ -897,7 +944,48 @@ class SchedulerV1:
             return None, stats, root_slack_stats
         return best_node.first_plan, stats, root_slack_stats
 
+    def _set_state_value(self, node: _BeamNode) -> None:
+        potential = 0.0
+        for pid, pallet in node.pallets.items():
+            boxes = [b for rid in sorted(node.ramps) for b in node.ramps[rid].queue
+                     if b.destination == pid]
+            potential += visible_completion_potential(pallet, boxes)
+        node.state_value = placed_volume(node.pallets) + self.config.micro_plan_value_weight * potential
+
+    def _rollout_value(self, leaf, sim_state, quota, deadline):
+        pallets = copy.deepcopy(leaf.pallets)
+        ramps = {rid: list(r.queue) for rid, r in leaf.ramps.items()}
+        # Isolate all greedy telemetry and mutable scheduler state from reality.
+        # Call greedy directly; retain the deterministic config so optional
+        # batchfill cannot introduce a local clock cutoff inside a rollout.
+        greedy = SchedulerV1(replace(self.config, heartbeat_sec=0))
+        consumed = 0
+        completed = False
+        while consumed < quota:
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            if not any(ramps.values()):
+                completed = True
+                break
+            state = SchedulerSimState(now=sim_state.now, ramps=ramps, pallets=pallets,
+                                      pallet_blocked=set(sim_state.pallet_blocked))
+            # A complete greedy scan (including an unsuccessful final one) is
+            # one unit. Every committed placement therefore consumes a unit.
+            consumed += 1
+            plan = greedy._choose_action_greedy(state, deadline=deadline,
+                                               lookahead_k=self.config.micro_plan_window_total or 15)
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            if plan is None:
+                completed = True
+                break
+            pallets[plan.pallet_id].commit_place(plan.preview)
+            ramps[plan.ramp_id].pop(plan.buffer_index)
+        return placed_volume(pallets), consumed, completed or not any(ramps.values())
+
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
+        if self.config.micro_plan_value != "score":
+            return (float(node.state_value), int(node.placed_count), float(node.score_sum))
         # NOTE: score_mode="coherencia_capa" no tiene rama explícita aquí.
         # Con micro_plan_enabled=True, el beam rankea por (placed_count, score_sum)
         # ignorando coherencia. Comportamiento degradado conocido, no un bug.
@@ -1081,6 +1169,8 @@ class SchedulerV1:
             placed_count=int(node.placed_count) + 1,
             first_plan=first_plan,
         )
+        if self.config.micro_plan_value != "score":
+            self._set_state_value(child)
         return _BeamExpansion(node=child, box=box, terms=terms)
 
     @staticmethod

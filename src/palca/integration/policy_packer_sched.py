@@ -74,6 +74,9 @@ class PolicyConfig:
     micro_plan_enabled: bool = False
     micro_plan_node_budget: int = 0
     micro_plan_hard_cap_ms: int = 10000
+    micro_plan_value: str = "score"
+    micro_plan_value_weight: float = 1.0
+    micro_plan_rollout_leaves: int = 4
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -205,6 +208,9 @@ class PolicyPackerScheduler:
         micro_plan_enabled: bool = False,
         micro_plan_node_budget: int = 0,
         micro_plan_hard_cap_ms: int = 10000,
+        micro_plan_value: str = "score",
+        micro_plan_value_weight: float = 1.0,
+        micro_plan_rollout_leaves: int = 4,
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
@@ -251,6 +257,9 @@ class PolicyPackerScheduler:
             micro_plan_enabled=micro_plan_enabled,
             micro_plan_node_budget=micro_plan_node_budget,
             micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
+            micro_plan_value=micro_plan_value,
+            micro_plan_value_weight=micro_plan_value_weight,
+            micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
@@ -306,6 +315,9 @@ class PolicyPackerScheduler:
             micro_plan_enabled=micro_plan_enabled,
             micro_plan_node_budget=micro_plan_node_budget,
             micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
+            micro_plan_value=micro_plan_value,
+            micro_plan_value_weight=micro_plan_value_weight,
+            micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
