@@ -77,6 +77,9 @@ class PolicyConfig:
     micro_plan_value: str = "score"
     micro_plan_value_weight: float = 1.0
     micro_plan_rollout_leaves: int = 4
+    rollout_future_boxes: int = 0
+    rollout_future_samples: int = 1
+    rollout_prior: str = "catalog"
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -211,6 +214,9 @@ class PolicyPackerScheduler:
         micro_plan_value: str = "score",
         micro_plan_value_weight: float = 1.0,
         micro_plan_rollout_leaves: int = 4,
+        rollout_future_boxes: int = 0,
+        rollout_future_samples: int = 1,
+        rollout_prior: str = "catalog",
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
@@ -260,6 +266,9 @@ class PolicyPackerScheduler:
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
+            rollout_future_boxes=rollout_future_boxes,
+            rollout_future_samples=rollout_future_samples,
+            rollout_prior=rollout_prior,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
@@ -318,6 +327,9 @@ class PolicyPackerScheduler:
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
+            rollout_future_boxes=rollout_future_boxes,
+            rollout_future_samples=rollout_future_samples,
+            rollout_prior=rollout_prior,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
@@ -736,6 +748,10 @@ class PolicyPackerScheduler:
         nodes = self._scheduler.micro_plan_nodes_expanded
         times = self._scheduler.micro_plan_times_ms
         kpis["micro_plan_nodes_expanded"] = list(nodes)
+        if self.config.scheduler.rollout_future_boxes:
+            kpis["micro_plan_future_nodes"] = list(self._scheduler.micro_plan_future_nodes)
+            kpis["micro_plan_future_samples_completed"] = list(
+                self._scheduler.micro_plan_future_samples_completed)
         kpis["micro_plan_nodes_expanded_mean"] = sum(nodes) / len(nodes) if nodes else 0.0
         kpis["micro_plan_nodes_expanded_p95"] = float(percentile(nodes, 95)) if nodes else 0.0
         kpis["micro_plan_nodes_expanded_max"] = max(nodes, default=0)
