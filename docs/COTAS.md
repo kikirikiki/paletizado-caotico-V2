@@ -525,3 +525,153 @@ búsqueda offline posterior supera el 80,40 %, el gap y las metas se recalculan 
 
 Sobre T3: el mejor techo alcanzable encontrado (80,40 %) queda 12,4 pp por debajo del moonshot. Hace falta más esfuerzo de
 búsqueda offline y el margen exigido por D-010 (≥ 10 pp, con su IC) antes de declararlo refutado empíricamente.
+
+## Techo offline sin resquicio
+
+Medición del 2026-10-17 en `feat/techo-offline-estricto` (D-015). Se elimina
+la separación **explícita** entre zonas mediante `column_gap_mm=0`
+(`--column-gap-mm 0`). El default sigue siendo **2 mm** y reproduce exactamente
+las tres plantillas anteriores. Con cero, las cinco zonas de cada plantilla
+recubren los 1240 × 840 mm sin solaparse ni dejar franjas entre columnas:
+dos zonas planas de 620 mm de largo y tres zonas en la franja restante.
+Se recupera el área que antes ocupaban las separaciones.
+
+Las cajas siguen centradas dentro de su zona y sus dimensiones pueden ser
+menores que ella: **zonas contiguas no significa que todas las huellas de las
+cajas se toquen**. El relleno final sigue usando las posiciones de producción.
+Por eso se mide además `--adjacency-gap 50`; eliminar el hueco explícito de
+2 mm no certifica robustez a 50 mm. No se cambia el gate de pie, el control de
+accesibilidad de producción, los Excel, el KPI ni el validador congelado.
+
+Se ejecuta cada combinación de plantilla 0/1/2 y ancho 8/16 por separado,
+además de dos ejecuciones con las tres plantillas disponibles en cada palet,
+con seed 0 y `group_geometry=False`. El beam usa ancho 16, top-M 8,
+`objective=volume` y `locations=production`, sin particiones artificiales.
+Presupuesto de búsqueda: **900 s CPU**, con límite duro de **1200 s CPU**
+por proceso (`prlimit`); máximo **4 búsquedas simultáneas**, un hilo BLAS por
+búsqueda. La CPU de la tabla es usuario + sistema del proceso completo,
+incluidos arranque, referencias y validación (`*.time.json`).
+
+| Método | Plantilla | Ancho | KPI oficial % | Σvol/(n·V) % | Palets total/cerrados | Viol. validador | Acc. G=0 | Acc. G=50 | CPU s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Columns, gap 0 | 0 | 8 | 75,690 | 74,623 | 9/8 | 0 | 0 | 103 | 38,54 |
+| Columns, gap 0 | 0 | 16 | 77,092 | 74,623 | 9/8 | 0 | 0 | 103 | 71,33 |
+| Columns, gap 0 | 1 | 8 | 79,200 | 74,623 | 9/8 | 0 | 0 | 118 | 45,66 |
+| Columns, gap 0 | 1 | 16 | 78,735 | 74,623 | 9/8 | 0 | 0 | 111 | 85,34 |
+| Columns, gap 0 | 2 | 8 | 68,328 | 67,160 | 10/9 | 0 | 0 | 80 | 37,31 |
+| Columns, gap 0 | 2 | 16 | 68,328 | 67,160 | 10/9 | 0 | 0 | 80 | 55,07 |
+| **Columns, gap 0** | **0, 1, 2** | **8** | **81,449** | **74,623** | **9/8** | **0** | **0** | **123** | **117,04** |
+| Columns, gap 0 | 0, 1, 2 | 16 | 79,549 | 74,623 | 9/8 | 0 | 0 | 118 | 206,86 |
+| Beam de producción | — | 16 | 71,643 | 67,160 | 10/9 | 0 | 0 | 63 | 835,67 |
+
+Las nueve ejecuciones completan la búsqueda sin fallback de
+presupuesto. Todas colocan exactamente las **186 cajas**, conservan sus IDs
+y pasan tanto el replay con los controles de producción (`--validate`) como
+la comprobación independiente del multiconjunto del Excel y del validador.
+G se aplica al hueco en **ambos ejes**, con comparación inclusiva `≤ G`;
+la altura local se calcula solo con solape real, sin expandir la huella de
+soporte. Se cuenta una violación por colocación bloqueada, sobre la secuencia
+original, sin recolocar cajas ni modificar el KPI. El verificador devuelve
+rc 0 para G=0 y rc 1 para G=50 cuando detecta esas violaciones.
+
+El mejor testigo de columnas sin separación explícita alcanza **81,449 %**,
+con **9 palets** y utilización global **74,623 %**. Es una cota inferior
+constructiva del óptimo offline bajo la regla de producción, no un óptimo
+demostrado. Queda 1,049 pp por encima del testigo histórico de 80,40 % y
+19,559 pp por encima del baseline online de 61,89 %. La diferencia frente
+al histórico **no es una ablación pareada del hueco**: aquel testigo proviene
+de una versión intermedia del buscador. Tampoco se observa mejora monótona
+al aumentar el ancho: las decisiones locales de un palet cambian el
+inventario disponible para los siguientes.
+
+El testigo conjunto de ancho 8 deja un último palet de aproximadamente
+20,008 % de utilización. El KPI oficial excluye ese palet: el salto frente
+al 79,200 % de la plantilla 1 no reduce los nueve palets ni cambia el
+74,623 % global. También depende de cómo se distribuye el volumen en END.
+
+El beam reproduce el **71,643 %** de la búsqueda anterior con scorer de
+producción, en diez palets. Registra menos violaciones con G=50 (**63**),
+pero tampoco es factible con esa definición de adyacencia.
+
+Las **123 violaciones con G=50** del mejor testigo impiden presentarlo como
+un techo factible para esa regla más exigente. Ningún testigo de
+esta tabla es factible con G=50. Los datos confirman un techo alcanzable alto
+sin separación explícita de 2 mm, pero no resuelven la holgura física de la
+garra señalada en D-015. Las tablas históricas anteriores se conservan como
+registro de sus respectivas condiciones.
+
+Artefactos locales, sin versionar: `out/bounds/techo_gap0/columns_t{T}_w{W}.json`
+(T = 0, 1, 2 o 012),
+`beam_w16.json`, sus checkpoints, tiempos, logs de verificación G=0/G=50 y
+`summary.json` con comandos y resultados. Los JSON guardan configuración
+efectiva, hashes de código y Excel, referencias y secuencia completa.
+Los summaries de baseline y buffer se leen del worktree vecino
+`../paletizado-autopilot/out/sweeps/`; no se copian ni se modifican.
+
+Reproducción desde la raíz, con rutas de salida nuevas o todavía inexistentes:
+
+```bash
+export PYTHONPATH="$(pwd)/src"
+refs=../paletizado-autopilot/out/sweeps
+dest=out/bounds/techo_gap0
+mkdir -p "$dest"
+common=(--cpu-seconds 900
+        --baseline-summary "$refs/baseline_v1/summary.json"
+        --buffer-summary "$refs/bound_buffer_k_v1/summary.json")
+for t in 0 1 2; do
+  for w in 8 16; do
+    prlimit --cpu=1200:1200 /usr/bin/time \
+      .venv/bin/python scripts/bound_offline.py --method columns \
+      --column-gap-mm 0 --templates "$t" --width "$w" "${common[@]}" \
+      --out "$dest/columns_t${t}_w${w}.json"
+  done
+done
+for w in 8 16; do
+  prlimit --cpu=1200:1200 /usr/bin/time \
+    .venv/bin/python scripts/bound_offline.py --method columns \
+    --column-gap-mm 0 --templates 0 1 2 --width "$w" "${common[@]}" \
+    --out "$dest/columns_t012_w${w}.json"
+done
+prlimit --cpu=1200:1200 /usr/bin/time \
+  .venv/bin/python scripts/bound_offline.py --method beam --width 16 --top-m 8 \
+  "${common[@]}" --out "$dest/beam_w16.json"
+
+for witness in "$dest"/columns_t*_w*.json "$dest/beam_w16.json"; do
+  .venv/bin/python scripts/bound_offline.py --method columns --validate "$witness"
+  .venv/bin/python scripts/autopilot/verify_offline_witness.py "$witness" --adjacency-gap 0
+  # rc 1 indica violaciones de la métrica estricta; consultar el recuento.
+  .venv/bin/python scripts/autopilot/verify_offline_witness.py "$witness" --adjacency-gap 50
+done
+.venv/bin/python -m pytest tests/test_offline_search.py tests/test_verify_offline_witness.py -q
+./scripts/smoke_offline.sh
+git --no-pager diff --check
+```
+
+Los tests comprueban la igualdad exacta de las plantillas por defecto,
+la cobertura contigua con gap 0, candidatos contenidos en sus zonas, rechazo
+real de una columna que toca una vecina alta, replay e identidad del
+checkpoint al cambiar el gap. También comprueban los umbrales inclusivos en
+ambos ejes, orden cronológico, altura local y el recuento histórico de D-015
+(0 con G=0, 117 con G=50).
+
+Verificación: los **36 tests dirigidos** pasan; `export PYTHONPATH=$(pwd)/src &&
+./scripts/smoke_offline.sh` **OK** (448 tests y escenario height-slack).
+Auditoría de los nueve testigos **OK**: mismo hash de código y Excel,
+186 IDs únicos por ejecución, replay y verificador G=0 con rc 0, y CPU
+individual inferior a 1200 s. `git --no-pager diff --check` **OK**.
+
+## Metas recalculadas con el techo sin resquicio (director, D-013)
+
+El método de columnas con plantillas contiguas (con --column-gap-mm 0) supera al testigo anterior: **81,449 %** (9 palets, 0 violaciones,
+0 de accesibilidad con la regla de producción). Además es reproducible con un comando (ver arriba). Por D-013 las metas se recalculan al alza:
+
+| Meta | Definición | Umbral anterior (techo 80,40) | **Umbral vigente (techo 81,45)** |
+|---|---|---|---|
+| T1 | ≥ 50 % del gap | 71,15 % | **71,67 %** |
+| T2 | ≥ 90 % del gap (o ≥ 80 % absoluto con palancas justificadas) | 78,55 % | **79,49 %** |
+| T3 | 1,5 × baseline | 92,84 % | 92,84 % |
+
+Gap vigente = 81,45 − 61,89 = **19,56 pp**. La mejor técnica online (H1+H3+H5+H6, 74,03 %) cierra el 62,1 % del gap.
+
+Advertencia (D-015): ninguna solución offline sería factible si la regla de accesibilidad considerara adyacentes las cajas con
+hueco ≤ 50 mm (123 colocaciones lo violarían en el testigo de 81,45 %). Con la regla de producción tal cual, el techo es válido.

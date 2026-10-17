@@ -7,7 +7,7 @@ Comprueba, sin usar el packer:
      (misma definición que `RobotAccessibilityControl`: ninguna caja que toque la huella puede superar base + delta);
   4. el KPI oficial (`palca.study.metric`, palets cerrados = todos salvo el último) y Σvol / (n_palets · V).
 
-Uso:  PYTHONPATH=src .venv/bin/python scripts/autopilot/verify_offline_witness.py <testigo.json> [--delta 400]
+Uso:  PYTHONPATH=src .venv/bin/python scripts/autopilot/verify_offline_witness.py <testigo.json> [--delta 400] [--adjacency-gap 0]
 """
 from __future__ import annotations
 
@@ -33,14 +33,19 @@ def pallets_of(witness: dict) -> list[list[dict]]:
     return [p["items"] if isinstance(p, dict) and "items" in p else p for p in raw]
 
 
-def accessibility_violations(items: list[dict], delta: int) -> int:
+def accessibility_violations(items: list[dict], delta: int, adjacency_gap: int = 0) -> int:
+    """Count blocked descents; G expands adjacency, never the supporting footprint."""
+    if adjacency_gap < 0:
+        raise ValueError("adjacency_gap must be nonnegative")
+    if delta == 0:  # Production disables the accessibility control.
+        return 0
     placed, bad = [], 0
     for it in items:
         x0, x1 = it["x_mm"], it["x_mm"] + it["length_mm"]
         y0, y1 = it["y_mm"], it["y_mm"] + it["width_mm"]
         local = max((q[4] for q in placed if min(q[1], x1) - max(q[0], x0) > 0 and min(q[3], y1) - max(q[2], y0) > 0),
                     default=0)
-        if any(max(q[0], x0) - min(q[1], x1) <= 0 and max(q[2], y0) - min(q[3], y1) <= 0 and q[4] > local + delta
+        if any(max(q[0], x0) - min(q[1], x1) <= adjacency_gap and max(q[2], y0) - min(q[3], y1) <= adjacency_gap and q[4] > local + delta
                for q in placed):
             bad += 1
         placed.append((x0, x1, y0, y1, it["z_mm"] + it["height_mm"]))
@@ -51,7 +56,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("witness", type=Path)
     parser.add_argument("--delta", type=int, default=400)
+    parser.add_argument("--adjacency-gap", type=int, default=0,
+                        help="Consider adjacent gaps <= G mm on both axes (default: production rule, 0)")
     args = parser.parse_args()
+    if args.adjacency_gap < 0:
+        parser.error("--adjacency-gap must be nonnegative")
     witness = json.loads(args.witness.read_text())
     pallets = pallets_of(witness)
     arrivals = load_arrivals(str(ROOT / REFERENCE_EXCEL))
@@ -67,7 +76,7 @@ def main() -> int:
     for i, items in enumerate(pallets, start=1):
         original = {it["box_id"]: pool[tuple(sorted((it["length_mm"], it["width_mm"], it["height_mm"])))][0] for it in items}
         violations = validate_pallet(items, original, min_support=0.85)
-        acc = accessibility_violations(items, args.delta)
+        acc = accessibility_violations(items, args.delta, args.adjacency_gap)
         util = sum(it["length_mm"] * it["width_mm"] * it["height_mm"] for it in items) / volume
         utils.append(util)
         n_viol += len(violations)
@@ -77,7 +86,7 @@ def main() -> int:
     kpi = sum(closed) / len(closed) if closed else float("nan")
     print(f"multiconjunto de dimensiones == Excel: {ok_multiset}")
     print(f"KPI oficial (palets cerrados): {100 * kpi:.3f} %  |  Σvol/(n·V): {100 * sum(utils) / len(utils):.3f} %  |  palets: {len(utils)}")
-    print(f"violaciones validador: {n_viol}  |  violaciones accesibilidad (delta {args.delta}): {n_acc}")
+    print(f"violaciones validador: {n_viol}  |  violaciones accesibilidad (delta {args.delta}, adjacency-gap {args.adjacency_gap}): {n_acc}")
     return 0 if ok_multiset and n_viol == 0 and n_acc == 0 else 1
 
 

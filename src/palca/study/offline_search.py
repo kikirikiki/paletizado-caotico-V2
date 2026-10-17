@@ -457,6 +457,35 @@ COLUMN_TEMPLATES = (
 )
 
 
+def column_template(template, column_gap_mm=2):
+    """Floor partition with explicit gaps; zero tiles the entire envelope.
+
+    Box dimensions may leave natural slack inside a zone. No padding is added
+    to the partition when the gap is zero. The default reproduces the old zones.
+    """
+    if (not isinstance(column_gap_mm, int) or column_gap_mm < 0
+            or template not in range(len(COLUMN_TEMPLATES))):
+        raise ValueError('Invalid column template/gap')
+    old = COLUMN_TEMPLATES[template]
+    length, width, _ = ENVELOPE_MM
+    gap = column_gap_mm
+    planar_length = (length - gap) // 2
+    planar_width = old[0][3]
+    standing_length = old[2][2]
+    standing_y = planar_width + gap
+    last_x = 2 * (standing_length + gap)
+    zones = (
+        (0, 0, planar_length, planar_width, 'planar'),
+        (planar_length + gap, 0, length - planar_length - gap, planar_width, 'planar'),
+        (0, standing_y, standing_length, width - standing_y, 'stand_hw'),
+        (standing_length + gap, standing_y, standing_length, width - standing_y, 'stand_hw'),
+        (last_x, standing_y, length - last_x, width - standing_y, 'any'),
+    )
+    if any(l <= 0 or w <= 0 for _, _, l, w, _ in zones):
+        raise ValueError('Column gap leaves an empty zone')
+    return zones
+
+
 def column_candidates(node, zone, group_geometry=False):
     x, y, length, width, family = zone
     seen = set()
@@ -520,7 +549,8 @@ def column_completion_value(node, zone):
     return value
 
 
-def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometry=False, cpu_seconds=600,
+def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometry=False,
+                  column_gap_mm=2, cpu_seconds=600,
                   checkpoint=None, resume=False, progress=None):
     """Sequential pallets, beam within each column, best of fixed floor partitions.
 
@@ -530,7 +560,9 @@ def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometr
     """
     if width < 1 or not templates or any(t not in range(len(COLUMN_TEMPLATES)) for t in templates):
         raise ValueError('Invalid column width/templates')
-    config = dict(width=width, templates=list(templates), seed=seed, group_geometry=group_geometry)
+    zones_by_template = {t: column_template(t, column_gap_mm) for t in templates}
+    config = dict(width=width, templates=list(templates), seed=seed, group_geometry=group_geometry,
+                  column_gap_mm=column_gap_mm)
     identity = fingerprint(boxes, dict(method='columns', **config))
     lookup = {b.box_id: b for b in boxes}
     remaining = list(boxes)
@@ -555,7 +587,7 @@ def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometr
         best, selected_template = None, None
         for template in templates:
             node = Node(policy._new_pallet(), remaining)
-            for zone in COLUMN_TEMPLATES[template]:
+            for zone in zones_by_template[template]:
                 beam, terminal = [node], node
                 while beam and not exhausted():
                     children = {}

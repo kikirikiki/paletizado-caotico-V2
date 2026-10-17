@@ -8,7 +8,8 @@ from palca.domain.box import Box
 from palca.domain.placement import Placement
 from palca.scheduler.scheduler_v1 import SchedulerSimState
 from palca.study.offline_search import (
-    beam_search, checked_preview, column_search, decode_order, geometric_candidates, order_search,
+    COLUMN_TEMPLATES, Node, beam_search, checked_preview, column_candidates, column_search,
+    column_template, decode_order, geometric_candidates, order_search,
     production_candidates, production_policy, profile_metrics, summarize,
 )
 from palca.study.params import PRESETS
@@ -201,3 +202,69 @@ def test_columns_timeout_finishes_and_empty_template_fails():
     assert result["n_production_violations"] == 0
     with pytest.raises(ValueError, match="templates"):
         column_search(cubes(), templates=())
+
+
+@pytest.mark.parametrize('template', range(3))
+def test_column_gap_default_and_contiguous_partition(template):
+    assert column_template(template) == COLUMN_TEMPLATES[template]
+    for gap in (0, 2, 10):
+        zones = column_template(template, gap)
+        a, b, c, d, e = zones
+        assert b[0] - (a[0] + a[2]) == gap
+        assert c[1] - (a[1] + a[3]) == gap
+        assert d[0] - (c[0] + c[2]) == gap
+        assert e[0] - (d[0] + d[2]) == gap
+        assert b[0] + b[2] == e[0] + e[2] == 1240
+        assert c[1] + c[3] == 840
+        if gap == 0:
+            assert sum(l * w for _, _, l, w, _ in zones) == 1240 * 840
+
+
+@pytest.mark.parametrize('gap', [-1, 0.5, float('nan'), float('inf'), 1000])
+def test_invalid_column_gap_rejected(gap):
+    with pytest.raises(ValueError, match='gap|Gap'):
+        column_search(cubes(), column_gap_mm=gap)
+
+
+@pytest.mark.parametrize('template', range(3))
+def test_zero_gap_candidates_stay_in_contiguous_zones_and_contacts_are_checked(template):
+    zones = column_template(template, 0)
+    policy = production_policy()
+    # Exact zone-sized boxes have no natural dimensional slack either.
+    x, y, length, width, _ = zones[0]
+    tall = Box(1, length, width, 500, 0, destination=1)
+    node = Node(policy._new_pallet(), (tall,))
+    _, _, preview = next(column_candidates(node, zones[0]))
+    node.pallet.commit_place(preview)
+    for zone in zones:
+        x, y, length, width, _ = zone
+        box = Box(2, length, width, 200, 0, destination=1)
+        candidates = list(column_candidates(Node(policy._new_pallet(), (box,)), zone))
+        for _, _, candidate in candidates:
+            p = candidate.placement
+            offset = node.pallet.spec.offset_mm
+            assert x <= p.x_mm - offset <= x + length - p.length_mm
+            assert y <= p.y_mm - offset <= y + width - p.width_mm
+    # The neighbouring planar column touches the tall first column. Its first
+    # descent must be rejected by the unmodified production control.
+    _, _, length, width, _ = zones[1]
+    adjacent = Box(2, length, width, 200, 0, destination=1)
+    assert list(column_candidates(Node(node.pallet, (adjacent,)), zones[1])) == []
+
+
+def test_zero_gap_search_replay_and_checkpoint_identity(tmp_path):
+    boxes = tuple(Box(i, 600, 440, 350, 0, destination=1) for i in range(21))
+    checkpoint = tmp_path / 'gap0.json'
+    default = column_search(boxes, width=2, templates=(1,))
+    explicit = column_search(boxes, width=2, templates=(1,), column_gap_mm=2)
+    assert default['pallets'] == explicit['pallets']
+    strict = column_search(boxes, width=2, templates=(1,), column_gap_mm=0, checkpoint=checkpoint)
+    assert strict['config']['column_gap_mm'] == 0
+    assert strict['boxes_placed'] == len(boxes)
+    assert strict['n_violations'] == strict['n_production_violations'] == 0
+    resumed = column_search(boxes, width=2, templates=(1,), column_gap_mm=0,
+                            checkpoint=checkpoint, resume=True)
+    assert resumed['pallets'] == strict['pallets']
+    with pytest.raises(ValueError, match='does not match'):
+        column_search(boxes, width=2, templates=(1,), column_gap_mm=2,
+                      checkpoint=checkpoint, resume=True)

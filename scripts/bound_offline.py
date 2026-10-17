@@ -62,6 +62,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--evaluations", type=int, default=12)
     parser.add_argument("--templates", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--column-gap-mm", type=int, default=2,
+                        help="Column partition separation in mm; 0 makes zones contiguous (default: 2)")
     parser.add_argument("--group-geometry", action="store_true",
                         help="Column search only: merge equal dimensions regardless of inactive mass")
     parser.add_argument("--baseline-summary", type=Path, default=Path("out/sweeps/baseline_v1/summary.json"))
@@ -72,6 +74,8 @@ def main():
         parser.error("--cpu-seconds must be in (0, 7200]; reserve time for completion/validation")
     if any(not isfinite(x) or x < 0 for x in (args.debt_weight, args.roughness_weight)):
         parser.error("Weights must be finite and nonnegative")
+    if args.column_gap_mm < 0:
+        parser.error("--column-gap-mm must be nonnegative")
     boxes = load_boxes(args.excel)
     if args.validate:
         payload = json.loads(args.validate.read_text())
@@ -96,7 +100,7 @@ def main():
         result = order_search(boxes, seed=args.seed, evaluations=args.evaluations, **common)
     elif args.method == "columns":
         result = column_search(boxes, width=args.width, templates=args.templates, seed=args.seed,
-                               group_geometry=args.group_geometry, **common)
+                               group_geometry=args.group_geometry, column_gap_mm=args.column_gap_mm, **common)
     else:
         result = beam_search(boxes, width=args.width, top_m=args.top_m, objective=args.objective,
                              locations=args.locations, debt_weight=args.debt_weight,
