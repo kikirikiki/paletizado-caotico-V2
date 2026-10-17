@@ -1,0 +1,74 @@
+{
+  "git_head": "774441c7c94ac5515d36bef145a95335d4c62b1e",
+  "excel": "data/Flujo_smoke_60.xlsx",
+  "seed": 50021,
+  "hash_scope": "JSON pallets only, sort_keys=True; includes box IDs, geometry, slots and generations",
+  "cases": {
+    "no_h1": {
+      "kpi": {
+        "metric_version": "1.0.0",
+        "kpi": 0.56133709224057,
+        "kpi_nominal": 0.6090507450810185,
+        "n_pallets_total": 4,
+        "n_closed": 3,
+        "boxes_placed": 60,
+        "pallet_utils": [
+          0.6221210157450077,
+          0.6999424463165642,
+          0.36194781466013826,
+          0.43701601902521764
+        ],
+        "eff_real": 0.6050800690225252,
+        "h_fill": 0.9118055555555555,
+        "kpi_all_pallets": 0.5302568239367319
+      },
+      "placements_sha256": "1200e0033b3abb00b578ede8f01e979422b53206cef05d7348316bbbefd39985",
+      "sequence": {
+        "1": [
+          19,
+          19,
+          10,
+          12
+        ],
+        "2": [],
+        "3": [],
+        "4": [],
+        "5": [],
+        "6": []
+      }
+    },
+    "h1": {
+      "kpi": {
+        "metric_version": "1.0.0",
+        "kpi": 0.5692244470312766,
+        "kpi_nominal": 0.6176085250289352,
+        "n_pallets_total": 4,
+        "n_closed": 3,
+        "boxes_placed": 60,
+        "pallet_utils": [
+          0.6725876956125192,
+          0.7074967297907067,
+          0.3275889156906042,
+          0.4133539546530978
+        ],
+        "eff_real": 0.62374894360739,
+        "h_fill": 0.8916666666666667,
+        "kpi_all_pallets": 0.530256823936732
+      },
+      "placements_sha256": "f2b5a8031ade55ab013a93b198e96a803e00616d00f0d3c695f35ccb0cf81feb",
+      "sequence": {
+        "1": [
+          20,
+          19,
+          9,
+          12
+        ],
+        "2": [],
+        "3": [],
+        "4": [],
+        "5": [],
+        "6": []
+      }
+    }
+  }
+}

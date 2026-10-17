@@ -170,6 +170,15 @@ class SchedulerSimState:
     remaining_total: int = 0
     # Vacío conserva exactamente un palet por destino; solo la variante bound lo amplía.
     pallet_choices: Mapping[int | str, Sequence[int | str]] = field(default_factory=dict)
+    open_pallets_assignment: str = "score"
+
+    def choices_for_box(self, box: Box) -> Sequence[int | str]:
+        choices = self.pallet_choices.get(box.destination, (box.destination,))
+        if self.open_pallets_assignment == "family" and len(choices) == 2:
+            dominant = (600 <= box.length_mm <= 610 and 440 <= box.width_mm <= 450
+                        and 345 <= box.height_mm <= 395)
+            return choices if dominant else choices[::-1]
+        return choices
 
 
 @dataclass
@@ -462,8 +471,9 @@ class SchedulerV1:
                 except Exception:
                     continue
 
+            family_feasible: set[int] = set()
             choices = ((idx, box, pid) for idx, box in enumerate(ramp_items)
-                       for pid in sim_state.pallet_choices.get(box.destination, (box.destination,)))
+                       for pid in sim_state.choices_for_box(box))
             for idx, box, pallet_id in choices:
                 if pallet_id is not None:
                     window_boxes_by_pallet_id.setdefault(pallet_id, []).append(box)
@@ -554,6 +564,13 @@ class SchedulerV1:
                     continue
                 items_feasible += 1
                 feasible_by_pallet[pallet_id] = feasible_by_pallet.get(pallet_id, 0) + 1
+
+                # Evaluate both slots for the unchanged NO_VISIBLE_FIT closure rule.
+                # Only score overflow if this box had no feasible preferred slot.
+                if sim_state.open_pallets_assignment == "family":
+                    if idx in family_feasible:
+                        continue
+                    family_feasible.add(idx)
 
                 height_after_mm = self._resolve_height_after_mm(preview, pallet)
 
