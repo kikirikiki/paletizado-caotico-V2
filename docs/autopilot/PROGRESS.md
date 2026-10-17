@@ -16,11 +16,13 @@
 5. Continuar por **Siguiente acción**. No repetir nada marcado como completado.
 
 ## Objetivo vigente
-- **Fase 0 cerrada** (docs/COTAS.md, PR #144): techo offline verificado 80,40 % → gap 18,51 pp (D-013).
-- **Metas fijadas:** **T1 ≥ 71,15 %** · **T2 ≥ 78,55 %** (o ≥ 80 % absoluto con palancas justificadas) · **T3 ≥ 92,84 %**.
+- **Fase 0 cerrada** (docs/COTAS.md): techo offline verificado **81,45 %** (columnas contiguas, reproducible) → gap **19,56 pp** (D-013).
+- **Metas vigentes:** **T1 ≥ 71,67 %** · **T2 ≥ 79,49 %** (o ≥ 80 % absoluto con palancas justificadas, solo en arm6_4orient) · **T3 ≥ 92,84 %**.
+  (Primera fijación con techo 80,40: T1 71,15 / T2 78,55.)
 - Estado frente a T1: H1 64,70 % (15 % del gap); H1+H3 70,94 % (48,9 %); **H1+H3+H5 72,04 % (54,8 % del gap) → T1 ALCANZADO
   (2026-10-17), condicionado a D-012** (H3/H5 usan la maquinaria de micro_plan). No es condición de parada: se sigue hacia T2 (≥ 78,55 %).
-- **Mejor actual: H1+H3+H5+H6 (prior genérico) = 74,03 % → 65,6 % del gap.** Faltan 4,5 pp para T2.
+- **Mejor actual: H1+H3+H5+H6 (prior genérico) = 74,03 % → 62,1 % del gap vigente; T1 (71,67) sigue alcanzado (condicionado a D-012).**
+  Faltan 5,5 pp para T2 (79,49). Con palancas en el brazo (gate abierto + canto) se llega a 77,76 %: T2 no se alcanza ni con palancas.
 - Fase 1 en curso.
 - Configuración oficial: `arm6_4orient` (= `planar+stand_hw`, `accessibility_delta_mm=400`; D-004).
 
@@ -116,6 +118,8 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 | H2 ranuras estrechas (sobre H1+H3; w0,1, min 250) | −0,04 pp [−1,41; +1,34] n.s. (70,90 %) | **descartada** (PR borrador #148). Contador anti-estancamiento: **2** técnicas seguidas < 0,5 pp |
 | H5 valor de estado (rollout 4 hojas, 25 nodos) sobre H1+H3 | referencia +1,11 [−0,00; 2,21]; réplica 20 seeds +2,12 [1,08; 3,16] | **adoptada** (D-016). Contador anti-estancamiento: 0 |
 | H6 rollouts con cajas futuras muestreadas (sobre H1+H3+H5) | prior genérico: +1,99 [1,23; 2,75] ref.; réplica +1,27 [0,17; 2,37]; catalog/uniform similares (D-017) | **adoptada** con prior genérico |
+| Palancas hacia T2 sobre H6 (levers_t2) | gate abierto 77,06; + canto 77,76; + k30 77,19; contrastes gantry4 79,29 / gantry6 82,00 (gate abierto) | ninguna configuración brazo llega a T2 |
+| Techo offline sin resquicio (columnas contiguas) | **81,45 %** (columnas 0,1,2 / ancho 8), beam 71,64 %; 0 accesibilidad con G=0, 123 con G=50 | nuevo techo → metas recalculadas (D-013) |
 | Ajuste del margen de tiempo real de H6 (B 57/80/110 × hojas 2/3/4 × futuras 6/10) | paisaje ruidoso 69,5–75,0 % sin tendencia; las mayores rozan o superan el límite de tiempo real | cerrada: H6 se mantiene (B57, 2 hojas, 6 futuras) |
 | PALANCA garra de canto (cara H×L) y CONTRASTE gantry 6 orientaciones reales | canto: 68,67 % sin técnicas (+6,78 vs baseline); **72,54 % con H1+H3+H5 (+0,50 [−0,97; 1,96] n.s.)**; gantry 6 orient.: 76,39 % / **77,74 % con H1+H3+H5** (+5,70 [4,50; 6,91]) | `run_sweep.py --configs configs/sweeps/lever_canto.yaml --name lever_canto --seeds 10 --workers 15 --baseline arm6_4orient_H1H3H5` (wt2). Con la búsqueda, la garra de canto deja de aportar; la cinemática gantry sí (+5,7) |
 | Palancas buffer sobre H1+H3+H5 (k30, k75) | k30 +0,87 [−0,40; 2,13]; k75 +0,53 [−0,27; 1,34], n.s.; N=2 incompatible con micro_plan (open_pallets>1 lo prohíbe) | informativo (sweep levers_h5 en /tmp/wt_ro_h5): con búsqueda, más buffer apenas aporta |

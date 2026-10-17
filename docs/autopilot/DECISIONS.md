@@ -137,6 +137,8 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   se recalculan al alza.
 - Justificación: usar el techo más alto hace las metas más exigentes (criterio conservador); la validez de un testigo no depende
   de cómo se generó.
+- **Actualización (2026-10-17):** con plantillas contiguas (`--column-gap-mm 0`, sin el resquicio de 2 mm) el método de columnas llega a
+  **81,449 %** (reproducible con un comando, verificado). Metas vigentes: gap 19,56 pp, **T1 ≥ 71,67 %**, **T2 ≥ 79,49 %**, T3 ≥ 92,84 %.
 
 ## D-014 · Commits con smoke fallido por lock de sweeps ocupado (2026-10-16)
 - Contexto: acd5bda y 956f527 (feat/cotas-superiores) se commitearon con dos tests de `test_run_sweep.py` en rojo, porque el
