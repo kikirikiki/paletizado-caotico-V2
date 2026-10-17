@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import time
 from typing import Any, Iterable
+
+import numpy as np
 
 from ..domain.box import Box
 from ..domain.pallet_spec import PalletSpec
 from ..domain.placement import Placement, PlacementPreview
-from .controls import ControlConfig, ControlStack, build_control_stack
+from .controls import (
+    BalancePlacementControl, ControlConfig, ControlStack, LoadBearPlacementControl,
+    RobotAccessibilityControl, StabilityPlacementControl, build_control_stack,
+)
 from .layer import LayerState
 from .maxrects2d import MaxRects2D, MaxRectsCandidate, Rect
 from .scoring import ScoringWeights, packing_gain, fragmentation
@@ -29,6 +34,58 @@ class _LayerCandidate:
     score_delta: float
     placement: Placement
     debug: dict[str, Any]
+
+
+class _HeightfieldPreviewCache:
+    """Pure geometry for one unchanged pallet snapshot, never copied into beams.
+
+    Controls still run in their original order. Only the stateless built-in
+    robot control can reuse its result; stability and its counters always run.
+    """
+
+    def __init__(self, snapshot: tuple) -> None:
+        self.snapshot = snapshot
+        self.heights: dict[tuple[int, ...], int] = {}
+        self.xy: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {}
+        self.projections: dict[tuple[int, ...], tuple[int, float]] = {}
+        self.robot: dict[tuple[int, ...], Any] = {}
+        self.bounds: np.ndarray | None = None
+
+    def fill_heights(self, xy, length, width, offset, placements) -> None:
+        """Batch the original strict integer overlap test, in candidate order.
+
+        Out-of-int64 geometry retains the scalar implementation. No physical
+        control or candidate budget is consumed by these pure height queries.
+        """
+        footprints = [(x + offset, y + offset, length, width) for x, y in xy
+                      if (x + offset, y + offset, length, width) not in self.heights]
+        if not footprints:
+            return
+        if not placements:
+            self.heights.update((footprint, 0) for footprint in footprints)
+            return
+        try:
+            if self.bounds is None:
+                self.bounds = np.asarray([
+                    (int(p.x_mm), int(p.y_mm), int(p.x_mm) + int(p.length_mm),
+                     int(p.y_mm) + int(p.width_mm), int(p.z_mm) + int(p.height_mm))
+                    for p in placements], dtype=np.int64)
+            queries = np.asarray([(x, y, x + l, y + w) for x, y, l, w in footprints],
+                                 dtype=np.int64)
+        except (OverflowError, ValueError):
+            return
+        b = self.bounds
+        overlaps = ((queries[:, 2, None] > b[:, 0]) & (b[:, 2] > queries[:, 0, None])
+                    & (queries[:, 3, None] > b[:, 1]) & (b[:, 3] > queries[:, 1, None]))
+        heights = np.maximum(0, np.max(np.where(overlaps, b[:, 4], 0), axis=1))
+        self.heights.update((footprint, int(z)) for footprint, z in zip(footprints, heights))
+
+    def __deepcopy__(self, memo):
+        # A beam/rollout immediately commits to its own copy. Copying derived
+        # geometry would waste time and retain results for the parent's state.
+        clone = type(self)(())
+        memo[id(self)] = clone
+        return clone
 
 
 @dataclass
@@ -307,6 +364,7 @@ class PalletModel:
         self.layers: list[LayerState] = []
         self.placements: list[Placement] = []
         self.stats = PalletStats()
+        self._heightfield_preview_cache: _HeightfieldPreviewCache | None = None
 
         if controls is None:
             controls = build_control_stack(control_config)
@@ -585,6 +643,7 @@ class PalletModel:
         if not preview.feasible or preview.placement is None:
             raise ValueError("Cannot commit infeasible placement")
 
+        self._heightfield_preview_cache = None
         placement = preview.placement
         if preview.debug and "settle_mm" in preview.debug:
             settle_mm = preview.debug.get("settle_mm")
@@ -1123,6 +1182,22 @@ class PalletModel:
             if base_layer is not None
             else MaxRects2D(bin_l, bin_w, heuristic=self.heuristic)
         )
+        cache = None
+        # Frozen placements/rects make the snapshot key exact. Fall back for
+        # custom mutable geometry and custom projection implementations.
+        if (type(self) is PalletModel and type(projection_bin) is MaxRects2D
+                and all(type(p) is Placement for p in self.placements)
+                and all(type(r) is Rect for r in projection_bin.free_rects)
+                and all(type(c) in (RobotAccessibilityControl, StabilityPlacementControl,
+                                    LoadBearPlacementControl, BalancePlacementControl)
+                        for c in self.controls.placement_controls)):
+            snapshot = (tuple(self.placements), tuple(projection_bin.free_rects),
+                        projection_bin.width, projection_bin.height, bin_l, bin_w, offset,
+                        projection_bin._PRUNE_INPUT_CAP, projection_bin._MAX_FREE_RECTS)
+            cache = self._heightfield_preview_cache
+            if cache is None or cache.snapshot != snapshot:
+                cache = _HeightfieldPreviewCache(snapshot)
+                self._heightfield_preview_cache = cache
 
         rejected_by_controls = 0
         rejected_by_height = 0
@@ -1208,7 +1283,13 @@ class PalletModel:
             h_mm = int(orientation.height_mm)
             if not self._fits_in_bin(l_mm, w_mm, bin_l, bin_w):
                 continue
-            xy_candidates = self._heightfield_xy_candidates(l_mm, w_mm, cap=120)
+            xy_candidates = cache.xy.get((l_mm, w_mm)) if cache is not None else None
+            if xy_candidates is None:
+                xy_candidates = tuple(self._heightfield_xy_candidates(l_mm, w_mm, cap=120))
+                if cache is not None:
+                    cache.xy[l_mm, w_mm] = xy_candidates
+            if cache is not None and budget is None:
+                cache.fill_heights(xy_candidates, l_mm, w_mm, offset, self.placements)
             for cand_x, cand_y in xy_candidates:
                 if budget is not None and budget.should_stop():
                     stop_search = True
@@ -1218,7 +1299,12 @@ class PalletModel:
 
                 x_mm = int(cand_x) + offset
                 y_mm = int(cand_y) + offset
-                z_mm = self._height_under_footprint_mm(x_mm, y_mm, l_mm, w_mm)
+                footprint = (x_mm, y_mm, l_mm, w_mm)
+                z_mm = cache.heights.get(footprint) if cache is not None else None
+                if z_mm is None:
+                    z_mm = self._height_under_footprint_mm(x_mm, y_mm, l_mm, w_mm)
+                    if cache is not None:
+                        cache.heights[footprint] = z_mm
                 top_z = int(z_mm) + int(h_mm)
                 if top_z > max_height:
                     rejected_by_height += 1
@@ -1231,22 +1317,27 @@ class PalletModel:
                     h=int(w_mm),
                     score=(0,),
                 )
-                free_after_raw = projection_bin.simulate_place(rect_candidate)
-                free_after = (
-                    free_after_raw
-                    if isinstance(free_after_raw, list)
-                    else list(getattr(projection_bin, "free_rects", []) or [])
-                )
+                projection = cache.projections.get(footprint) if cache is not None else None
+                if projection is None:
+                    free_after_raw = projection_bin.simulate_place(rect_candidate)
+                    free_after = (
+                        free_after_raw
+                        if isinstance(free_after_raw, list)
+                        else list(getattr(projection_bin, "free_rects", []) or [])
+                    )
+                    projection = (len(free_after), fragmentation(free_after))
+                    if cache is not None:
+                        cache.projections[footprint] = projection
 
                 gain = packing_gain(l_mm * w_mm, self.bin_area_mm2)
-                frag = fragmentation(free_after)
+                free_after_count, frag = projection
                 weighted_gain = self.scoring_weights.packing_gain_weight * gain
                 weighted_frag = self.scoring_weights.fragmentation_weight * frag
                 debug = {
                     "layer_id": 0,
                     "is_new_layer": False,
                     "free_rects": len(getattr(projection_bin, "free_rects", []) or []),
-                    "free_rects_after": len(free_after),
+                    "free_rects_after": free_after_count,
                 }
 
                 base_placement = Placement(
@@ -1269,11 +1360,21 @@ class PalletModel:
                 score_delta = 0.0
                 feasible = True
                 for control in self.controls.placement_controls:
-                    result = control.evaluate(
-                        pallet=self,
-                        box=box,
-                        placement=adjusted,
-                    )
+                    robot_key = None
+                    result = None
+                    if cache is not None and type(control) is RobotAccessibilityControl:
+                        # The production robot control reads only the footprint,
+                        # its delta and the pre-placement geometry, never box/z.
+                        robot_key = (control.config.accessibility_delta_mm,
+                                     adjusted.x_mm, adjusted.y_mm,
+                                     adjusted.length_mm, adjusted.width_mm)
+                        cached = cache.robot.get(robot_key)
+                        if cached is not None:
+                            result = replace(cached, placement=adjusted)
+                    if result is None:
+                        result = control.evaluate(pallet=self, box=box, placement=adjusted)
+                        if robot_key is not None:
+                            cache.robot[robot_key] = result
                     debug.update(result.debug)
                     score_delta += float(result.score_delta)
                     adjusted = result.placement

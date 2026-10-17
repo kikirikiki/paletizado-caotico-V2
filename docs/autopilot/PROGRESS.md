@@ -30,7 +30,9 @@
 - **T1 ALCANZADO sin condiciones** (H5/H6 solo usan información visible).
 - **MEJOR ACTUAL: H1+H3+H5+H6 sin gate = 77,06 % ± 0,90 (10 seeds de referencia; +3,03 [1,72; 4,35] vs H6 con gate); réplica 20 seeds
   +2,62 [1,52; 3,71] → 77,6 % del gap.** Faltan 2,4 pp para T2 (79,49).
-- **Problema abierto:** sin gate tarda 1,12 s/decisión de media en 1 proceso (p95 2,52 s): incumple D-007 (media ≤ 1 s). Bajar el
+- **Tiempo resuelto (feat/h6-rapido):** optimización sin cambiar decisiones (KPI y dumps idénticos 10/10): media 1,156 → 0,957 s,
+  p95 2,36 s → cumple D-007. Siguiente: laterales libres como desempate (D-024, spec autopilot_logs/17_spec.md).
+- (histórico) **Problema abierto:** sin gate tarda 1,12 s/decisión de media en 1 proceso (p95 2,52 s): incumple D-007 (media ≤ 1 s). Bajar el
   presupuesto de nodos no ayuda (B35 1,02 s, B45 1,11 s, KPI de ajuste 76,2 / 77,1 / 76,3 con B35/45/57). Siguiente: optimizar el código
   sin cambiar decisiones (bit a bit) hasta ≤ 1 s (Codex). Config vigente: `h6_sin_gate` de configs/sweeps/h6_sin_gate.yaml.
 - Descartadas desde el ciclo lateral D-019: H7 (PR 153), secuenciación (PR 154), palets por familia (−0,74 con H1; rama

@@ -1,0 +1,31 @@
+{
+  "source": "out/sweeps/h6_sin_gate_ref/h6_sin_gate",
+  "config": {
+    "name": "h6_sin_gate",
+    "preset": "arm6_4orient",
+    "role": "official",
+    "overrides": {
+      "access_debt_mode": "penalty",
+      "access_debt_weight": 0.25,
+      "access_debt_band_mm": 600,
+      "micro_plan": true,
+      "micro_plan_node_budget": 57,
+      "micro_depth": 3,
+      "micro_width": 8,
+      "micro_topk": 15,
+      "micro_plan_value": "rollout",
+      "micro_plan_rollout_leaves": 2,
+      "rollout_future_boxes": 6,
+      "rollout_future_samples": 1,
+      "rollout_prior": "generic",
+      "stand_hw_height_margin_gate_mm": 2400
+    }
+  },
+  "seeds": [
+    1,
+    42
+  ],
+  "git_head": "a1950a414df6a57a6e81953acbca60271ccc7db5",
+  "source_hash": "beea2c0560e950e5c2b9fa34ca91a8448959bff9642d0d1d1df3f6c69e3a8799",
+  "input_hash": "3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab"
+}
