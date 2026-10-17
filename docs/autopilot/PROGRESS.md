@@ -20,6 +20,7 @@
 - **Metas fijadas:** **T1 ≥ 71,15 %** · **T2 ≥ 78,55 %** (o ≥ 80 % absoluto con palancas justificadas) · **T3 ≥ 92,84 %**.
 - Estado frente a T1: H1 64,70 % (15 % del gap); H1+H3 70,94 % (48,9 %); **H1+H3+H5 72,04 % (54,8 % del gap) → T1 ALCANZADO
   (2026-10-17), condicionado a D-012** (H3/H5 usan la maquinaria de micro_plan). No es condición de parada: se sigue hacia T2 (≥ 78,55 %).
+- **Mejor actual: H1+H3+H5+H6 (prior genérico) = 74,03 % → 65,6 % del gap.** Faltan 4,5 pp para T2.
 - Fase 1 en curso.
 - Configuración oficial: `arm6_4orient` (= `planar+stand_hw`, `accessibility_delta_mm=400`; D-004).
 
@@ -27,7 +28,8 @@
 | Config | KPI | Comando / carpeta | Estado |
 |---|---|---|---|
 | arm6_4orient (baseline oficial) | 61,89 % ± 1,32 · IC95 [60,95; 62,83] · 75 ms/dec (p95 155) | `run_sweep.py --configs configs/sweeps/baseline.yaml --seeds 10 --workers 15 --name baseline_v1 --baseline arm6_4orient` → out/sweeps/baseline_v1 (wt1) | verificado |
-| **arm6_4orient + H1 (w0,25 b600) — MEJOR** | **64,70 % · IC95 [63,47; 65,92] · +2,81 pp [1,04; 4,57]** · 66 ms/dec (p95 146) | `run_sweep.py --configs configs/sweeps/h1_eval2.yaml --seeds 10 --workers 15 --name h1_eval2 --baseline arm6_4orient` → out/sweeps/h1_eval2 (wt2) | adoptada (D-009/D-011) |
+| **H1+H3+H5+H6 rollouts estocásticos, prior genérico (6 futuras, 1 muestra, 2 hojas, B=57) — MEJOR (aparte, D-012)** | **74,03 % ± 1,36 (10 seeds de referencia); vs H5 +1,99 [1,23; 2,75]; réplica D-016 +1,27 [0,17; 2,37]** · ~716 ms/dec en 1 proceso (p95 ~1,5 s) | `run_sweep.py --configs configs/sweeps/h6_prior_eval.yaml --seeds 10 --workers 15 --name h6_prior_eval --baseline h5_rollout_l4` (config h6_generic) y `h6_prior_replica` (wt2) | **65,6 % del gap** (D-017: prior sin información del flujo) |
+| arm6_4orient + H1 (w0,25 b600) | **64,70 % · IC95 [63,47; 65,92] · +2,81 pp [1,04; 4,57]** · 66 ms/dec (p95 146) | `run_sweep.py --configs configs/sweeps/h1_eval2.yaml --seeds 10 --workers 15 --name h1_eval2 --baseline arm6_4orient` → out/sweeps/h1_eval2 (wt2) | adoptada (D-009/D-011) |
 | **H1 + H3 + H5 valor de estado por rollout (4 hojas, 25 nodos) — MEJOR (aparte, D-012)** | **72,04 % ± 1,05 (10 seeds de referencia); vs H1+H3 +1,11 [−0,00; 2,21]; réplica preregistrada en 20 seeds nuevas +2,12 [1,08; 3,16]** · 437 ms/dec en 1 proceso (p95 911) · determinista | `run_sweep.py --configs configs/sweeps/h5_eval.yaml --seeds 10 --workers 15 --name h5_eval_a --baseline arm6_4orient` y `h5_replica` (D-016) (wt2) | **54,8 % del gap → T1 ALCANZADO (condicionado a D-012)** |
 | H1 + H3 búsqueda determinista (n100 d3 w8) (reportada aparte, D-012) | **70,94 % ± 1,50 · IC95 [69,86; 72,01] · +9,04 pp [7,23; 10,86]; vs H1 +6,24 [5,11; 7,36]** · 486 ms/dec (p95 1044) · determinista (2 ejecuciones idénticas) | `run_sweep.py --configs configs/sweeps/h3_eval.yaml --seeds 10 --workers 15 --name h3_eval --baseline arm6_4orient` (wt2) | 48,9 % del gap; a 0,2 pp de T1 |
 | *PALANCA* H1 + micro_plan (d3 w8, corte por tiempo) | 70,90 % ± 1,64 · +9,01 pp [7,77; 10,25] vs baseline · 722 ms/dec (p95 911) | `run_sweep.py --configs configs/sweeps/lever_microplan_eval.yaml --seeds 10 --workers 15 --name lever_microplan_eval --baseline arm6_4orient` (wt2) | NO cuenta para T1 (micro_plan=False es restricción, D-012) y NO es determinista (8/10 seeds cambian al repetir) → H3 |
@@ -50,10 +52,14 @@
 | feat/parametros-congelados | feat/fifo-scorer-coherencia | parámetros, preset arm6_4orient, caras | #141 | abierto |
 | feat/metrica-congelada | feat/parametros-congelados | métrica v1.0.0 + validador | #142 | abierto |
 | feat/sweep-paralelo | feat/metrica-congelada | run_sweep + baseline oficial | #143 | abierto |
-| feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + C (B pendiente) | — | commits 2483261 (C), 382ee4f (A); PR a abrir con A+C, B se añade después |
-| feat/h1-deuda-accesibilidad | feat/cotas-superiores | H1 | #145 | abierto (rebase verificado: 20 KPIs idénticos) |
 | feat/cotas-superiores (wt1) | feat/sweep-paralelo | cotas A + B + C, headroom, metas | #144 | abierto (smoke re-verificado OK con el lock libre, D-014) |
-| feat/h3-busqueda-determinista (wt2, TOPE) | feat/h1-deuda-accesibilidad | H3 | #146 | abierto |
+| feat/h1-deuda-accesibilidad | feat/cotas-superiores | H1 | #145 | abierto (rebase verificado: 20 KPIs idénticos) |
+| feat/h3-busqueda-determinista | feat/h1-deuda-accesibilidad | H3 | #146 | abierto |
+| feat/h4-columnas-online | feat/h3 | H4 (descartada) | #147 borrador | no mergear |
+| feat/h2-ranuras | feat/h3 | H2 (descartada) | #148 borrador | no mergear |
+| feat/h5-valor-estado | feat/h3 | H5 | #149 | abierto |
+| feat/palanca-canto | feat/h5 | palanca canto + contraste gantry 6 orient. | #150 | abierto (defaults neutros) |
+| feat/h6-rollouts-estocasticos (wt2, TOPE) | feat/palanca-canto | H6 | — | PR en curso |
 
 ## Trabajos Codex
 | Job | Spec | Modelo / effort | WT | Estado |
@@ -109,6 +115,7 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 | H4 plantilla de columnas online (sobre H1+H3) | −0,62 pp [−1,60; +0,36] n.s. (70,31 %); PALANCA gate 2400: 72,50 % (+1,56 [0,45; 2,68]) | **descartada** (PR borrador #147). Contador anti-estancamiento: 1 técnica < 0,5 pp |
 | H2 ranuras estrechas (sobre H1+H3; w0,1, min 250) | −0,04 pp [−1,41; +1,34] n.s. (70,90 %) | **descartada** (PR borrador #148). Contador anti-estancamiento: **2** técnicas seguidas < 0,5 pp |
 | H5 valor de estado (rollout 4 hojas, 25 nodos) sobre H1+H3 | referencia +1,11 [−0,00; 2,21]; réplica 20 seeds +2,12 [1,08; 3,16] | **adoptada** (D-016). Contador anti-estancamiento: 0 |
+| H6 rollouts con cajas futuras muestreadas (sobre H1+H3+H5) | prior genérico: +1,99 [1,23; 2,75] ref.; réplica +1,27 [0,17; 2,37]; catalog/uniform similares (D-017) | **adoptada** con prior genérico |
 | PALANCA garra de canto (cara H×L) y CONTRASTE gantry 6 orientaciones reales | canto: 68,67 % sin técnicas (+6,78 vs baseline); **72,54 % con H1+H3+H5 (+0,50 [−0,97; 1,96] n.s.)**; gantry 6 orient.: 76,39 % / **77,74 % con H1+H3+H5** (+5,70 [4,50; 6,91]) | `run_sweep.py --configs configs/sweeps/lever_canto.yaml --name lever_canto --seeds 10 --workers 15 --baseline arm6_4orient_H1H3H5` (wt2). Con la búsqueda, la garra de canto deja de aportar; la cinemática gantry sí (+5,7) |
 | Palancas buffer sobre H1+H3+H5 (k30, k75) | k30 +0,87 [−0,40; 2,13]; k75 +0,53 [−0,27; 1,34], n.s.; N=2 incompatible con micro_plan (open_pallets>1 lo prohíbe) | informativo (sweep levers_h5 en /tmp/wt_ro_h5): con búsqueda, más buffer apenas aporta |
 | Palanca gate stand_hw sobre H1+H3 sin columnas | gate 2400: −0,40 [−2,09; 1,30]; gate 800: +0,27 [−0,90; 1,43], n.s. (sweep lever_gate_h3 en /tmp/wt_ro_h3) | el gate solo importa combinado con columnas (H4) |

@@ -146,6 +146,20 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   pasan a `smoke || exit 1`. La rama de H1 ya añade reintentos de lock a esos tests (no hay regresión de código).
 - Justificación: transparencia sobre la regla "smoke antes de cada commit".
 
+## D-017 · H6: el prior del catálogo es información agregada del propio flujo → test de sensibilidad antes de adoptar (2026-10-17)
+- Contexto: H6 (rollouts con 6 cajas futuras muestreadas) mejora a H5 en la réplica preregistrada (+1,54 pp [0,68; 2,39]; referencia
+  +1,18 [−0,18; 2,54]). El prior "catalog" no lee la secuencia ni el Excel en ejecución, pero sus proporciones y rangos (CONTEXT.md)
+  se calcularon a partir de este mismo flujo de 186 cajas: fuga leve de información agregada (no de orden ni de dimensiones exactas).
+- Opción: antes de adoptar, repetir evaluación y réplica con priors mal especificados ("uniform_types": tipos equiprobables;
+  "generic": rangos amplios 300–500 × 350–750 × 250–500 mm sin información del flujo). Si la ganancia sobre H5 se mantiene con
+  "generic", H6 se adopta con el prior "generic" (el más limpio) salvo que "catalog" sea significativamente mejor, en cuyo caso se
+  reporta la diferencia como dependiente del conocimiento previo de la mezcla de tipos.
+- Justificación: anti-autoengaño (§7): la mejora no puede depender de conocer de antemano el flujo evaluado.
+- **Resultado (2026-10-17):** con "generic" la ganancia se mantiene: referencia 74,03 % (+1,99 [1,23; 2,75]) y réplica D-016
+  +1,27 [0,17; 2,37]; "catalog" no es significativamente mejor (referencia +1,18 [−0,18; 2,54], réplica +1,54 [0,68; 2,39]).
+  → **H6 se adopta con `rollout_prior=generic`** (sin información del flujo). Config oficial: `h6_generic` de
+  `configs/sweeps/h6_prior_eval.yaml`.
+
 ## D-016 · Resultado limítrofe de H5: réplica preregistrada en 20 seeds nuevas (2026-10-17, antes de ejecutarla)
 - Contexto: H5 (rollout, 4 hojas, 25 nodos) sobre H1+H3 da 72,04 % en las 10 seeds de referencia, +1,105 pp con IC95
   [−0,004; +2,214]: no significativo al 95 % por muy poco. Añadir seeds a la misma evaluación tras ver el resultado sería parada
