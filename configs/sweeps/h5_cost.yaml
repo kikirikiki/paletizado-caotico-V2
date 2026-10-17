@@ -1,0 +1,14 @@
+- name: h5_rollout_l4
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 25
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout
+    micro_plan_rollout_leaves: 4

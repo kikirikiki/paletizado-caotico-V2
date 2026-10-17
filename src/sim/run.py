@@ -244,6 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
     parser.add_argument("--micro-plan-node-budget", type=int, default=0, help="Intentos de expansión; 0 conserva corte temporal")
     parser.add_argument("--micro-plan-hard-cap-ms", type=int, default=10000, help="Salvaguarda H3; cualquier hit invalida determinismo")
+    parser.add_argument("--micro-plan-value", choices=("score", "potential", "rollout"), default="score")
+    parser.add_argument("--micro-plan-value-weight", type=float, default=1.0)
+    parser.add_argument("--micro-plan-rollout-leaves", type=int, default=4)
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
     parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
     parser.add_argument(
@@ -480,6 +483,9 @@ def run_simulation(
     micro_plan: bool = False,
     micro_plan_node_budget: int = 0,
     micro_plan_hard_cap_ms: int = 10000,
+    micro_plan_value: str = "score",
+    micro_plan_value_weight: float = 1.0,
+    micro_plan_rollout_leaves: int = 4,
     micro_depth: int = 3,
     micro_width: int = 8,
     micro_topk: int = 15,
@@ -657,6 +663,9 @@ def run_simulation(
             micro_plan_enabled=bool(micro_plan),
             micro_plan_node_budget=micro_plan_node_budget,
             micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
+            micro_plan_value=micro_plan_value,
+            micro_plan_value_weight=micro_plan_value_weight,
+            micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             micro_plan_depth=int(micro_depth),
             micro_plan_width=int(micro_width),
             micro_plan_topk_per_step=int(micro_topk),
@@ -833,6 +842,9 @@ def run_simulation(
             "micro_plan": bool(micro_plan),
             "micro_plan_node_budget": micro_plan_node_budget,
             "micro_plan_hard_cap_ms": micro_plan_hard_cap_ms,
+            "micro_plan_value": micro_plan_value,
+            "micro_plan_value_weight": micro_plan_value_weight,
+            "micro_plan_rollout_leaves": micro_plan_rollout_leaves,
             "micro_depth": int(micro_depth),
             "micro_width": int(micro_width),
             "micro_topk": int(micro_topk),
@@ -941,6 +953,9 @@ def main() -> None:
         micro_plan=bool(args.micro_plan),
         micro_plan_node_budget=args.micro_plan_node_budget,
         micro_plan_hard_cap_ms=args.micro_plan_hard_cap_ms,
+        micro_plan_value=args.micro_plan_value,
+        micro_plan_value_weight=args.micro_plan_value_weight,
+        micro_plan_rollout_leaves=args.micro_plan_rollout_leaves,
         micro_depth=int(args.micro_depth),
         micro_width=int(args.micro_width),
         micro_topk=int(args.micro_topk),
