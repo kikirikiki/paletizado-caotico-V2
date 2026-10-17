@@ -126,7 +126,7 @@ def aggregate_pallet_kpis(pallets_by_dest: dict[int, Iterable[PalletModel]]) -> 
         for pallet in pallet_list:
             for placement in pallet.placements:
                 family = str(getattr(placement, "orientation_family", "planar") or "planar").strip().lower()
-                if family not in ("planar", "stand_hw"):
+                if family not in ("planar", "stand_hw", "canto"):
                     family = "planar"
                 orientation_counts[family] = int(orientation_counts.get(family, 0)) + 1
                 dest_orientation_counts[family] = int(dest_orientation_counts.get(family, 0)) + 1

@@ -7,6 +7,7 @@ from palca.study.orientation_faces import (
     FORBIDDEN_FACES_ARM6,
     RestingFace,
     assert_mode_allowed,
+    allowed_faces_for_preset,
     resting_face,
 )
 from palca.study.params import preset_params
@@ -30,7 +31,7 @@ def test_four_variants_and_faces():
     }
 
 
-@pytest.mark.parametrize("mode", pallet_model.ALLOWED_ORIENTATION_MODES)
+@pytest.mark.parametrize("mode", ["planar", "planar+stand_hw"])
 @pytest.mark.parametrize("allow_rotate", [False, True])
 def test_no_existing_mode_rests_on_hxl(mode, allow_rotate):
     original = (600, 400, 300)
@@ -57,6 +58,28 @@ def test_synthetic_edge_is_forbidden_in_mode_and_arm_presets(monkeypatch):
     with pytest.raises(ValueError, match="HxL"):
         preset_params("arm6_4orient")
     assert_mode_allowed("planar+stand_hw", forbidden=set())
+
+
+def test_canto_mode_and_arm6_guard():
+    mode = "planar+stand_hw+canto"
+    with pytest.raises(ValueError, match="HxL"):
+        assert_mode_allowed(mode)
+    with pytest.raises(ValueError, match="HxL"):
+        preset_params("arm6_4orient", orientation_mode=mode)
+    assert_mode_allowed(mode, forbidden=set())
+
+
+@pytest.mark.parametrize("preset,faces", [
+    ("arm6_planar", {"LxW"}),
+    ("arm6_4orient", {"LxW", "HxW"}),
+    ("gantry_4orient", {"LxW", "HxW"}),
+    ("lever_arm_canto", {"LxW", "HxW", "HxL"}),
+    ("gantry_6orient", {"LxW", "HxW", "HxL"}),
+])
+def test_allowed_faces_by_preset(preset, faces):
+    assert allowed_faces_for_preset(preset) == faces
+    with pytest.raises(ValueError, match="desconocido"):
+        allowed_faces_for_preset("unknown")
 
 
 @pytest.mark.parametrize("original,placed,face", [

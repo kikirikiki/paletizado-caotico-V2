@@ -33,6 +33,7 @@ import yaml
 from palca.study.accessibility_robustness import accessibility_gap_violations
 from palca.study.metric import aggregate_seeds, paired_comparison, run_kpi, split_pallets
 from palca.study.params import REFERENCE_SEEDS, preset_params
+from palca.study.orientation_faces import RestingFace, allowed_faces_for_preset
 from palca.study.validate import validate_pallet
 from scripts.kpi_from_run import original_dims_for_run
 from sim.run import run_simulation
@@ -60,7 +61,7 @@ def load_configs(path: Path) -> list[dict]:
         if name in names:
             raise ValueError(f"Config duplicada: {name}")
         names.add(name)
-        if config.get("role") not in {"official", "contrast", "control", "bound"}:
+        if config.get("role") not in {"official", "contrast", "control", "bound", "lever"}:
             raise ValueError(f"Role inválido para {name}")
         overrides = config.setdefault("overrides", {})
         if not isinstance(overrides, dict) or any(not isinstance(k, str) for k in overrides):
@@ -141,8 +142,11 @@ def make_task(config: dict, seed: int, folder: Path, head: str, code_hash: str) 
     directory = (folder / config["name"] / str(seed)).resolve()
     params.update(out_path=str(directory / "run.json"), dump_placements_path=str(directory / "dump.json"))
     input_hash = hashlib.sha256(Path(params["excel_path"]).read_bytes()).hexdigest()
-    fingerprint = digest(dict(params=params, git_head=head, source_hash=code_hash, input_hash=input_hash))
+    forbidden_faces = sorted({face.value for face in RestingFace} - allowed_faces_for_preset(config["preset"]))
+    fingerprint = digest(dict(params=params, git_head=head, source_hash=code_hash,
+                              input_hash=input_hash, forbidden_faces=forbidden_faces))
     return dict(config=config["name"], seed=seed, params=params, directory=str(directory),
+                forbidden_faces=forbidden_faces,
                 git_head=head, source_hash=code_hash, input_hash=input_hash, task_hash=fingerprint)
 
 
@@ -172,13 +176,15 @@ def run_task(task: dict) -> dict:
     originals = original_dims_for_run(payload, task["params"]["excel_path"])
     violations = [dict(dest=rec.dest, index=rec.index, **asdict(violation))
                   for rec in records for violation in validate_pallet(
-                      rec.items, originals, min_support=task["params"]["min_support"])]
+                      rec.items, originals, min_support=task["params"]["min_support"],
+                      forbidden_faces=task["forbidden_faces"])]
     result = run_kpi(records)
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
     result.update({f"acc_violations_gap{gap}": sum(accessibility_gap_violations(
         rec.items, task["params"]["accessibility_delta_mm"], gap) for rec in records)
         for gap in (5, 20, 50)})
     result.update(n_violations=len(violations), violations=violations,
+                  forbidden_faces=task["forbidden_faces"],
                   decision_timing=payload["metrics"]["decision_timing"],
                   hard_cap_hits=payload["metrics"]["pallet_kpis"].get("hard_cap_hits", 0),
                   micro_plan={key: value for key, value in payload["metrics"]["pallet_kpis"].items()
@@ -283,7 +289,8 @@ def render_summary(summary: dict) -> str:
              "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|"]
     for name, row in summary["configs"].items():
         avg = lambda key: number(row[key]["mean"])
-        lines.append(f"| {name} ({row['role']}) | {row['kpi']['n']} | {number(row['kpi']['mean'], 100)} ± {number(row['kpi']['sd'], 100)} | {interval(row['kpi']['ci95'], 100)} | {number(row['kpi_nominal']['mean'], 100)} | {avg('n_pallets_total')} / {avg('n_closed')} | {avg('n_unplaced')} | {avg('n_violations')} ({row['violations_total']}) | {avg('decision_mean_ms')} / {avg('decision_p95_ms')} | {avg('wall_time_s')} |")
+        role = {"lever": "PALANCA", "contrast": "CONTRASTE"}.get(row["role"], row["role"])
+        lines.append(f"| {name} ({role}) | {row['kpi']['n']} | {number(row['kpi']['mean'], 100)} ± {number(row['kpi']['sd'], 100)} | {interval(row['kpi']['ci95'], 100)} | {number(row['kpi_nominal']['mean'], 100)} | {avg('n_pallets_total')} / {avg('n_closed')} | {avg('n_unplaced')} | {avg('n_violations')} ({row['violations_total']}) | {avg('decision_mean_ms')} / {avg('decision_p95_ms')} | {avg('wall_time_s')} |")
     lines += ["", "Salvo KPI/sd/IC y totales explícitos, las columnas muestran medias por seed. p95 es la media de los percentiles p95 de cada seed.",
               "No colocadas = entradas Excel − colocadas (186 en el flujo de referencia).", "",
               f"Comparaciones pareadas: config − baseline `{summary['baseline']}`, en puntos porcentuales.", "",

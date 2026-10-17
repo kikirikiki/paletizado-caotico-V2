@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from palca.tuning.episodes import apply_shuffle
+from palca.packer.pallet_model import ALLOWED_ORIENTATION_MODES
 
 from .des import Arrival, SimConfig, simulate
 from .io import load_arrivals
@@ -230,9 +231,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--orientation-mode",
-        choices=["planar", "planar+stand_hw"],
+        choices=ALLOWED_ORIENTATION_MODES,
         default="planar",
-        help="Modo de orientaciones de caja: planar (2) o planar+stand_hw (4).",
+        help="Orientaciones: planar (2), planar+stand_hw (4), planar+stand_hw+canto (6, PLAN_B/gantry).",
     )
     parser.add_argument(
         "--stand-hw-height-margin-gate-mm",

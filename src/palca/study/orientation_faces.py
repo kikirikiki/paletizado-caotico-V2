@@ -15,6 +15,20 @@ class RestingFace(str, Enum):
 FORBIDDEN_FACES_ARM6 = {"HxL"}
 
 
+def allowed_faces_for_preset(name: str) -> set[str]:
+    """Caras habilitadas por el preset, sin aplicar el gate de stand_hw."""
+    from .params import preset_params
+
+    params = preset_params(name)
+    original = (600, 400, 300)
+    return {
+        resting_face(original, (v.length_mm, v.width_mm, v.height_mm)).value
+        for v in pallet_model._orientation_variants_for_mode(
+            *original, mode=params["orientation_mode"], allow_rotate=True
+        )
+    }
+
+
 def resting_face(original_lwh: Sequence[int], placed_lwh: Sequence[int]) -> RestingFace:
     """Identifica la vertical; en empates prioriza HxL, después HxW y LxW.
 

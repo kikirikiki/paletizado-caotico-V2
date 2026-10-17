@@ -50,6 +50,14 @@ PRESETS: dict[str, dict] = {
     "arm6_planar": dict(
         deepcopy(BASE_PARAMS), orientation_mode="planar", accessibility_delta_mm=400
     ),
+    # PALANCA / PLAN_B: garra alternativa que permite apoyar HxL; no oficial arm6.
+    "lever_arm_canto": dict(
+        deepcopy(BASE_PARAMS), orientation_mode="planar+stand_hw+canto", accessibility_delta_mm=400
+    ),
+    # CONTRASTE informativo: gantry con seis orientaciones geométricas reales.
+    "gantry_6orient": dict(
+        deepcopy(BASE_PARAMS), orientation_mode="planar+stand_hw+canto", accessibility_delta_mm=0
+    ),
 }
 
 _PALLET = PalletSpec()
