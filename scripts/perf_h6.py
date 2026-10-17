@@ -7,6 +7,7 @@ is normalized) and every deterministic run_sweep KPI field against a reference.
 from __future__ import annotations
 
 import argparse
+import copy
 import cProfile
 import json
 import os
@@ -47,6 +48,17 @@ def deterministic_kpi(result):
 
 
 def assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi):
+    actual_dump, expected_dump = copy.deepcopy(actual_dump), copy.deepcopy(expected_dump)
+    actual_kpi, expected_kpi = copy.deepcopy(actual_kpi), copy.deepcopy(expected_kpi)
+    # Pre-D-024 goldens lack these additive defaults/telemetry. Nondefault
+    # settings must still fail equality against the original configuration.
+    for actual, expected in ((actual_dump, expected_dump), (actual_kpi, expected_kpi)):
+        for key, default in (("free_sides_tiebreak", False), ("free_sides_tolerance", 0.0)):
+            if key not in expected.get("params", {}) and key in actual.get("params", {}):
+                assert actual["params"][key] == default
+                del actual["params"][key]
+    if "free_sides" not in expected_kpi:
+        actual_kpi.pop("free_sides", None)
     # HEAD changes when a patch is committed; never discard any placement field.
     assert dict(actual_dump, git_head=expected_dump['git_head']) == expected_dump
     assert json.loads(json.dumps(deterministic_kpi(actual_kpi))) == json.loads(

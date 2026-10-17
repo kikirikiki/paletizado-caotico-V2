@@ -13,6 +13,7 @@ from .controls import (
     BalancePlacementControl, ControlConfig, ControlStack, LoadBearPlacementControl,
     RobotAccessibilityControl, StabilityPlacementControl, build_control_stack,
 )
+from ..scoring.free_sides import free_sides, rank_free_sides, validate_tolerance
 from .layer import LayerState
 from .maxrects2d import MaxRects2D, MaxRectsCandidate, Rect
 from .scoring import ScoringWeights, packing_gain, fragmentation
@@ -391,7 +392,10 @@ class PalletModel:
         max_tries_per_item: int | None = None,
         max_candidates: int | None = None,
         max_seconds_per_item: float | None = None,
+        free_sides_tiebreak: bool = False,
+        free_sides_tolerance: float = 0.0,
     ) -> PlacementPreview:
+        validate_tolerance(free_sides_tolerance)
         length_mm = int(box.length_mm)
         width_mm = int(box.width_mm)
         height_mm = int(box.height_mm)
@@ -457,7 +461,9 @@ class PalletModel:
             )
 
         if self.stacking_mode == STACKING_MODE_HEIGHTFIELD:
-            return self._preview_place_heightfield(box, budget=budget)
+            return self._preview_place_heightfield(
+                box, budget=budget, free_sides_tiebreak=free_sides_tiebreak,
+                free_sides_tolerance=free_sides_tolerance)
 
         rejected_by_controls = 0
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
@@ -492,6 +498,12 @@ class PalletModel:
             )
 
         def _select_best(candidates: list[_LayerCandidate]) -> _LayerCandidate:
+            if free_sides_tiebreak:
+                return rank_free_sides(
+                    candidates, value=_objective,
+                    sides=lambda c: free_sides(c.placement, self.placements),
+                    legacy_key=lambda c: (_objective(c), _tie_key(c, _objective(c))),
+                    tolerance=free_sides_tolerance)[0]
             best = candidates[0]
             best_objective = _objective(best)
             best_tie = _tie_key(best, best_objective)
@@ -616,11 +628,14 @@ class PalletModel:
         max_tries_per_item: int | None = None,
         max_candidates: int | None = None,
         max_seconds_per_item: float | None = None,
+        free_sides_tiebreak: bool = False,
+        free_sides_tolerance: float = 0.0,
     ) -> PlacementPreview:
         """preview_place restricted to a spatial region. heightfield mode only.
         Falls back to full preview_place if not in heightfield mode."""
         if self.stacking_mode != STACKING_MODE_HEIGHTFIELD:
-            return self.preview_place(box)
+            return self.preview_place(box, free_sides_tiebreak=free_sides_tiebreak,
+                                      free_sides_tolerance=free_sides_tolerance)
         # Temporarily patch _heightfield_xy_candidates via a closure
         original = self._heightfield_xy_candidates
         def _patched(l_mm, w_mm, *, cap=120):
@@ -634,6 +649,8 @@ class PalletModel:
                 max_tries_per_item=max_tries_per_item,
                 max_candidates=max_candidates,
                 max_seconds_per_item=max_seconds_per_item,
+                free_sides_tiebreak=free_sides_tiebreak,
+                free_sides_tolerance=free_sides_tolerance,
             )
         finally:
             self._heightfield_xy_candidates = original
@@ -1166,6 +1183,8 @@ class PalletModel:
         box: Box,
         *,
         budget: _PreviewBudget | None = None,
+        free_sides_tiebreak: bool = False,
+        free_sides_tolerance: float = 0.0,
     ) -> PlacementPreview:
         length_mm = int(box.length_mm)
         width_mm = int(box.width_mm)
@@ -1254,6 +1273,12 @@ class PalletModel:
             )
 
         def _select_best(candidates_local: list[_LayerCandidate]) -> _LayerCandidate:
+            if free_sides_tiebreak:
+                return rank_free_sides(
+                    candidates_local, value=_objective,
+                    sides=lambda c: free_sides(c.placement, self.placements),
+                    legacy_key=lambda c: (_objective(c), _tie_key(c, _objective(c))),
+                    tolerance=free_sides_tolerance)[0]
             best = candidates_local[0]
             best_objective = _objective(best)
             best_tie = _tie_key(best, best_objective)

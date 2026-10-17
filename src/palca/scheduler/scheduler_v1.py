@@ -11,6 +11,7 @@ from ..domain.box import Box
 from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring_coherencia import CoherenciaCapaScorer
+from ..scoring.free_sides import free_sides, rank_free_sides, validate_tolerance
 from ..scoring.state_value import placed_volume, visible_completion_potential
 from ..scoring.catalog_prior import observed_seed, sample_catalog
 from ..scoring.access_debt import HeightField, access_debt, build_heightfield
@@ -65,6 +66,8 @@ class SchedulerConfig:
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
     rollout_prior: str = "catalog"
+    free_sides_tiebreak: bool = False
+    free_sides_tolerance: float = 0.0
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -76,6 +79,7 @@ class SchedulerConfig:
     batchfill_greedy_topk: int = 12
 
     def __post_init__(self) -> None:
+        validate_tolerance(self.free_sides_tolerance)
         if (not isinstance(self.micro_plan_node_budget, int) or self.micro_plan_node_budget < 0
                 or not isinstance(self.micro_plan_hard_cap_ms, int) or self.micro_plan_hard_cap_ms <= 0):
             raise ValueError("micro_plan_node_budget must be a nonnegative int and hard_cap_ms a positive int")
@@ -197,6 +201,7 @@ class _ScoreTerms:
     priority_score: float
     scalar_score: float
     height_after_mm: int
+    free_sides_count: int = 0
     access_dead_volume_mm3: float = 0.0
     access_dead_area_mm2: float = 0.0
     access_debt_penalty: float = 0.0
@@ -221,6 +226,7 @@ class _BeamNode:
     placed_count: int = 0
     first_plan: PickPlan | None = None
     state_value: float = 0.0
+    first_free_sides: int = 0
 
 
 @dataclass(frozen=True)
@@ -638,6 +644,13 @@ class SchedulerV1:
                         -float(item.candidate.terms.dt_extra),
                     ),
                 )
+                if self.config.free_sides_tiebreak:
+                    hard_floor_selected = rank_free_sides(
+                        hard_floor_candidates, value=lambda item: item.base_score,
+                        sides=lambda item: item.candidate.terms.free_sides_count,
+                        legacy_key=lambda item: (item.base_score, item.candidate.terms.packing_gain,
+                                                 -item.candidate.terms.fragmentation, -item.candidate.terms.dt_extra),
+                        tolerance=self.config.free_sides_tolerance)[0]
                 selected = hard_floor_selected.candidate
                 self._record_hard_floor_phase_choice(
                     selected.plan,
@@ -820,6 +833,13 @@ class SchedulerV1:
                                 -float(item.expansion.terms.dt_extra),
                             ),
                         )
+                        if self.config.free_sides_tiebreak:
+                            chosen = rank_free_sides(
+                                hard_floor_expansions, value=lambda item: item.base_score,
+                                sides=lambda item: item.expansion.node.first_free_sides,
+                                legacy_key=lambda item: (item.base_score, item.expansion.terms.packing_gain,
+                                                         -item.expansion.terms.fragmentation, -item.expansion.terms.dt_extra),
+                                tolerance=self.config.free_sides_tolerance)[0]
                         chosen_plan = chosen.expansion.node.first_plan
                         if chosen_plan is not None:
                             self._record_hard_floor_phase_choice(
@@ -888,6 +908,16 @@ class SchedulerV1:
                             key=lambda candidate: self._beam_rank_key(candidate.node),
                             reverse=True,
                         )
+                    if self.config.free_sides_tiebreak:
+                        if (self.config.micro_plan_value == "score"
+                                and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
+                            ordered_expansions = rank_free_sides(
+                                ordered_expansions, value=lambda e: e.terms.scalar_score,
+                                sides=lambda e: e.node.first_free_sides,
+                                legacy_key=self._beam_expansion_gain_frag_key,
+                                tolerance=self.config.free_sides_tolerance)
+                        else:
+                            ordered_expansions = self._rank_free_beam(ordered_expansions, node_fn=lambda e: e.node)
                     keep = min(len(ordered_expansions), topk_per_step)
                     next_beam.extend(candidate.node for candidate in ordered_expansions[:keep])
 
@@ -898,13 +928,19 @@ class SchedulerV1:
                 break
 
             next_beam.sort(key=self._beam_rank_key, reverse=True)
+            if self.config.free_sides_tiebreak:
+                next_beam = self._rank_free_beam(next_beam)
             beam = next_beam[:beam_width]
             depth_effective = depth + 1
 
-            for candidate in beam:
-                if ((self.config.micro_plan_value != "score" and best_node.first_plan is None)
-                        or self._beam_rank_key(candidate) > self._beam_rank_key(best_node)):
-                    best_node = candidate
+            if self.config.free_sides_tiebreak:
+                pool = ([best_node] if best_node.first_plan is not None else []) + beam
+                best_node = self._rank_free_beam(pool)[0]
+            else:
+                for candidate in beam:
+                    if ((self.config.micro_plan_value != "score" and best_node.first_plan is None)
+                            or self._beam_rank_key(candidate) > self._beam_rank_key(best_node)):
+                        best_node = candidate
 
             if cutoff:
                 break
@@ -935,7 +971,14 @@ class SchedulerV1:
                 rollout_completed += int(completed)
                 evaluated.append((value, self._beam_rank_key(leaf), leaf))
             if evaluated:
-                winner = max(evaluated, key=lambda item: item[:2])
+                if self.config.free_sides_tiebreak:
+                    winner = rank_free_sides(
+                        evaluated, value=lambda item: item[0],
+                        sides=lambda item: item[2].first_free_sides,
+                        legacy_key=lambda item: item[:2],
+                        tolerance=self.config.free_sides_tolerance)[0]
+                else:
+                    winner = max(evaluated, key=lambda item: item[:2])
                 best_node = winner[2]
                 best_node.state_value = winner[0]
         if (self.config.rollout_future_boxes and deadline is not None
@@ -1089,6 +1132,29 @@ class SchedulerV1:
         return (total_volume / self.config.rollout_future_samples, consumed,
                 samples_completed == self.config.rollout_future_samples,
                 future_nodes, samples_completed)
+
+    def _rank_free_beam(self, items, node_fn=lambda n: n):
+        def prefix(item):
+            node = node_fn(item)
+            if self.config.micro_plan_value != "score":
+                return ()
+            if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                return (node.placed_count, -node.height_after_mm)
+            return (node.placed_count,)
+
+        def value(item):
+            node = node_fn(item)
+            if self.config.micro_plan_value != "score":
+                return node.state_value
+            if self.config.score_mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                return node.gain_sum
+            return node.score_sum
+
+        return rank_free_sides(
+            items, value=value, prefix=prefix,
+            sides=lambda item: node_fn(item).first_free_sides,
+            legacy_key=lambda item: self._beam_rank_key(node_fn(item)),
+            tolerance=self.config.free_sides_tolerance)
 
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.micro_plan_value != "score":
@@ -1275,6 +1341,8 @@ class SchedulerV1:
             height_after_mm=int(self._state_height_after_mm(new_pallets)),
             placed_count=int(node.placed_count) + 1,
             first_plan=first_plan,
+            first_free_sides=(node.first_free_sides if node.first_plan is not None
+                              else terms.free_sides_count),
         )
         if self.config.micro_plan_value != "score":
             self._set_state_value(child)
@@ -2358,6 +2426,9 @@ class SchedulerV1:
                     score -= penalty
                 self.access_debt_candidate_ms.append((time.perf_counter() - started) * 1000)
         return _ScoreTerms(
+            free_sides_count=(free_sides(preview.placement, pallet.placements)
+                              if self.config.free_sides_tiebreak and pallet is not None
+                              and preview.placement is not None else 0),
             access_dead_volume_mm3=debt_volume,
             access_dead_area_mm2=debt_area,
             access_debt_penalty=penalty,
@@ -2399,6 +2470,29 @@ class SchedulerV1:
                 c.plan.preview.placement,
                 colocadas=list(getattr(sim_state.pallets.get(c.plan.pallet_id), "placements", []) or []),
             ) if c.plan.preview.placement is not None else -1.0)
+        if self.config.free_sides_tiebreak and selected is not None:
+            eligible = list(candidates)
+            mode = self.config.score_mode
+            if mode in (ScoreMode.MIN_HEIGHT_THEN_GAIN.value, ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
+                limit = min(c.terms.height_after_mm for c in eligible)
+                if mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value:
+                    limit += self.config.height_slack_mm
+                eligible = [c for c in eligible if c.terms.height_after_mm <= limit]
+            value = lambda c: c.terms.scalar_score
+            legacy = self._gain_frag_candidate_key
+            if mode == ScoreMode.MIN_HEIGHT_THEN_GAIN.value:
+                value = lambda c: c.terms.packing_gain
+                old_order = sorted(eligible, key=lambda c: self._min_height_then_gain_key(c.terms, c.box))
+                old_rank = {id(c): -index for index, c in enumerate(old_order)}
+                legacy = lambda c: old_rank[id(c)]
+            elif mode == ScoreMode.COHERENCIA_CAPA.value:
+                value = lambda c: scorer.score_placement(
+                    c.plan.preview.placement,
+                    colocadas=list(getattr(sim_state.pallets.get(c.plan.pallet_id), "placements", []) or []))
+                legacy = value
+            selected = rank_free_sides(
+                eligible, value=value, sides=lambda c: c.terms.free_sides_count,
+                legacy_key=legacy, tolerance=self.config.free_sides_tolerance)[0]
         return selected, stats
 
     def _record_access_debt_choice(self, terms: _ScoreTerms) -> None:
@@ -2518,6 +2612,9 @@ class SchedulerV1:
 
     def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
         kwargs: dict[str, object] = {}
+        if self.config.free_sides_tiebreak:
+            kwargs.update(free_sides_tiebreak=True,
+                          free_sides_tolerance=self.config.free_sides_tolerance)
         max_tries = int(self.config.max_tries_per_item) if self.config.max_tries_per_item else 0
         max_seconds = float(self.config.max_seconds_per_item) if self.config.max_seconds_per_item else 0.0
         if max_tries > 0:

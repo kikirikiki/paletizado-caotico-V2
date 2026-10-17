@@ -80,6 +80,8 @@ class PolicyConfig:
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
     rollout_prior: str = "catalog"
+    free_sides_tiebreak: bool = False
+    free_sides_tolerance: float = 0.0
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -217,6 +219,8 @@ class PolicyPackerScheduler:
         rollout_future_boxes: int = 0,
         rollout_future_samples: int = 1,
         rollout_prior: str = "catalog",
+        free_sides_tiebreak: bool = False,
+        free_sides_tolerance: float = 0.0,
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
@@ -269,6 +273,8 @@ class PolicyPackerScheduler:
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            free_sides_tiebreak=free_sides_tiebreak,
+            free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
@@ -330,6 +336,8 @@ class PolicyPackerScheduler:
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            free_sides_tiebreak=free_sides_tiebreak,
+            free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
