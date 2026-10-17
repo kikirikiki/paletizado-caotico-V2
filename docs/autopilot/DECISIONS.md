@@ -217,3 +217,11 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - **[REVISAR — prioridad alta]** ¿Qué holgura lateral necesita realmente la garra? Si la regla física debe considerar vecinas a
   pocos centímetros, el baseline, las técnicas y el techo offline cambian (el techo, previsiblemente, mucho). Con la respuesta
   se puede fijar `adjacency_gap_mm` y re-medir todo con el mismo método.
+
+## D-020 · Pausa por uso semanal de Claude ≥ 60 % (instrucción del usuario, 2026-10-17)
+- Contexto: el usuario pide que, si el uso semanal de Claude llega al 60 %, el autopiloto se pause hasta que él diga que continúe.
+  Uso al recibir la instrucción: 41 % ("Weekly · all models", reinicio el 2026-10-21 a las 12:00 CEST).
+- Opción: comprobar `mcp__ccd_session_mgmt__get_usage` al reanudar y antes de cada delegación a Codex, sweep o tarea larga. Al llegar
+  al 60 %: no lanzar trabajo nuevo, dejar terminar lo que ya corre (y revisarlo/commitearlo solo si el usuario lo autoriza), dejar el
+  estado escrito en PROGRESS.md y avisar al usuario. No se escribe `PARADA:` (reservada a las condiciones de §9).
+- Justificación: instrucción explícita del usuario; prevalece sobre el modo autopiloto.

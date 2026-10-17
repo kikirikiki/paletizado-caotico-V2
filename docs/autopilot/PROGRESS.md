@@ -1,6 +1,11 @@
 # PROGRESS — autopiloto de compactidad (fuente única de verdad del estado)
 
-Última actualización: 2026-10-16 ~15:40 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
+Última actualización: 2026-10-17 ~14:30 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
+
+> **REGLA DEL USUARIO (2026-10-17, D-020): si el uso semanal de Claude ("Weekly · all models", herramienta
+> `mcp__ccd_session_mgmt__get_usage`) llega al 60 %, PAUSAR el autopiloto hasta que el usuario diga que continúe.** Comprobarlo al
+> reanudar y antes de cada delegación a Codex, sweep o tarea larga. En pausa: no lanzar trabajo nuevo, dejar terminar lo que ya
+> corre, registrar estado aquí y avisar al usuario. La pausa NO es una línea `PARADA:` (esa queda reservada a §9).
 
 ## Cómo reanudar
 0. **La versión vigente de este archivo está en la rama más alta del apilado.** Puntero fuera de git:
