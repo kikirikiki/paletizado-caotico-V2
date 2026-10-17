@@ -252,3 +252,11 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Interpretación provisional: la regla de los 400 mm (margen en Z del brazo) se mantiene tal cual. Queda por confirmar si debe haber
   ~2 cm de hueco lateral entre la caja que se baja y sus vecinas (lo que cambiaría todas las cifras, porque hoy el simulador coloca las
   cajas pegadas) o si basta con que no se solapen. Se ha preguntado al usuario; mientras tanto no se cambia la regla.
+
+## D-024 · Laterales libres como desempate, sin perder compactación (requisito del usuario, 2026-10-17)
+- Respuesta del usuario a D-023: las cajas pueden ir pegadas (hay que aprovechar el espacio al máximo). Requisito nuevo de maniobrabilidad:
+  priorizar huecos con más laterales libres (4 > 3 > 2 > 1 > 0), para bajar la caja desplazada y deslizarla a su posición final.
+- Definiciones confirmadas: (1) la compactación manda, los laterales libres solo desempatan; (2) el borde del palet cuenta como libre;
+  (3) contigua = vecina que toca o está a < 20 mm del lado, se solapa a lo largo del lado y en altura con [z, z+h); el apoyo y las vecinas
+  más bajas que la base no cuentan; (4) el robot puede entrar por cualquier lado libre.
+- Opción: desempate con tolerancia configurable; se adopta solo si el KPI no baja (no inferioridad en referencia y réplica).
