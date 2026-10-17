@@ -24,10 +24,17 @@
 - **Fase 0 cerrada** (docs/COTAS.md): techo offline verificado **81,45 %** (columnas contiguas, reproducible) → gap **19,56 pp** (D-013).
 - **Metas vigentes:** **T1 ≥ 71,67 %** · **T2 ≥ 79,49 %** (o ≥ 80 % absoluto con palancas justificadas, solo en arm6_4orient) · **T3 ≥ 92,84 %**.
   (Primera fijación con techo 80,40: T1 71,15 / T2 78,55.)
-- Estado frente a T1: H1 64,70 % (15 % del gap); H1+H3 70,94 % (48,9 %); **H1+H3+H5 72,04 % (54,8 % del gap) → T1 ALCANZADO
-  (2026-10-17), condicionado a D-012** (H3/H5 usan la maquinaria de micro_plan). No es condición de parada: se sigue hacia T2 (≥ 78,55 %).
-- **Mejor actual: H1+H3+H5+H6 (prior genérico) = 74,03 % → 62,1 % del gap vigente; T1 (71,67) sigue alcanzado (condicionado a D-012).**
-  Faltan 5,5 pp para T2 (79,49). Con palancas en el brazo (gate abierto + canto) se llega a 77,76 %: T2 no se alcanza ni con palancas.
+- **Respuestas del usuario (2026-10-17):** gate eliminado si no crea torres → verificado, eliminado (D-021); el robot solo ve las 15 cajas
+  de la cinta → H5/H6 cumplen (test de fuga), H3 sola y micro_plan por tiempo tenían fuga (D-022); holgura de 2 cm → pendiente de
+  confirmar si las cajas pueden ir pegadas (D-023).
+- **T1 ALCANZADO sin condiciones** (H5/H6 solo usan información visible).
+- **MEJOR ACTUAL: H1+H3+H5+H6 sin gate = 77,06 % ± 0,90 (10 seeds de referencia; +3,03 [1,72; 4,35] vs H6 con gate); réplica 20 seeds
+  +2,62 [1,52; 3,71] → 77,6 % del gap.** Faltan 2,4 pp para T2 (79,49).
+- **Problema abierto:** sin gate tarda 1,12 s/decisión de media en 1 proceso (p95 2,52 s): incumple D-007 (media ≤ 1 s). Bajar el
+  presupuesto de nodos no ayuda (B35 1,02 s, B45 1,11 s, KPI de ajuste 76,2 / 77,1 / 76,3 con B35/45/57). Siguiente: optimizar el código
+  sin cambiar decisiones (bit a bit) hasta ≤ 1 s (Codex). Config vigente: `h6_sin_gate` de configs/sweeps/h6_sin_gate.yaml.
+- Descartadas desde el ciclo lateral D-019: H7 (PR 153), secuenciación (PR 154), palets por familia (−0,74 con H1; rama
+  feat/palanca-palets-familia en wt2, PR pendiente). Contador anti-estancamiento: 3 → toca ciclo lateral n.º 2 tras la optimización.
 - Fase 1 en curso.
 - Configuración oficial: `arm6_4orient` (= `planar+stand_hw`, `accessibility_delta_mm=400`; D-004).
 
@@ -35,7 +42,8 @@
 | Config | KPI | Comando / carpeta | Estado |
 |---|---|---|---|
 | arm6_4orient (baseline oficial) | 61,89 % ± 1,32 · IC95 [60,95; 62,83] · 75 ms/dec (p95 155) | `run_sweep.py --configs configs/sweeps/baseline.yaml --seeds 10 --workers 15 --name baseline_v1 --baseline arm6_4orient` → out/sweeps/baseline_v1 (wt1) | verificado |
-| **H1+H3+H5+H6 rollouts estocásticos, prior genérico (6 futuras, 1 muestra, 2 hojas, B=57) — MEJOR (aparte, D-012)** | **74,03 % ± 1,36 (10 seeds de referencia); vs H5 +1,99 [1,23; 2,75]; réplica D-016 +1,27 [0,17; 2,37]** · ~716 ms/dec en 1 proceso (p95 ~1,5 s) | `run_sweep.py --configs configs/sweeps/h6_prior_eval.yaml --seeds 10 --workers 15 --name h6_prior_eval --baseline h5_rollout_l4` (config h6_generic) y `h6_prior_replica` (wt2) | **65,6 % del gap** (D-017: prior sin información del flujo) |
+| **H1+H3+H5+H6 SIN GATE (D-021) — MEJOR** | **77,06 % ± 0,90 · IC95 [76,42; 77,71]; réplica 20 seeds 76,21 % (+2,62 [1,52; 3,71] vs con gate)** · 1,12 s/dec en 1 proceso (incumple D-007 por 0,12 s) | `run_sweep.py --configs configs/sweeps/h6_sin_gate.yaml --seeds 10 --workers 15 --name h6_sin_gate_ref --baseline h6_generic` y `h6_sin_gate_replica` (wt1) | 77,6 % del gap; pendiente optimizar tiempo |
+| H1+H3+H5+H6 rollouts estocásticos, prior genérico (6 futuras, 1 muestra, 2 hojas, B=57), con gate | **74,03 % ± 1,36 (10 seeds de referencia); vs H5 +1,99 [1,23; 2,75]; réplica D-016 +1,27 [0,17; 2,37]** · ~716 ms/dec en 1 proceso (p95 ~1,5 s) | `run_sweep.py --configs configs/sweeps/h6_prior_eval.yaml --seeds 10 --workers 15 --name h6_prior_eval --baseline h5_rollout_l4` (config h6_generic) y `h6_prior_replica` (wt2) | **65,6 % del gap** (D-017: prior sin información del flujo) |
 | arm6_4orient + H1 (w0,25 b600) | **64,70 % · IC95 [63,47; 65,92] · +2,81 pp [1,04; 4,57]** · 66 ms/dec (p95 146) | `run_sweep.py --configs configs/sweeps/h1_eval2.yaml --seeds 10 --workers 15 --name h1_eval2 --baseline arm6_4orient` → out/sweeps/h1_eval2 (wt2) | adoptada (D-009/D-011) |
 | **H1 + H3 + H5 valor de estado por rollout (4 hojas, 25 nodos) — MEJOR (aparte, D-012)** | **72,04 % ± 1,05 (10 seeds de referencia); vs H1+H3 +1,11 [−0,00; 2,21]; réplica preregistrada en 20 seeds nuevas +2,12 [1,08; 3,16]** · 437 ms/dec en 1 proceso (p95 911) · determinista | `run_sweep.py --configs configs/sweeps/h5_eval.yaml --seeds 10 --workers 15 --name h5_eval_a --baseline arm6_4orient` y `h5_replica` (D-016) (wt2) | **54,8 % del gap → T1 ALCANZADO (condicionado a D-012)** |
 | H1 + H3 búsqueda determinista (n100 d3 w8) (reportada aparte, D-012) | **70,94 % ± 1,50 · IC95 [69,86; 72,01] · +9,04 pp [7,23; 10,86]; vs H1 +6,24 [5,11; 7,36]** · 486 ms/dec (p95 1044) · determinista (2 ejecuciones idénticas) | `run_sweep.py --configs configs/sweeps/h3_eval.yaml --seeds 10 --workers 15 --name h3_eval --baseline arm6_4orient` (wt2) | 48,9 % del gap; a 0,2 pp de T1 |

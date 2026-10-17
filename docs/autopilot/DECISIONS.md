@@ -225,3 +225,30 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   al 60 %: no lanzar trabajo nuevo, dejar terminar lo que ya corre (y revisarlo/commitearlo solo si el usuario lo autoriza), dejar el
   estado escrito en PROGRESS.md y avisar al usuario. No se escribe `PARADA:` (reservada a las condiciones de §9).
 - Justificación: instrucción explícita del usuario; prevalece sobre el modo autopiloto.
+
+## D-021 · Gate stand_hw eliminado por indicación del usuario (2026-10-17)
+- Respuesta del usuario a D-018: el gate de 400 mm era una regla para evitar torres; si anulándolo no se hacen torres, se elimina.
+- Comprobación (H1+H3+H5+H6, 10 seeds de referencia, autopsia de palets cerrados): sin gate hay MENOS torres. Espacio libre sobre el
+  perfil 23,7 % → 20,7 %; altura media de la superficie 1831 → 1902 mm; suelo sin cubrir 10,2 % → 7,8 %; fracción > 400 mm bajo el
+  máximo 28,6 % → 28,1 %; peor palet 59,1 % → 65,5 %; cierres por estabilidad 6 → 1.
+- Opción: la configuración oficial pasa a stand_hw_height_margin_gate_mm=2400 (sin gate). El preset rm6_4orient y el baseline
+  congelado (61,89 %) no cambian: el gate se quita como override de la mejor configuración. Réplica en las 20 seeds de D-016 en curso.
+
+## D-022 · D-012 resuelto: el robot solo ve las 15 cajas de la cinta (2026-10-17)
+- Respuesta del usuario: el robot solo ve lo que está en la cinta (15 cajas), no el Excel completo.
+- Comprobación en código: el micro_plan original (y H3, micro_plan_value=score) rellena la cinta simulada con cajas reales de
+  upstream (scheduler_v1 líneas ~1286–1292): mira cajas que aún no han llegado. H5 y H6 (micro_plan_value ≠ score) congelan la
+  ventana visible y nunca usan upstream (líneas ~710–715); H6 usa cajas futuras sintéticas de un prior genérico.
+- Test de fuga (flujo idéntico hasta la fila 100 y permutado después): H6 toma decisiones idénticas hasta el paso 86, exactamente
+  cuando la primera caja cambiada entra en la cinta → **H6 solo usa información visible**.
+- Opción: H5/H6 cuentan para las metas sin condición. H3 sola y la palanca micro_plan por tiempo quedan marcadas como "con fuga" y
+  no se usan. Cualquier técnica futura debe pasar el mismo test de fuga (decisiones idénticas mientras las cajas cambiadas no estén
+  en la cinta).
+
+## D-023 · Holgura lateral de la garra: interpretación pendiente de confirmar (2026-10-17)
+- Respuesta del usuario a D-015: "basta con que no se toquen, pero si se dejan 2 cm de margen de maniobra para que al bajar con la
+  caja no se golpee con la caja ya posicionada, es suficiente"; y la regla de los 400 mm tiene que ver con el margen en Z para que el
+  brazo (la parte que queda por encima de las cajas) no golpee.
+- Interpretación provisional: la regla de los 400 mm (margen en Z del brazo) se mantiene tal cual. Queda por confirmar si debe haber
+  ~2 cm de hueco lateral entre la caja que se baja y sus vecinas (lo que cambiaría todas las cifras, porque hoy el simulador coloca las
+  cajas pegadas) o si basta con que no se solapen. Se ha preguntado al usuario; mientras tanto no se cambia la regla.
