@@ -146,6 +146,30 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   pasan a `smoke || exit 1`. La rama de H1 ya añade reintentos de lock a esos tests (no hay regresión de código).
 - Justificación: transparencia sobre la regla "smoke antes de cada commit".
 
+## D-018 · El gate stand_hw es la palanca de software más potente restante: se reporta aparte (2026-10-17)
+- Contexto: el prompt lista `stand_hw_height_margin_gate_mm=400` entre las "restricciones físicas" (§2), aunque §7 no lo menciona entre
+  las relajaciones prohibidas, y en el código es una heurística de altura (permite cajas de pie solo si el palet está a ≤ 400 mm del
+  techo), sin justificación física documentada. Sobre H1+H3+H5+H6 (10 seeds de referencia): gate 800 → −1,34 pp, 1200 → −0,98,
+  **2400 (sin gate) → 77,06 % (+3,03 [1,72; 4,35])**. La autopsia (RESEARCH §1quater) explica por qué: la franja trasera de 395 mm
+  solo admite cajas estrechas o de pie.
+- Opción: se respeta el gate oficial (400) en todas las cifras oficiales; quitarlo se reporta como PALANCA con su ganancia aislada.
+- **[REVISAR — prioridad alta]** ¿El gate de 400 mm responde a una restricción física (estabilidad de cajas de pie en capas bajas, carga,
+  normativa) o es una heurística del algoritmo? Si es heurística, quitarlo daría 77,06 % en arm6_4orient, a 1,5 pp de T2.
+
+## D-017 · H6: el prior del catálogo es información agregada del propio flujo → test de sensibilidad antes de adoptar (2026-10-17)
+- Contexto: H6 (rollouts con 6 cajas futuras muestreadas) mejora a H5 en la réplica preregistrada (+1,54 pp [0,68; 2,39]; referencia
+  +1,18 [−0,18; 2,54]). El prior "catalog" no lee la secuencia ni el Excel en ejecución, pero sus proporciones y rangos (CONTEXT.md)
+  se calcularon a partir de este mismo flujo de 186 cajas: fuga leve de información agregada (no de orden ni de dimensiones exactas).
+- Opción: antes de adoptar, repetir evaluación y réplica con priors mal especificados ("uniform_types": tipos equiprobables;
+  "generic": rangos amplios 300–500 × 350–750 × 250–500 mm sin información del flujo). Si la ganancia sobre H5 se mantiene con
+  "generic", H6 se adopta con el prior "generic" (el más limpio) salvo que "catalog" sea significativamente mejor, en cuyo caso se
+  reporta la diferencia como dependiente del conocimiento previo de la mezcla de tipos.
+- Justificación: anti-autoengaño (§7): la mejora no puede depender de conocer de antemano el flujo evaluado.
+- **Resultado (2026-10-17):** con "generic" la ganancia se mantiene: referencia 74,03 % (+1,99 [1,23; 2,75]) y réplica D-016
+  +1,27 [0,17; 2,37]; "catalog" no es significativamente mejor (referencia +1,18 [−0,18; 2,54], réplica +1,54 [0,68; 2,39]).
+  → **H6 se adopta con `rollout_prior=generic`** (sin información del flujo). Config oficial: `h6_generic` de
+  `configs/sweeps/h6_prior_eval.yaml`.
+
 ## D-016 · Resultado limítrofe de H5: réplica preregistrada en 20 seeds nuevas (2026-10-17, antes de ejecutarla)
 - Contexto: H5 (rollout, 4 hojas, 25 nodos) sobre H1+H3 da 72,04 % en las 10 seeds de referencia, +1,105 pp con IC95
   [−0,004; +2,214]: no significativo al 95 % por muy poco. Añadir seeds a la misma evaluación tras ver el resultado sería parada

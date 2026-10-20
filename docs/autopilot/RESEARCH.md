@@ -83,6 +83,19 @@ ataca directamente el valle observado. La spec 07 se reescribe en este sentido.
 Herramientas de análisis (fuera del repo, en el scratchpad del director): descomposición cajas/huecos/espacio libre por palet y
 mapa de suelo vacío, ambos sobre `out/sweeps/<sweep>/<config>/<seed>/{run,dump}.json` con `split_pallets`.
 
+## 1quater. Autopsia con H1+H3+H5+H6 (h6_prior_eval/h6_generic, 87 palets cerrados)
+| Config | Cajas | Espacio libre sobre el perfil | Suelo sin cubrir | z medio | Cierres por estabilidad |
+|---|---|---|---|---|---|
+| baseline | 61,9 % | 36,0 % | 18,7 % | 1535 | 33 % |
+| H1+H3+H5 | 72,0 % | 25,5 % | 13,0 % | 1788 | 16 % |
+| H1+H3+H5+H6 | 74,0 % | 23,7 % | 10,2 % | 1831 | 7 % |
+
+La franja delantera y∈[−20,425) está prácticamente resuelta (3,3 % de suelo vacío, perfil medio 2030 mm). La pérdida se concentra
+en la **franja trasera de 395 mm**, y∈[425,820) (17,8 % de suelo vacío, perfil 1613 mm), sobre todo en x≈380–780 (36–44 %) y en
+las esquinas. Ahí no caben las cajas planas de la familia dominante (W = 445): solo cajas estrechas (W ≤ 395, ~34 en el flujo) o
+cajas de pie, que el gate `stand_hw` solo permite cuando el palet está a ≤ 400 mm del techo. Es la causa dominante restante.
+Más presupuesto de búsqueda no la resuelve (h6_tune_budget: paisaje ruidoso 69,5–75,0 % sin tendencia).
+
 ## 2. Literatura relevante (2021–2026)
 - Zhao et al., PCT (ICLR 2022) y *Deliberate Planning of 3D Bin Packing on Packing Configuration Trees*
   (arXiv 2504.04421): hojas por corner points / extreme points / EMS; planificación con lookahead, buffer y offline

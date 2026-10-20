@@ -12,6 +12,7 @@ from ..domain.placement import PlacementPreview
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring_coherencia import CoherenciaCapaScorer
 from ..scoring.state_value import placed_volume, visible_completion_potential
+from ..scoring.catalog_prior import observed_seed, sample_catalog
 from ..scoring.access_debt import HeightField, access_debt, build_heightfield
 from ..scoring.height_slack import (
     ScoreMode,
@@ -61,6 +62,9 @@ class SchedulerConfig:
     micro_plan_value: str = "score"
     micro_plan_value_weight: float = 1.0
     micro_plan_rollout_leaves: int = 4
+    rollout_future_boxes: int = 0
+    rollout_future_samples: int = 1
+    rollout_prior: str = "catalog"
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -81,6 +85,15 @@ class SchedulerConfig:
             raise ValueError("micro_plan_value_weight must be finite and nonnegative")
         if not isinstance(self.micro_plan_rollout_leaves, int) or self.micro_plan_rollout_leaves < 1:
             raise ValueError("micro_plan_rollout_leaves must be a positive int")
+        if type(self.rollout_future_boxes) is not int or self.rollout_future_boxes < 0:
+            raise ValueError("rollout_future_boxes must be a nonnegative int")
+        if type(self.rollout_future_samples) is not int or self.rollout_future_samples < 1:
+            raise ValueError("rollout_future_samples must be a positive int")
+        if self.rollout_prior not in ("catalog", "uniform_types", "generic"):
+            raise ValueError("rollout_prior must be catalog, uniform_types or generic")
+        if self.rollout_future_boxes and (self.micro_plan_value != "rollout"
+                                         or self.micro_plan_node_budget <= 0):
+            raise ValueError("Future rollouts require rollout value and a positive node budget")
         if self.micro_plan_enabled and self.micro_plan_node_budget > 0 and self.max_seconds_per_item > 0:
             raise ValueError("Deterministic microplan requires max_seconds_per_item=0")
         if self.access_debt_mode not in ("penalty", "filter"):
@@ -263,6 +276,8 @@ class SchedulerV1:
         self.micro_plan_time_ms_count = 0
         self.micro_plan_nodes_expanded_total = 0
         self.micro_plan_nodes_expanded: list[int] = []
+        self.micro_plan_future_nodes: list[int] = []
+        self.micro_plan_future_samples_completed: list[int] = []
         self.micro_plan_times_ms: list[float] = []
         self.hard_cap_hits = 0
         self.micro_plan_depth_effective_sum = 0.0
@@ -354,6 +369,10 @@ class SchedulerV1:
             )
             self.micro_plan_nodes_expanded_total += int(micro_stats.get("nodes_expanded", 0) or 0)
             self.micro_plan_nodes_expanded.append(int(micro_stats.get("nodes_expanded", 0) or 0))
+            if self.config.rollout_future_boxes:
+                self.micro_plan_future_nodes.append(int(micro_stats.get("rollout_future_nodes", 0)))
+                self.micro_plan_future_samples_completed.append(
+                    int(micro_stats.get("rollout_future_samples_completed", 0)))
             self.micro_plan_depth_effective_sum += float(micro_stats.get("depth_effective", 0.0) or 0.0)
             self.micro_plan_depth_effective_count += 1
             best_seq_len = int(micro_stats.get("best_seq_len", 0) or 0)
@@ -698,6 +717,9 @@ class SchedulerV1:
         visible_count = sum(len(r.queue) for r in root.ramps.values())
         rollout_reserve = (min(beam_width, self.config.micro_plan_rollout_leaves) * visible_count
                            if self.config.micro_plan_value == "rollout" else 0)
+        if self.config.rollout_future_boxes:
+            rollout_reserve += (min(beam_width, self.config.micro_plan_rollout_leaves)
+                                * self.config.rollout_future_boxes * self.config.rollout_future_samples)
         # Leave room for at least the root window when a small budget is used.
         beam_budget = max(min(visible_count, node_budget), node_budget - rollout_reserve)
         beam: list[_BeamNode] = [root]
@@ -889,14 +911,26 @@ class SchedulerV1:
 
         rollout_nodes = 0
         rollout_completed = 0
+        future_nodes = 0
+        future_samples_completed = 0
         if self.config.micro_plan_value == "rollout" and beam[0].first_plan is not None:
             # All compared leaves receive the same deterministic placement quota.
             leaves = beam[:self.config.micro_plan_rollout_leaves]
             quota = ((node_budget - nodes_expanded) // len(leaves) if node_budget > 0
                      else visible_count)
             evaluated = []
+            # Common random numbers across leaves, drawn only from the root's
+            # frozen observed state; no dependence on hidden stream or clocks.
+            seed = (observed_seed(root.pallets, {rid: r.queue for rid, r in root.ramps.items()})
+                    if self.config.rollout_future_boxes else None)
             for leaf in leaves:
-                value, consumed, completed = self._rollout_value(leaf, sim_state, quota, deadline)
+                if self.config.rollout_future_boxes:
+                    value, consumed, completed, nf, ns = self._stochastic_rollout_value(
+                        leaf, sim_state, quota, deadline, seed)
+                    future_nodes += nf
+                    future_samples_completed += ns
+                else:
+                    value, consumed, completed = self._rollout_value(leaf, sim_state, quota, deadline)
                 rollout_nodes += consumed
                 rollout_completed += int(completed)
                 evaluated.append((value, self._beam_rank_key(leaf), leaf))
@@ -904,6 +938,10 @@ class SchedulerV1:
                 winner = max(evaluated, key=lambda item: item[:2])
                 best_node = winner[2]
                 best_node.state_value = winner[0]
+        if (self.config.rollout_future_boxes and deadline is not None
+                and time.perf_counter() >= deadline):
+            cutoff = True
+            cutoff_reason = deadline_reason
         nodes_expanded += rollout_nodes
         best_seq_len = int(best_node.placed_count)
         stats = {
@@ -939,6 +977,12 @@ class SchedulerV1:
                 float(batchfill_selected_boxes_sum_local) / max(1, int(batchfill_selected_boxes_count_local))
             ),
         }
+        if self.config.rollout_future_boxes:
+            stats.update(rollout_future_nodes=future_nodes,
+                         rollout_future_samples_completed=future_samples_completed,
+                         rollout_future_boxes=self.config.rollout_future_boxes,
+                         rollout_future_samples=self.config.rollout_future_samples,
+                         rollout_prior=self.config.rollout_prior)
 
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
@@ -983,6 +1027,69 @@ class SchedulerV1:
             ramps[plan.ramp_id].pop(plan.buffer_index)
         return placed_volume(pallets), consumed, completed or not any(ramps.values())
 
+    def _stochastic_rollout_value(self, leaf, sim_state, quota, deadline, seed):
+        """Complete visible greedy once, then average independent continuations.
+
+        Each scan costs one node, including failed synthetic arrivals. Samples
+        get equal integer quotas; unplaceable arrivals are skipped in order.
+        No new pallets are opened in this value estimate.
+        """
+        pallets = copy.deepcopy(leaf.pallets)
+        ramps = {rid: list(r.queue) for rid, r in leaf.ramps.items()}
+        greedy = SchedulerV1(replace(self.config, heartbeat_sec=0))
+        consumed = 0
+
+        def scan(current_pallets, current_ramps, lookahead):
+            nonlocal consumed
+            if consumed >= quota or (deadline is not None and time.perf_counter() >= deadline):
+                return None, False
+            consumed += 1
+            state = SchedulerSimState(now=sim_state.now, ramps=current_ramps,
+                                      pallets=current_pallets,
+                                      pallet_blocked=set(sim_state.pallet_blocked))
+            plan = greedy._choose_action_greedy(state, deadline=deadline, lookahead_k=lookahead)
+            if deadline is not None and time.perf_counter() >= deadline:
+                return None, False
+            if plan is not None:
+                current_pallets[plan.pallet_id].commit_place(plan.preview)
+                current_ramps[plan.ramp_id].pop(plan.buffer_index)
+            return plan, True
+
+        while any(ramps.values()):
+            plan, scanned = scan(pallets, ramps, self.config.micro_plan_window_total or 15)
+            if not scanned:
+                return placed_volume(pallets), consumed, False, 0, 0
+            if plan is None:
+                break
+
+        # Known operational simplification: equal prior on active destinations;
+        # the canonical experiment forces a single destination. Never infer it
+        # from upstream. Blocked visible boxes need not prevent later arrivals.
+        destinations = tuple(pid for pid in pallets if pid not in sim_state.pallet_blocked)
+        if not destinations:
+            return placed_volume(pallets), consumed, True, 0, self.config.rollout_future_samples
+        future_quota = min(self.config.rollout_future_boxes,
+                           (quota-consumed) // self.config.rollout_future_samples)
+        total_volume = 0.0
+        future_nodes = 0
+        samples_completed = 0
+        for sample in range(self.config.rollout_future_samples):
+            continuation = copy.deepcopy(pallets)
+            arrivals = sample_catalog(seed, sample, self.config.rollout_future_boxes, destinations,
+                                      prior=self.config.rollout_prior)
+            attempts = 0
+            for box in arrivals[:future_quota]:
+                _, scanned = scan(continuation, {0: [box]}, 1)
+                if not scanned:
+                    break
+                attempts += 1
+                future_nodes += 1
+            samples_completed += int(attempts == self.config.rollout_future_boxes)
+            total_volume += placed_volume(continuation)
+        return (total_volume / self.config.rollout_future_samples, consumed,
+                samples_completed == self.config.rollout_future_samples,
+                future_nodes, samples_completed)
+
     def _beam_rank_key(self, node: _BeamNode) -> tuple[Any, ...]:
         if self.config.micro_plan_value != "score":
             return (float(node.state_value), int(node.placed_count), float(node.score_sum))
@@ -1019,7 +1126,7 @@ class SchedulerV1:
                     )
                     continue
                 queue_items = list(snapshot.queue)
-                upstream_items = list(snapshot.upstream)
+                upstream_items = [] if self.config.rollout_future_boxes else list(snapshot.upstream)
                 cap = int(snapshot.capacity) if int(snapshot.capacity) > 0 else len(queue_items)
                 result[int(rid)] = _BeamRampState(
                     queue=queue_items,
