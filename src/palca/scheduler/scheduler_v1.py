@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field, replace
 import inspect
+from itertools import islice
 import logging
 import time
 from typing import Any, Mapping, Sequence
@@ -22,7 +23,7 @@ from ..scoring.height_slack import (
     choose_with_height_slack,
     rank_for_expansion_with_height_slack,
 )
-from .columns import column_rectangles, dominant_width
+from .columns import adaptive_partition, column_rectangles, dominant_width
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
 
@@ -53,6 +54,7 @@ class SchedulerConfig:
     dead_headroom_min_mm: int = 250
     column_template: str = "off"
     column_min_fill: float = 0.85
+    column_slack_mm: int = 10
     column_fallback: str = "free"
     tower_z_band_mm: int = 0
     tower_z_penalty_weight: float = 0.0
@@ -108,10 +110,12 @@ class SchedulerConfig:
             raise ValueError("Future rollouts require rollout value and a positive node budget")
         if self.micro_plan_enabled and self.micro_plan_node_budget > 0 and self.max_seconds_per_item > 0:
             raise ValueError("Deterministic microplan requires max_seconds_per_item=0")
-        if self.column_template not in ("off", "w445", "w450", "w455", "auto"):
+        if self.column_template not in ("off", "w445", "w450", "w455", "auto", "adaptive"):
             raise ValueError("Invalid column_template")
         if not 0 < self.column_min_fill <= 1 or self.column_fallback not in ("free", "none"):
             raise ValueError("Invalid column_min_fill or column_fallback")
+        if type(self.column_slack_mm) is not int or self.column_slack_mm < 0:
+            raise ValueError("column_slack_mm must be a nonnegative int")
         if self.access_debt_mode not in ("penalty", "filter"):
             raise ValueError("access_debt_mode must be penalty or filter")
         if not 0 <= self.access_debt_weight < float("inf") or self.access_debt_band_mm < 0:
@@ -348,6 +352,7 @@ class SchedulerV1:
         self.column_free_selected = 0
         self.column_stand_selected = 0
         self.column_open_widths: list[int] = []
+        self.column_open_partitions: list[dict] = []
         self.batchfill_calls = 0
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
@@ -363,10 +368,14 @@ class SchedulerV1:
         return result
 
     def collect_column_metrics(self):
-        return dict(template=self.config.column_template, min_fill=self.config.column_min_fill,
+        metrics = dict(template=self.config.column_template, min_fill=self.config.column_min_fill,
                     fallback=self.config.column_fallback, selected=self.column_selected,
                     free_selected=self.column_free_selected, stand_selected=self.column_stand_selected,
                     open_widths_mm=list(self.column_open_widths))
+        if self.config.column_template == "adaptive":
+            metrics.update(slack_mm=self.config.column_slack_mm,
+                           open_partitions=list(self.column_open_partitions))
+        return metrics
 
     def _choose_action_timing(self, sim_state: SchedulerSimState) -> PickPlan | None:
         if not (self.config.micro_plan_enabled and self.config.micro_plan_node_budget > 0):
@@ -482,6 +491,16 @@ class SchedulerV1:
 
     def _prepare_columns(self, state):
         for pid, pallet in state.pallets.items():
+            if self.config.column_template == "adaptive":
+                if not hasattr(pallet, "_column_rectangles"):
+                    visible = (b for ramp in state.ramps.values()
+                               for b in islice(ramp, self.config.lookahead_k))
+                    started = time.perf_counter()
+                    partition = adaptive_partition(pallet, visible, self.config.column_slack_mm)
+                    pallet._column_rectangles = partition["rectangles"]
+                    self.column_open_partitions.append(dict(
+                        partition, destination=pid, selection_ms=(time.perf_counter() - started) * 1000))
+                continue
             if not hasattr(pallet, "_column_width_mm"):
                 visible = [b for ramp in state.ramps.values()
                            for b in list(ramp)[:self.config.lookahead_k] if b.destination == pid]
@@ -513,7 +532,8 @@ class SchedulerV1:
             if pid in state.pallet_blocked or pid not in pallets:
                 continue
             pallet = pallets[pid]
-            columns = column_rectangles(pallet.spec, pallet._column_width_mm)
+            columns = (pallet._column_rectangles if self.config.column_template == "adaptive" else
+                       column_rectangles(pallet.spec, pallet._column_width_mm))
             for preview in pallet.preview_column_candidates(box, columns, self.config.column_min_fill):
                 terms = self._score_candidate(
                     now=state.now, box=box, idx=action.buffer_index, preview=preview,
@@ -823,13 +843,14 @@ class SchedulerV1:
             placed_count=0,
             first_plan=None,
         )
-        if self.config.micro_plan_value != "score":
+        if self.config.micro_plan_value != "score" or self.config.column_template == "adaptive":
             # Freeze precisely the initial action window. In particular, never
             # refill simulated queues from the unknown upstream stream.
             allocation = self._allocate_micro_window({rid: len(r.queue) for rid, r in root.ramps.items()})
             root.ramps = {rid: _BeamRampState(list(r.queue[:allocation[rid]]), [], r.capacity)
                           for rid, r in root.ramps.items()}
-            self._set_state_value(root)
+            if self.config.micro_plan_value != "score":
+                self._set_state_value(root)
         visible_count = sum(len(r.queue) for r in root.ramps.values())
         rollout_reserve = (min(beam_width, self.config.micro_plan_rollout_leaves) * visible_count
                            if self.config.micro_plan_value == "rollout" else 0)
@@ -1307,7 +1328,8 @@ class SchedulerV1:
                     )
                     continue
                 queue_items = list(snapshot.queue)
-                upstream_items = [] if self.config.rollout_future_boxes else list(snapshot.upstream)
+                upstream_items = ([] if self.config.rollout_future_boxes or self.config.column_template == "adaptive"
+                                  else list(snapshot.upstream))
                 cap = int(snapshot.capacity) if int(snapshot.capacity) > 0 else len(queue_items)
                 result[int(rid)] = _BeamRampState(
                     queue=queue_items,

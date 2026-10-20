@@ -124,8 +124,11 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 3. (hecho) Ciclo lateral n.º 3 (D-030): el hueco trasero es estructural (también en el techo offline).
 4. (hecho) R12 (RESEARCH, tras §1quinquies): la diferencia online − offline son pozos a media altura (3,9 % vs 0,4 %).
 5. (hecho) H4 integrada (rama `feat/h4-sobre-h6`, wt2, TOPE) y evaluada (D-031): palanca "por catálogo", +0,81 pp en 30 seeds.
-6. Pendiente del usuario: ¿el sistema real conoce el catálogo de cajas (se puede fijar el ancho de columna con él)?
-7. Siguiente técnica: R13 (función de valor aprendida para planificar más allá de la ventana; Codex) o documentar límite práctico.
+6. (hecho) Usuario (D-032): no hay catálogo previo, solo las 15 cajas de la cinta → H4 queda como palanca informativa.
+7. (en curso) Codex `21_h10` (spec autopilot_logs/21_spec.md) en wt2, rama `feat/h10-columnas-adaptativas` (TOPE, desde
+   feat/h4-sobre-h6; D-032 en DECISIONS sin commitear): H10 plantilla de columnas adaptativa con solo las 15 visibles. Después:
+   revisar, equivalencia, test de fuga, commit, ajuste determinista → referencia + réplica preregistradas.
+8. Si H10 no aporta: R13 (función de valor aprendida) o documentar el límite práctico de la célula.
 
 ## Siguiente acción (anterior, 2026-10-17)
 1. (hecho 00:05–00:40) H4 → descartada, PR borrador #147.
