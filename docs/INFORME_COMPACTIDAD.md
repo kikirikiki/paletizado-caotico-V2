@@ -69,6 +69,7 @@ miden sin cortes de reloj (D-028). Tiempo por decisión de la mejor configuraci�
 ## 6. Palancas operativas y de hardware (sobre la mejor configuración salvo indicación)
 | Palanca | KPI | Δ | Implicación |
 |---|---|---|---|
+| Columnas online con ancho fijado por catálogo (H4, 455 mm) | 77,30 % (30 seeds) | +0,81 (réplica +1,38 [0,48; 2,29]) | solo software, pero exige configurar el ancho con la familia dominante del catálogo; sin ese dato empeora (−2,6) |
 | Garra de canto | 77,76 % | +0,70 | cambio de garra; ~1,6 s/decisión; no justifica la inversión |
 | Buffer ×2 / ×5 | +0,87 / +0,53 n.s. | — | no compensa más rampa |
 | Secuenciación aguas arriba | −0,81 n.s. | — | no compensa pedirla al almacén |

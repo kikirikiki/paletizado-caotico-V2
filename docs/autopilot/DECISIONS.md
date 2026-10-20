@@ -360,3 +360,20 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Opción: R12 primero (sin Codex), y según lo que muestre, R13 con Codex como técnica de mayor coste. Si R12 indica que los pozos
   adicionales no se pueden prever con 15 cajas, se documenta como límite práctico de la célula.
 - Condición de parada §9.2: no aplicable (T3 no refutado formalmente con cotas).
+- **R12 hecho (RESEARCH):** la diferencia online − offline son pozos a media altura (fondo a 1–800 mm: 3,9 % vs 0,4 %) → H4.
+
+## D-031 · H4 (columnas online, ancho 455, f85) sobre h6_sin_gate: candidata preregistrada (2026-10-20, ANTES de evaluar)
+- Integración: rama `feat/h4-sobre-h6` (merge 01faacb, conflictos resueltos por Codex, spec 20); con defaults, dumps idénticos (2/2) y
+  KPI idéntico en las 10 seeds de ajuste. 0,691 s/decisión con H4 activa.
+- Ajuste determinista (h4_h6_tune, seeds 1001–1010): w455 f85 +1,07 [−0,50; 2,65]; w450 f85 +0,59; w450 f75 −0,19; w445 f85 −1,51;
+  ancho automático −2,61 [−4,27; −0,95] (significativo).
+- Opción: candidata = `h4_h6_w455_f85`; misma regla que D-029 (referencia 10 seeds + réplica 20 seeds D-016, determinista; se adopta
+  si la pareada en la réplica es significativa). **Advertencia de fuga de conocimiento (como D-017):** el ancho de columna fijo (455)
+  está ajustado a la familia dominante de este flujo, y la variante sin ese conocimiento (auto) es significativamente peor; si se adopta,
+  se reporta aparte como dependiente de conocer el catálogo de cajas, no como técnica general.
+- **Resultado (2026-10-20, 0 cortes):** referencia 76,73 % vs 77,06 % (−0,33 [−0,98; 0,31] n.s.); **réplica 77,59 % vs 76,21 %
+  (+1,38 [0,48; 2,29], significativa)**; 30 seeds juntas: 77,30 % vs 76,49 % (+0,81). Tiempo: más rápida que la oficial.
+  → Cumple el criterio preregistrado, pero el ancho fijo de 455 mm depende de conocer la familia dominante de este flujo (la variante
+  sin ese conocimiento es −2,61 significativa). Siguiendo D-017: **no cuenta como técnica general; se reporta como PALANCA "configuración
+  por catálogo" (+0,81 pp en 30 seeds) y la oficial sigue siendo h6_sin_gate (77,06 %)**. [REVISAR — usuario] Si en producción el
+  sistema conoce el catálogo de cajas y es legítimo configurar el ancho de columna con él, H4 w455 pasaría a oficial.
