@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -624,6 +624,21 @@ class PalletModel:
             debug=debug,
         )
 
+    def preview_column_candidates(
+        self, box: Box, columns: Sequence[tuple[int, int, int, int]], min_fill: float,
+    ) -> list[PlacementPreview]:
+        """Enumerate anchored columns through the production heightfield controls."""
+        if self.stacking_mode != STACKING_MODE_HEIGHTFIELD:
+            raise ValueError("Columns require stacking_mode=heightfield")
+        if min(box.length_mm, box.width_mm, box.height_mm) <= 0:
+            return []
+        if not self.controls.manifest.is_eligible(box, self):
+            return []
+        result: list[PlacementPreview] = []
+        for column in columns:
+            self._preview_place_heightfield(box, column=column, column_min_fill=min_fill, collected=result)
+        return result
+
     def preview_place_in_region(
         self,
         box: Box,
@@ -1192,6 +1207,9 @@ class PalletModel:
         budget: _PreviewBudget | None = None,
         free_sides_tiebreak: bool = False,
         free_sides_tolerance: float = 0.0,
+        column: tuple[int, int, int, int] | None = None,
+        column_min_fill: float = 0.85,
+        collected: list[PlacementPreview] | None = None,
     ) -> PlacementPreview:
         length_mm = int(box.length_mm)
         width_mm = int(box.width_mm)
@@ -1211,7 +1229,10 @@ class PalletModel:
         cache = None
         # Frozen placements/rects make the snapshot key exact. Fall back for
         # custom mutable geometry and custom projection implementations.
-        if (type(self) is PalletModel and type(projection_bin) is MaxRects2D
+        # Column roofs differ from footprint heights and invalidate the robot
+        # cache assumption (height follows the footprint). Keep free previews
+        # cached, including H4 fallback; column calls never read/write it.
+        if (column is None and type(self) is PalletModel and type(projection_bin) is MaxRects2D
                 and all(type(p) is Placement for p in self.placements)
                 and all(type(r) is Rect for r in projection_bin.free_rects)
                 and all(type(c) in (RobotAccessibilityControl, StabilityPlacementControl,
@@ -1315,13 +1336,19 @@ class PalletModel:
             h_mm = int(orientation.height_mm)
             if not self._fits_in_bin(l_mm, w_mm, bin_l, bin_w):
                 continue
-            xy_candidates = cache.xy.get((l_mm, w_mm)) if cache is not None else None
-            if xy_candidates is None:
-                xy_candidates = tuple(self._heightfield_xy_candidates(l_mm, w_mm, cap=120))
-                if cache is not None:
-                    cache.xy[l_mm, w_mm] = xy_candidates
-            if cache is not None and budget is None:
-                cache.fill_heights(xy_candidates, l_mm, w_mm, offset, self.placements)
+            if column is None:
+                xy_candidates = cache.xy.get((l_mm, w_mm)) if cache is not None else None
+                if xy_candidates is None:
+                    xy_candidates = tuple(self._heightfield_xy_candidates(l_mm, w_mm, cap=120))
+                    if cache is not None:
+                        cache.xy[l_mm, w_mm] = xy_candidates
+                if cache is not None and budget is None:
+                    cache.fill_heights(xy_candidates, l_mm, w_mm, offset, self.placements)
+            else:
+                cx, cy, cl, cw = column
+                if l_mm > cl or w_mm > cw or l_mm * w_mm < column_min_fill * cl * cw:
+                    continue
+                xy_candidates = [(cx - offset, cy - offset)]
             for cand_x, cand_y in xy_candidates:
                 if budget is not None and budget.should_stop():
                     stop_search = True
@@ -1337,6 +1364,8 @@ class PalletModel:
                     z_mm = self._height_under_footprint_mm(x_mm, y_mm, l_mm, w_mm)
                     if cache is not None:
                         cache.heights[footprint] = z_mm
+                if column is not None:
+                    z_mm = self._height_under_footprint_mm(*column)
                 top_z = int(z_mm) + int(h_mm)
                 if top_z > max_height:
                     rejected_by_height += 1
@@ -1492,6 +1521,12 @@ class PalletModel:
                 if not feasible:
                     continue
 
+                if column is not None:
+                    # Keep the exact column corner and roof after production settling.
+                    if (adjusted.x_mm, adjusted.y_mm, adjusted.z_mm) != (column[0], column[1], z_mm):
+                        continue
+                    debug.update(column=column, column_fill=l_mm * w_mm / (column[2] * column[3]),
+                                 column_roof_mm=adjusted.z_mm + adjusted.height_mm)
                 height_after = max(
                     int(self.current_height_mm()),
                     int(adjusted.z_mm) + int(adjusted.height_mm),
@@ -1516,6 +1551,12 @@ class PalletModel:
                 )
             if stop_search:
                 break
+
+        if collected is not None:
+            collected.extend(PlacementPreview(
+                True, c.placement, c.packing_gain, c.fragmentation,
+                height_after_mm=c.height_after_mm, score_adjustment=c.score_delta, debug=dict(c.debug),
+            ) for c in candidates)
 
         z_band_min_z: int | None = None
         z_band_candidates_before = 0

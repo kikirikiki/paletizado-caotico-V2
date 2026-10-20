@@ -285,3 +285,36 @@ def test_free_sides_telemetry_summary_counts_and_seed_means(tmp_path):
     assert observed['proportions']['4'] == 1
     assert observed['per_seed_proportions']['4']['n'] == 3
     assert '| base | 6 | 100.000 |' in (tmp_path/'summary.md').read_text()
+
+
+def test_summary_reports_d015_means_and_additional_reference_pairs(tmp_path):
+    synthetic_sweep(tmp_path)
+    manifest=json.loads((tmp_path/'manifest.json').read_text())
+    for config in manifest['configs']:
+        config['overrides']={} if config['name']=='base' else {'micro_plan':True}
+        for seed in manifest['seeds']:
+            path=tmp_path/config['name']/str(seed)/'kpi.json'
+            row=json.loads(path.read_text())
+            row.update({f'acc_violations_gap{g}': seed*g for g in (5,20,50)})
+            sweep.write_json(path,row)
+    sweep.write_json(tmp_path/'manifest.json',manifest)
+    summary=sweep.generate_summary(tmp_path)
+    assert summary['configs']['better']['acc_violations_gap50']['mean']==100
+    assert summary['comparisons_by_reference']['better']['base']['result']['mean_diff_pp']==pytest.approx(-5)
+    assert 'Robustez D-015' in (tmp_path/'summary.md').read_text()
+
+
+def test_h4_h6_tune_preserves_official_overrides_and_d028():
+    configs = sweep.load_configs(Path('configs/sweeps/h4_h6_tune.yaml'))
+    reference = next(c for c in sweep.load_configs(Path('configs/sweeps/h6_sin_gate.yaml'))
+                     if c['name'] == 'h6_sin_gate')
+    expected = dict(reference['overrides'], micro_plan_hard_cap_ms=600000)
+    assert configs[0] == dict(reference, overrides=expected)
+    assert 4 <= len(configs[1:]) <= 6
+    assert all(c['role'] == 'official' for c in configs)
+    for config in configs[1:]:
+        overrides = config['overrides']
+        assert {k: v for k, v in overrides.items() if not k.startswith('column_')} == expected
+        assert overrides['column_fallback'] == 'free'
+    assert any(c['overrides'].get('column_template') == 'w450'
+               and c['overrides']['column_min_fill'] == .85 for c in configs[1:])

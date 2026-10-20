@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the unchanged official H6 config in series, optionally with cProfile.
+"""Measure H6 or an explicit sweep variant in series, optionally with cProfile.
 
 Outputs stay under out/. Compare complete placement dumps (only git provenance
 is normalized) and every deterministic run_sweep KPI field against a reference.
@@ -31,9 +31,9 @@ OBSERVATIONAL_FIELDS = frozenset({
 })
 
 
-def official_config():
-    return next(c for c in load_configs(ROOT / 'configs/sweeps/h6_sin_gate.yaml')
-                if c['name'] == 'h6_sin_gate')
+def official_config(path=None, name='h6_sin_gate'):
+    configs = load_configs(path or ROOT / 'configs/sweeps/h6_sin_gate.yaml')
+    return next(c for c in configs if c['name'] == name)
 
 
 def deterministic_kpi(result):
@@ -56,7 +56,8 @@ def assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi):
         for key, default in (("free_sides_tiebreak", False), ("free_sides_tolerance", 0.0),
                              ("accessibility_tall_box_exemption", False), ("accessibility_top_clearance_mm", 0),
                              ("access_debt_exempt_delta_mm", 750), ("dead_headroom_weight", 0.0),
-                             ("dead_headroom_min_mm", 250)):
+                             ("dead_headroom_min_mm", 250), ("column_template", "off"),
+                             ("column_min_fill", 0.85), ("column_fallback", "free")):
             if key not in expected.get("params", {}) and key in actual.get("params", {}):
                 assert actual["params"][key] == default
                 del actual["params"][key]
@@ -69,6 +70,10 @@ def assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi):
         assert actual_kpi.pop("dead_headroom") == dict(
             enabled=False, weight=0.0, min_mm=250, selected_count=0,
             selected_dead_volume_mm3_mean=0.0, selected_penalty_mean=0.0)
+    if "columns" not in expected_kpi and "columns" in actual_kpi:
+        assert actual_kpi.pop("columns") == dict(
+            template="off", min_fill=0.85, fallback="free", selected=0,
+            free_selected=0, stand_selected=0, open_widths_mm=[])
     # HEAD changes when a patch is committed; never discard any placement field.
     assert dict(actual_dump, git_head=expected_dump['git_head']) == expected_dump
     assert json.loads(json.dumps(deterministic_kpi(actual_kpi))) == json.loads(
@@ -93,6 +98,9 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--seed-list', default='1001,1002')
     parser.add_argument('--profile-seed', type=int)
+    parser.add_argument('--configs', type=Path, default=ROOT / 'configs/sweeps/h6_sin_gate.yaml')
+    parser.add_argument('--config', default='h6_sin_gate')
+    parser.add_argument('--lock-retry-seconds', type=float, default=10)
     parser.add_argument('--reference', type=Path, help='run_sweep directory with h6_sin_gate/<seed>')
     parser.add_argument('--compare-only', action='store_true', help='Compare existing --out and --reference')
     args = parser.parse_args()
@@ -113,7 +121,7 @@ def main():
         write_json(args.out / 'equivalence.json', comparisons)
         print(json.dumps(comparisons, indent=2))
         return
-    config = official_config()
+    config = official_config(args.configs, args.config)
     seeds = [int(s) for s in args.seed_list.split(',')]
     for key in THREAD_ENV:
         os.environ[key] = '1'
@@ -123,7 +131,7 @@ def main():
     import yaml
     (args.out / 'official.yaml').write_text(yaml.safe_dump([config], sort_keys=False))
     results = []
-    with sweep_lock():
+    with sweep_lock(retry_seconds=args.lock_retry_seconds):
         code_hash = source_hash()
         for seed in seeds:
             task = make_task(config, seed, args.out, head, code_hash)

@@ -1,0 +1,54 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+- name: h1_h3
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 100
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+- name: h1_h3_h4
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 100
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    column_template: w450
+    column_min_fill: 0.85
+    column_fallback: free
+- name: PALANCA_h4_gate2400
+  preset: arm6_4orient
+  role: bound
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 100
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    column_template: w450
+    column_min_fill: 0.85
+    column_fallback: free
+    stand_hw_height_margin_gate_mm: 2400
