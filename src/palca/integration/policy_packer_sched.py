@@ -177,6 +177,9 @@ class PolicyPackerScheduler:
         dominant_free_rect_ratio_gate: float = 0.35,
         score_mode: str = "gain_frag",
         height_slack_mm: int = 0,
+        access_debt_weight: float = 0.0,
+        access_debt_band_mm: int = 300,
+        access_debt_mode: str = "penalty",
         tower_z_band_mm: int = 0,
         tower_z_penalty_weight: float = 0.0,
         spatial_xy_bin_mm: int = 150,
@@ -221,6 +224,9 @@ class PolicyPackerScheduler:
             priority_weight=priority_weight,
             score_mode=score_mode,
             height_slack_mm=height_slack_mm,
+            access_debt_weight=access_debt_weight,
+            access_debt_band_mm=access_debt_band_mm,
+            access_debt_mode=access_debt_mode,
             tower_z_band_mm=tower_z_band_mm,
             tower_z_penalty_weight=tower_z_penalty_weight,
             spatial_xy_bin_mm=spatial_xy_bin_mm,
@@ -807,6 +813,7 @@ class PolicyPackerScheduler:
             getattr(self._scheduler, "hard_floor_phase_stand_mix_chosen_total", 0) or 0
         )
 
+        kpis["access_debt"] = self._scheduler.collect_access_debt_metrics()
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
         kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)

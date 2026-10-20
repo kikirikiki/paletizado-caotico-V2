@@ -1,0 +1,57 @@
+# Re-ajuste de mandos existentes con H1 activo (seeds de ajuste). Ejecutado por el director (D-011).
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_ref
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty}
+- name: h1_hs0
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, height_slack_mm: 0}
+- name: h1_hs60
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, height_slack_mm: 60}
+- name: h1_hs200
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, height_slack_mm: 200}
+- name: h1_hs300
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, height_slack_mm: 300}
+- name: h1_hs500
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, height_slack_mm: 500}
+- name: h1_sm_minheight
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, score_mode: min_height_then_gain}
+- name: h1_sm_gainfrag
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, score_mode: gain_frag}
+- name: h1_heur_baf
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, heuristic: baf}
+- name: h1_heur_blsf
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, heuristic: blsf}
+- name: h1_tz_w0.5_b400
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, tower_z_penalty_weight: 0.5, tower_z_band_mm: 400}
+- name: h1_tz_w2_b400
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, tower_z_penalty_weight: 2.0, tower_z_band_mm: 400}
+- name: h1_tz_w2_b200
+  preset: arm6_4orient
+  role: control
+  overrides: {access_debt_weight: 0.25, access_debt_band_mm: 600, access_debt_mode: penalty, tower_z_penalty_weight: 2.0, tower_z_band_mm: 200}

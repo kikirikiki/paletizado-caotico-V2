@@ -113,3 +113,16 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   esta workstation. Las cotas offline no tienen límite (no son políticas desplegables).
 - Justificación: deja ≥ 4× de margen frente al ciclo de robot de 14 s aunque la planificación no se solape con el
   movimiento; respeta el orden de magnitud del presupuesto ya validado (900 ms).
+
+## D-012 · `micro_plan` es una palanca, no una técnica para T1; H3 = búsqueda determinista (2026-10-16)
+- Contexto: el prompt fija `micro_plan=False` como restricción (§2) y prohíbe relajarla sin reportarla aparte (§7). No hay
+  ningún motivo documentado en el repo (CONTEXT.md solo dice "único valor válido en producción"; ni PRs ni commits lo explican).
+  Medido sobre H1 (director, D-011): seeds de referencia **70,90 % ± 1,64, +9,01 pp [7,77; 10,25] vs baseline** (+6,2 pp vs H1),
+  0 violaciones, 722 ms/decisión de media (p95 911). **No es determinista**: repitiendo el mismo sweep, 8/10 seeds cambian de
+  KPI (p. ej. seed 1: 72,25 % → 66,85 %), porque la búsqueda se corta por tiempo de pared (900 ms) y depende de la carga de CPU.
+- Opción: (1) `micro_plan=True` se reporta SOLO como palanca (no cuenta para T1); (2) se desarrolla H3 = búsqueda sobre el
+  buffer con presupuesto determinista (nodos/expansiones, no tiempo), reproducible bit a bit y con tiempo real acotado; H3 se
+  reporta aparte de las técnicas "sin búsqueda" hasta que el responsable confirme que una búsqueda determinista es válida.
+- Justificación: respeta la letra de §2/§7 y a la vez explora la línea con más ganancia medida.
+- **[REVISAR]** ¿Por qué `micro_plan=True` es inválido en producción? Si el motivo era el no determinismo o el tiempo, H3 lo
+  resuelve y su ganancia contaría para T1; si es otro (p. ej. un problema físico del plan), hay que saberlo.

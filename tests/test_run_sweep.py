@@ -138,7 +138,7 @@ def test_summary_synthetic_kpi_and_paired_ci(tmp_path):
     assert "2026-10-16" in (tmp_path / "summary.md").read_text()
     assert json.loads((tmp_path / "summary.json").read_text())["git_head"] == "abc"
     before = (tmp_path / "base/1/kpi.json").stat().st_mtime_ns
-    subprocess.run([sys.executable, "scripts/summarize_sweep.py", str(tmp_path)], cwd=ROOT, check=True)
+    subprocess.run([sys.executable, "scripts/summarize_sweep.py", str(tmp_path), "--lock-retry-seconds", "60"], cwd=ROOT, check=True)
     assert (tmp_path / "base/1/kpi.json").stat().st_mtime_ns == before
 
 
@@ -188,7 +188,7 @@ def test_integration_smoke_two_seeds_two_workers(tmp_path):
     path = config_file(tmp_path, "{excel_path: data/Flujo_smoke_60.xlsx, time_budget_ms: 30}")
     config = sweep.load_configs(path)[0]
     tasks = [sweep.make_task(config, s, tmp_path / "out", "test-head", "test-source") for s in REFERENCE_SEEDS[:2]]
-    with sweep.sweep_lock():
+    with sweep.sweep_lock(retry_seconds=60):
         assert sweep.execute_tasks(tasks, 2) == {"executed": 2, "skipped": 0}
         mtimes = []
         for task in tasks:
@@ -209,3 +209,22 @@ def test_integration_smoke_two_seeds_two_workers(tmp_path):
         assert len({json.loads((Path(t["directory"]) / "kpi.json").read_text())["worker_pid"] for t in tasks}) == 2
         assert sweep.execute_tasks(tasks, 2) == {"executed": 0, "skipped": 2}
         assert mtimes == [(Path(t["directory"]) / "kpi.json").stat().st_mtime_ns for t in tasks]
+
+
+def test_lock_retry_preserves_inode_and_waits(tmp_path, monkeypatch):
+    lock = tmp_path / 'retry.lock'
+    calls = []
+    original_flock = sweep.fcntl.flock
+
+    def occupied_once(handle, operation):
+        if operation != sweep.fcntl.LOCK_UN and not calls:
+            calls.append('occupied')
+            raise BlockingIOError()
+        return original_flock(handle, operation)
+
+    monkeypatch.setattr(sweep.fcntl, 'flock', occupied_once)
+    monkeypatch.setattr(sweep, 'sleep', lambda seconds: calls.append(seconds))
+    with sweep.sweep_lock(lock, retry_seconds=60):
+        inode = lock.stat().st_ino
+    assert calls == ['occupied', 60]
+    assert lock.stat().st_ino == inode

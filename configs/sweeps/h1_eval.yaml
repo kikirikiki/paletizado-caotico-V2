@@ -1,0 +1,18 @@
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_w0.25_b445
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_weight: 0.25
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
+- name: gantry_4orient_h1
+  preset: gantry_4orient
+  role: contrast
+  overrides:
+    access_debt_weight: 0.25
+    access_debt_band_mm: 445
+    access_debt_mode: penalty
