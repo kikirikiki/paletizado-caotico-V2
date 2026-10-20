@@ -41,3 +41,19 @@ def test_equivalence_checks_every_nested_field():
     actual_kpi['pallet_utils'][0] += 1e-12
     with pytest.raises(AssertionError):
         assert_equivalent(expected_dump, actual_kpi, expected_dump, expected_kpi)
+
+
+def test_legacy_equivalence_accepts_only_disabled_column_defaults():
+    expected_dump = json.loads((FIXTURES / '42_dump.json').read_text())
+    expected_kpi = json.loads((FIXTURES / '42_kpi.json').read_text())
+    actual_dump, actual_kpi = copy.deepcopy(expected_dump), copy.deepcopy(expected_kpi)
+    actual_dump['params'].update(column_template='off', column_min_fill=.85, column_fallback='free')
+    actual_kpi['columns'] = dict(template='off', min_fill=.85, fallback='free', selected=0,
+                                 free_selected=0, stand_selected=0, open_widths_mm=[])
+    assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi)
+    actual_kpi['columns']['selected'] = 1
+    with pytest.raises(AssertionError):
+        assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi)
+    actual_dump['params']['column_template'] = 'w450'
+    with pytest.raises(AssertionError):
+        assert_equivalent(actual_dump, expected_kpi, expected_dump, expected_kpi)

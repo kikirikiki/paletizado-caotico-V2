@@ -112,6 +112,17 @@ Más presupuesto de búsqueda no la resuelve (h6_tune_budget: paisaje ruidoso 69
   fuerte o una guarda específica de huecos de suelo) o **elegir la disposición de la primera capa** para que la franja trasera sea
   rellenable con la familia dominante de pie.
 
+### R12 — Pozos online vs offline (D-030; h6_sin_gate_ref vs testigo offline_witness_r7)
+| Fondo del pozo | Online (77,06 %) | Offline (81,45 %) |
+|---|---|---|
+| En el suelo | 7,8 % | 9,3 % |
+| **1–800 mm (sobre la 1.ª–2.ª capa)** | **3,9 %** | **0,4 %** |
+| > 800 mm | 3,1 % | 1,4 % |
+La diferencia online − offline (~3,7 pp) son **pozos a media altura**: columnas que se quedan en 1–2 capas mientras sus vecinas
+suben > 400 mm. El método offline apila columnas completas y no los crea; además coloca el hueco estructural en una esquina
+(trasera derecha) en vez del centro. → Reabre H4 (columnas online), que con el gate quitado dio +1,56 [0,45; 2,68] sobre H1+H3 y
+nunca se probó sobre la oficial sin gate (spec 20).
+
 ## 2. Literatura relevante (2021–2026)
 - Zhao et al., PCT (ICLR 2022) y *Deliberate Planning of 3D Bin Packing on Packing Configuration Trees*
   (arXiv 2504.04421): hojas por corner points / extreme points / EMS; planificación con lookahead, buffer y offline

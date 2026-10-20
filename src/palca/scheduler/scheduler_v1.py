@@ -22,6 +22,7 @@ from ..scoring.height_slack import (
     choose_with_height_slack,
     rank_for_expansion_with_height_slack,
 )
+from .columns import column_rectangles, dominant_width
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
 
 
@@ -50,6 +51,9 @@ class SchedulerConfig:
     access_debt_exempt_delta_mm: int = 750
     dead_headroom_weight: float = 0.0
     dead_headroom_min_mm: int = 250
+    column_template: str = "off"
+    column_min_fill: float = 0.85
+    column_fallback: str = "free"
     tower_z_band_mm: int = 0
     tower_z_penalty_weight: float = 0.0
     spatial_xy_bin_mm: int = 150
@@ -104,6 +108,10 @@ class SchedulerConfig:
             raise ValueError("Future rollouts require rollout value and a positive node budget")
         if self.micro_plan_enabled and self.micro_plan_node_budget > 0 and self.max_seconds_per_item > 0:
             raise ValueError("Deterministic microplan requires max_seconds_per_item=0")
+        if self.column_template not in ("off", "w445", "w450", "w455", "auto"):
+            raise ValueError("Invalid column_template")
+        if not 0 < self.column_min_fill <= 1 or self.column_fallback not in ("free", "none"):
+            raise ValueError("Invalid column_min_fill or column_fallback")
         if self.access_debt_mode not in ("penalty", "filter"):
             raise ValueError("access_debt_mode must be penalty or filter")
         if not 0 <= self.access_debt_weight < float("inf") or self.access_debt_band_mm < 0:
@@ -196,6 +204,8 @@ class _BeamAction:
     ramp_id: int
     buffer_index: int
     max_priority: float
+    preview: PlacementPreview | None = None
+    terms: _ScoreTerms | None = None
 
 
 @dataclass(frozen=True)
@@ -226,6 +236,8 @@ class _BeamNode:
     ramps: dict[int, _BeamRampState]
     pallets: dict[int | str, PalletModel]
     score_sum: float = 0.0
+    column_roof_sum: int = 0
+    column_fill_sum: float = 0.0
     gain_sum: float = 0.0
     fragmentation_sum: float = 0.0
     score_adjustment_sum: float = 0.0
@@ -332,12 +344,31 @@ class SchedulerV1:
         self._hard_floor_phase_active_counted_this_decision = False
         self._spatial_bin_counts: dict[int | str, dict[tuple[int, int], int]] = {}
         self._spatial_step_index_by_pallet: dict[int | str, int] = {}
+        self.column_selected = 0
+        self.column_free_selected = 0
+        self.column_stand_selected = 0
+        self.column_open_widths: list[int] = []
         self.batchfill_calls = 0
         self.batchfill_applied = 0
         self.batchfill_selected_boxes_sum = 0
         self.batchfill_selected_boxes_count = 0
 
     def choose_action(self, sim_state: SchedulerSimState) -> PickPlan | None:
+        result = self._choose_action_timing(sim_state)
+        if self.config.column_template != "off" and result is not None:
+            is_column = "column" in (result.preview.debug or {})
+            self.column_selected += int(is_column)
+            self.column_free_selected += int(not is_column)
+            self.column_stand_selected += int(is_column and result.preview.placement.orientation_family == "stand_hw")
+        return result
+
+    def collect_column_metrics(self):
+        return dict(template=self.config.column_template, min_fill=self.config.column_min_fill,
+                    fallback=self.config.column_fallback, selected=self.column_selected,
+                    free_selected=self.column_free_selected, stand_selected=self.column_stand_selected,
+                    open_widths_mm=list(self.column_open_widths))
+
+    def _choose_action_timing(self, sim_state: SchedulerSimState) -> PickPlan | None:
         if not (self.config.micro_plan_enabled and self.config.micro_plan_node_budget > 0):
             return self._choose_action_impl(sim_state)
         started = time.perf_counter()
@@ -366,6 +397,8 @@ class SchedulerV1:
         self.last_micro_feasible_first_candidates = 0
         self._hard_floor_phase_active_counted_this_decision = False
         self._rebuild_spatial_state(sim_state.pallets)
+        if self.config.column_template != "off":
+            self._prepare_columns(sim_state)
         k = max(1, int(self.config.lookahead_k))
 
         deadline = hard_deadline
@@ -447,6 +480,51 @@ class SchedulerV1:
             self.micro_plan_time_ms_min = min(float(self.micro_plan_time_ms_min), elapsed)
         self.micro_plan_time_ms_max = max(float(self.micro_plan_time_ms_max), elapsed)
 
+    def _prepare_columns(self, state):
+        for pid, pallet in state.pallets.items():
+            if not hasattr(pallet, "_column_width_mm"):
+                visible = [b for ramp in state.ramps.values()
+                           for b in list(ramp)[:self.config.lookahead_k] if b.destination == pid]
+                width = (dominant_width(visible) if self.config.column_template == "auto"
+                         else int(self.config.column_template[1:]))
+                # State belongs to this physical pallet and follows its beam copies.
+                pallet._column_width_mm = width
+                self.column_open_widths.append(width)
+                column_rectangles(pallet.spec, width)
+
+    @staticmethod
+    def _column_key(candidate):
+        debug = candidate.plan.preview.debug
+        return (-debug["column_roof_mm"], debug["column_fill"], candidate.terms.scalar_score)
+
+    def _column_candidates(self, state, *, beam_node=None):
+        pallets = state.pallets if beam_node is None else beam_node.pallets
+        ramps = (state.ramps if beam_node is None
+                 else {rid: r.queue for rid, r in beam_node.ramps.items()})
+        actions = (self._enumerate_beam_actions(beam_node.ramps) if beam_node is not None else
+                   [_BeamAction(rid, idx, self._max_priority(list(queue)[:self.config.lookahead_k]))
+                    for rid, queue in ramps.items()
+                    for idx in range(min(len(queue), self.config.lookahead_k))])
+        candidates = []
+        access_fields = {}
+        for action in actions:
+            box = ramps[action.ramp_id][action.buffer_index]
+            pid = box.destination
+            if pid in state.pallet_blocked or pid not in pallets:
+                continue
+            pallet = pallets[pid]
+            columns = column_rectangles(pallet.spec, pallet._column_width_mm)
+            for preview in pallet.preview_column_candidates(box, columns, self.config.column_min_fill):
+                terms = self._score_candidate(
+                    now=state.now, box=box, idx=action.buffer_index, preview=preview,
+                    max_priority=action.max_priority, height_after_mm=preview.height_after_mm,
+                    pallet=pallet, access_fields=access_fields,
+                )
+                candidates.append(_ScoredCandidate(PickPlan(
+                    action.ramp_id, action.buffer_index, box.box_id, pid, preview,
+                    terms.scalar_score, terms.dt_extra), box, terms))
+        return candidates
+
     def _choose_action_greedy(
         self,
         sim_state: SchedulerSimState,
@@ -454,6 +532,16 @@ class SchedulerV1:
         deadline: float | None,
         lookahead_k: int,
     ) -> PickPlan | None:
+        if self.config.column_template != "off":
+            candidates = self._column_candidates(sim_state)
+            if candidates:
+                selected = max(candidates, key=self._column_key)
+                self._record_access_debt_choice(selected.terms)
+                self.last_eval_stats = dict(column_candidates=len(candidates), column_fallback=False)
+                return selected.plan
+            if self.config.column_fallback == "none":
+                self.last_blocked_pallets = {pid: "NO_SPACE" for pid in sim_state.pallets}
+                return None
         heartbeat_sec = float(self.config.heartbeat_sec) if self.config.heartbeat_sec else 0.0
         next_heartbeat = time.perf_counter() + heartbeat_sec if heartbeat_sec > 0 else None
 
@@ -779,6 +867,14 @@ class SchedulerV1:
                     break
 
                 actions = self._enumerate_beam_actions(node.ramps)
+                if self.config.column_template != "off":
+                    columns = self._column_candidates(sim_state, beam_node=node)
+                    if columns:
+                        columns.sort(key=self._column_key, reverse=True)
+                        actions = [_BeamAction(c.plan.ramp_id, c.plan.buffer_index,
+                                               0.0, c.plan.preview, c.terms) for c in columns]
+                    elif self.config.column_fallback == "none":
+                        actions = []
                 if not actions:
                     continue
 
@@ -908,7 +1004,9 @@ class SchedulerV1:
                         )
 
                 if expansions:
-                    if (self.config.micro_plan_value == "score"
+                    if any(action.preview is not None for action in actions):
+                        ordered_expansions = sorted(expansions, key=lambda c: self._beam_rank_key(c.node), reverse=True)
+                    elif (self.config.micro_plan_value == "score"
                             and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
                         ordered_expansions = rank_for_expansion_with_height_slack(
                             candidates=expansions,
@@ -1178,6 +1276,8 @@ class SchedulerV1:
         # Con micro_plan_enabled=True, el beam rankea por (placed_count, score_sum)
         # ignorando coherencia. Comportamiento degradado conocido, no un bug.
         # Integración completa en beam search pendiente en issue separado.
+        if self.config.column_template != "off" and node.column_fill_sum > 0:
+            return (node.placed_count, -node.column_roof_sum, node.column_fill_sum, node.score_sum)
         if self.config.score_mode == "min_height_then_gain":
             return (
                 int(node.placed_count),
@@ -1304,12 +1404,12 @@ class SchedulerV1:
         if pallet is None:
             return None
 
-        preview = self._preview_place(pallet, box)
+        preview = action.preview if action.preview is not None else self._preview_place(pallet, box)
         if not preview.feasible:
             return None
 
         height_after_mm = self._resolve_height_after_mm(preview, pallet)
-        terms = self._score_candidate(
+        terms = action.terms or self._score_candidate(
             now=float(sim_state.now),
             box=box,
             idx=idx,
@@ -1347,6 +1447,8 @@ class SchedulerV1:
             ramps=new_ramps,
             pallets=new_pallets,
             score_sum=float(node.score_sum) + float(terms.scalar_score),
+            column_roof_sum=node.column_roof_sum + int((preview.debug or {}).get("column_roof_mm", preview.placement.z_mm + preview.placement.height_mm)),
+            column_fill_sum=node.column_fill_sum + float((preview.debug or {}).get("column_fill", 0)),
             gain_sum=float(node.gain_sum) + float(terms.packing_gain),
             fragmentation_sum=float(node.fragmentation_sum) + float(terms.fragmentation),
             score_adjustment_sum=float(node.score_adjustment_sum) + float(terms.score_adjustment),

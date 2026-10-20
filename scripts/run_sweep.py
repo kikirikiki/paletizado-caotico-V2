@@ -201,6 +201,7 @@ def run_task(task: dict) -> dict:
                               if key.startswith("micro_plan_")},
                   access_debt=payload["metrics"]["pallet_kpis"].get("access_debt", {}),
                   dead_headroom=payload["metrics"]["pallet_kpis"].get("dead_headroom", {}),
+                  columns=payload["metrics"]["pallet_kpis"].get("columns", {}),
                   n_boxes_input=len(originals), n_unplaced=len(originals) - result["boxes_placed"],
                   deadline_cutoffs_count=payload["metrics"]["pallet_kpis"]["deadline_cutoffs_count"],
                   wall_time_s=perf_counter() - started, worker_pid=os.getpid(),
@@ -290,6 +291,22 @@ def generate_summary(folder: Path) -> dict:
             pairs = [(a, b) for a, b in zip(grouped[baseline], rows) if a["kpi"] is not None and b["kpi"] is not None]
             comparison = paired_comparison([a for a, _ in pairs], [b for _, b in pairs]) if pairs else None
             summary["comparisons"][name] = dict(result=comparison, paired_seeds=[a["seed"] for a, _ in pairs])
+    summary["comparisons_by_reference"] = {}
+    for config in manifest["configs"]:
+        reference = config["name"]
+        if reference == baseline or config.get("overrides", {}).get("column_template", "off") != "off":
+            continue
+        if "overrides" not in config:
+            continue
+        summary["comparisons_by_reference"][reference] = {}
+        for name, rows in grouped.items():
+            if name == reference:
+                continue
+            pairs = [(a, b) for a, b in zip(grouped[reference], rows)
+                     if a["kpi"] is not None and b["kpi"] is not None]
+            summary["comparisons_by_reference"][reference][name] = dict(
+                result=paired_comparison([a for a, _ in pairs], [b for _, b in pairs]) if pairs else None,
+                paired_seeds=[a["seed"] for a, _ in pairs])
     write_json(folder / "summary.json", summary)
     (folder / "summary.md").write_text(render_summary(summary), encoding="utf-8")
     return summary
@@ -332,6 +349,18 @@ def render_summary(summary: dict) -> str:
         if distribution:
             lines.append(f"| {name} | {distribution['count']} | " + " | ".join(
                 number(distribution["proportions"][str(n)], 100) for n in (4, 3, 2, 1, 0)) + " |")
+    for reference, comparisons in summary.get("comparisons_by_reference", {}).items():
+        lines += ["", f"Pareadas: config − referencia `{reference}` (pp).", "",
+                  "| Config | n | Diferencia pp | IC95 pp |", "|---|---:|---:|---|"]
+        for name, entry in comparisons.items():
+            r = entry["result"]
+            if r:
+                lines.append(f"| {name} | {r['n']} | {number(r['mean_diff_pp'])} | {interval(r['ci95_pp'])} |")
+    lines += ["", "Robustez D-015: colocaciones infactibles con tolerancia G (media por seed; no cambia el KPI).", "",
+              "| Config | gap5 | gap20 | gap50 |", "|---|---:|---:|---:|"]
+    for name, row in summary["configs"].items():
+        values = [number(row[f"acc_violations_gap{gap}"]["mean"]) for gap in (5, 20, 50)]
+        lines.append(f"| {name} | " + " | ".join(values) + " |")
     lines += ["", "Validación física (sin relajar):"]
     for name, row in summary["configs"].items():
         lines.append(f"- {name}: hard_cap_hits={row.get('hard_cap_hits_total', 0)}; {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")
