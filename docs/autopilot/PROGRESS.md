@@ -120,12 +120,10 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 
 ## Siguiente acción (vigente, 2026-10-20)
 1. (hecho) R7 confirmada (D-026), implementada (Codex 18/19), medida: sin ganancia; techo igual. Reajuste H1 invalidado (D-028).
-2. (en curso) Smoke sin carga + commit de specs 18/19 en `feat/pozos-acceso`, push y PR (base feat/laterales-libres).
-3. Siguiente: `h8_tune` (técnica H8 altura muerta) en seeds de ajuste con `micro_plan_hard_cap_ms: 600000` (D-028); si mejora,
-   referencia + réplica. Repetir el reajuste de H1 con D-028.
-4. Si H8 < 0,5 pp: el contador anti-estancamiento llega a 4 → nueva autopsia de por qué se forman los pozos profundos (¿en qué
-   momento del palet y con qué cajas?) antes de la siguiente técnica.
-5. Actualizar `docs/INFORME_COMPACTIDAD.md` (77,06 %, D-021..D-028).
+2. (hecho) Commit d0ce744, PR #160. H8, H1 fuerte (D-029) y fase de suelo descartadas. INFORME actualizado (77,06 %).
+3. (hecho) Ciclo lateral n.º 3 (D-030): el hueco trasero es estructural (también en el techo offline).
+4. Siguiente: R12, autopsia diferencial online vs offline (qué pozos crea la online que la offline no; sin Codex). Después, según el
+   resultado, R13 (función de valor aprendida, Codex) o documentar el límite práctico de la célula.
 
 ## Siguiente acción (anterior, 2026-10-17)
 1. (hecho 00:05–00:40) H4 → descartada, PR borrador #147.
@@ -156,6 +154,9 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 | PALANCA garra de canto (cara H×L) y CONTRASTE gantry 6 orientaciones reales | canto: 68,67 % sin técnicas (+6,78 vs baseline); **72,54 % con H1+H3+H5 (+0,50 [−0,97; 1,96] n.s.)**; gantry 6 orient.: 76,39 % / **77,74 % con H1+H3+H5** (+5,70 [4,50; 6,91]) | `run_sweep.py --configs configs/sweeps/lever_canto.yaml --name lever_canto --seeds 10 --workers 15 --baseline arm6_4orient_H1H3H5` (wt2). Con la búsqueda, la garra de canto deja de aportar; la cinemática gantry sí (+5,7) |
 | Palancas buffer sobre H1+H3+H5 (k30, k75) | k30 +0,87 [−0,40; 2,13]; k75 +0,53 [−0,27; 1,34], n.s.; N=2 incompatible con micro_plan (open_pallets>1 lo prohíbe) | informativo (sweep levers_h5 en /tmp/wt_ro_h5): con búsqueda, más buffer apenas aporta |
 | Palanca gate stand_hw sobre H1+H3 sin columnas | gate 2400: −0,40 [−2,09; 1,30]; gate 800: +0,27 [−0,90; 1,43], n.s. (sweep lever_gate_h3 en /tmp/wt_ro_h3) | el gate solo importa combinado con columnas (H4) |
+| H9 fase de suelo (`hard_floor_phase_end_step` 8/12/20 × premio de pie 0/0,5; ajuste determinista) | −1,0…−2,5 sin premio; −8,1…−8,4 con premio (h9_floor_tune, wt1) | **descartada**. Contador: 6 → ciclo lateral n.º 3 (D-030) |
+| H8 altura muerta (peso 0,1–1,0, mín 250/350; ajuste determinista) | +0,01…+0,62 n.s. sin tendencia (h8_det_tune, wt1) | **descartada**. Contador anti-estancamiento: 4 |
+| H1 fuerte (ajuste determinista) | w2,0 b900 +1,37 [−0,10; 2,84]; w1,0 b900 +1,05 [−0,43; 2,53] (h8_det_tune) | **no adoptada (D-029):** referencia −0,20 [−1,06; 0,66], réplica +0,53 [−0,41; 1,45] n.s.; w4–8 / b1200 +0,66…+0,95 n.s. Contador: 5 |
 | R7 regla de acceso desde la cara superior (D-026, confirmada por el usuario) | determinista (D-028): tall_c0 −0,29 [−1,05; 0,46] n.s.; c100 +0,31, d400 +0,31, d500 −0,37 n.s.; ~7 colocaciones/seed usan la exención; techo offline igual (81,45 %) | regla vigente, sin ganancia: la oficial no cambia (sweep tall_det_ref, wt1) |
 | R8 reajuste de H1 sobre h6_sin_gate (peso 0,25–2,0 × banda 600/900; seeds de ajuste) | todas n.s.: mejor w2,0 b900 +0,63 [−0,85; 2,10]; w1,0 b900 +0,47; resto −0,35…+0,12 (sweep h1_retune_h6, wt2) | **INVÁLIDO (D-028: 82 cortes de reloj por carga de CPU)**; se repetirá, con R7, con corte de 600 s |
 | Palancas operativas con H1 (k30, k75, N2) | k30 +0,71 n.s.; k75 +2,79 [1,02; 4,57] (4 cortes/seed); N2 −0,93 n.s. | informativo (out/sweeps/lever_h1_operativas, wt2) |

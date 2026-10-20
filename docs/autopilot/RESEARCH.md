@@ -96,6 +96,22 @@ las esquinas. Ahí no caben las cajas planas de la familia dominante (W = 445): 
 cajas de pie, que el gate `stand_hw` solo permite cuando el palet está a ≤ 400 mm del techo. Es la causa dominante restante.
 Más presupuesto de búsqueda no la resuelve (h6_tune_budget: paisaje ruidoso 69,5–75,0 % sin tendencia).
 
+## 1quinquies. Autopsia de pozos con la oficial sin gate (h6_sin_gate_ref, 80 palets cerrados, 2026-10-20, D-025)
+- Pérdida: cajas 77,1 % · huecos internos 2,2 % · libre sobre el perfil 20,7 %. De ese 20,7 %, **14,7 pp son pozos** (altura libre
+  ≥ 750 y una celda > 400 mm más alta a ≤ 300 mm); **12,0 pp tienen más de 1500 mm de profundidad** (ninguna caja, ni de pie, asoma).
+- **7,3 % de la planta interior no tiene ninguna caja encima, a ninguna altura** (el anillo de vuelo de 20 mm sí se usa: solo 0,5 %
+  vacío). Es casi siempre **un único hueco por palet en el borde trasero, centrado en x ≈ 600, y ∈ [425, 820)**, de unos 780 × 380 mm
+  de caja envolvente y ~48 % de relleno (forma irregular). 4,9 pp de suelo son huecos con lado menor de 350–450 mm.
+- **Se crean pronto:** 6,9 de 14,7 pp en el primer quinto de cajas del palet; el creador suele ser una caja plana de 350–450 mm de alto
+  (fila delantera que sube a dos capas, 690 mm > 400, y deja inaccesible el suelo trasero). La mediana del fondo del pozo es 350 mm.
+- Mecanismo: la familia dominante (600 × 445 × 345) llena la fila delantera (y ∈ [−20, 425)); la franja trasera de 395 mm solo
+  admite esa familia de pie (huella 445 × 345, dos por fila = 890 mm) más cajas estrechas para los ~350 mm restantes. Si en las 15
+  visibles no hay cajas que encajen mientras la fila delantera está por debajo de 400 mm, el hueco queda muerto para todo el palet.
+- R7 (cajas que asoman) apenas ayuda: la fila delantera supera enseguida los 750 mm de la caja más alta.
+- Implicación: la palanca es **no dejar crecer la fila delantera más de 400 mm mientras haya suelo trasero rellenable** (H1 más
+  fuerte o una guarda específica de huecos de suelo) o **elegir la disposición de la primera capa** para que la franja trasera sea
+  rellenable con la familia dominante de pie.
+
 ## 2. Literatura relevante (2021–2026)
 - Zhao et al., PCT (ICLR 2022) y *Deliberate Planning of 3D Bin Packing on Packing Configuration Trees*
   (arXiv 2504.04421): hojas por corner points / extreme points / EMS; planificación con lookahead, buffer y offline

@@ -329,3 +329,34 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   presupuesto de nodos (deterministas, independientes de la carga). Con 0 cortes es idéntico a la configuración oficial. El
   cumplimiento de tiempo real (D-007) se mide aparte en un solo proceso sin carga. Un sweep con cortes > 0 no se usa.
 - Consecuencia: `h1_retune_h6` (82 cortes) y `tall_ref` (20–52) quedan invalidados y se repiten con esta regla.
+
+## D-029 · H1 fuerte (peso 2,0, banda 900) como candidata preregistrada (2026-10-20, ANTES de ver referencia y réplica)
+- Contexto: la autopsia RESEARCH §1quinquies muestra que la pérdida dominante (~7 pp) es un hueco de suelo trasero que muere cuando la
+  fila delantera supera 400 mm en el primer quinto del palet: exactamente lo que penaliza H1. En el ajuste determinista (h8_det_tune,
+  seeds 1001–1010, 0 cortes): `h1_w20_b900` +1,37 pp [−0,10; 2,84], `h1_w10_b900` +1,05 [−0,43; 2,53]; H8 0,01–0,62 n.s. sin
+  tendencia → **H8 descartada** (contador anti-estancamiento: 4).
+- Opción (fijada antes de ver los datos de evaluación): candidata = `h1_w20_b900` (h6_sin_gate con access_debt_weight 2,0 y
+  access_debt_band_mm 900). Se evalúa en las 10 seeds de referencia y en la réplica de 20 seeds de D-016, deterministas (D-028).
+  **Se adopta si la diferencia pareada en la réplica es significativa (IC95 > 0).** La extensión del ajuste (h1_strong_tune: peso 4/8,
+  banda 1200) es informativa; si una variante la supera claramente, necesitará su propia réplica.
+- **Resultado (2026-10-20, 0 cortes):** referencia −0,20 pp [−1,06; 0,66]; **réplica +0,53 [−0,41; 1,45] n.s. → NO se adopta.**
+  Extensión del ajuste: w4 b900 +0,95, w2 b1200 +0,95, w4 b1200 +0,66, w8 b1200 +0,86 (todas n.s.). La ganancia en seeds de ajuste
+  era en su mayor parte ruido. Contador anti-estancamiento: 5. Condición de parada §9.2 no aplicable (T3 no refutado formalmente).
+  Siguiente: H9 "fase de suelo" (mecanismo existente `hard_floor_phase_*`, nunca probado en este estudio), en seeds de ajuste.
+
+## D-030 · Ciclo de pensamiento lateral n.º 3: el hueco trasero es estructural (2026-10-20)
+- Resultados desde D-025: R7 sin ganancia; H8, H1 fuerte y fase de suelo descartadas (fase de suelo: −1,0…−2,5 pp sin premio a cajas
+  de pie, −8 con premio; h9_floor_tune). Contador anti-estancamiento: 6.
+- Hallazgo: el testigo offline (81,45 %) **también** deja vacío el 7,4 % de la planta interior y un 11,1 % en pozos (online: 7,3 % y
+  14,7 %). El hueco trasero viene de la mezcla de cajas del flujo, no de la política. Lo que separa online de offline: ~3,5 pp de pozos
+  adicionales y ~0,9 pp de huecos internos. T2 exige recuperar 2,4 de esos 4,4 pp (55 %) viendo solo 15 cajas.
+- Reformulaciones (ganancia / coste / viabilidad, 1–5):
+  | # | Reformulación | Gan. | Coste | Viab. | Nota |
+  |---|---|---|---|---|---|
+  | R12 | Autopsia diferencial online vs offline: qué pozos crea la online que la offline no | — | 1 | 5 | diagnóstico previo a cualquier técnica |
+  | R13 | Función de valor aprendida (entrenada con flujos sintéticos del prior genérico) para los rollouts | 2–3 | 5 | 4 | la única vía de software con margen; horizonte más allá de la ventana |
+  | R14 | Más información: ver más cajas | 1 | 2 | 3 | medido: buffer ×2/×5 +0,87/+0,53 n.s.; la búsqueda no lo aprovecha |
+  | R15 | Garra / cinemática distinta | 3–5 | 5 | ? | gantry 82,0 %; fuera de la célula objetivo |
+- Opción: R12 primero (sin Codex), y según lo que muestre, R13 con Codex como técnica de mayor coste. Si R12 indica que los pozos
+  adicionales no se pueden prever con 15 cajas, se documenta como límite práctico de la célula.
+- Condición de parada §9.2: no aplicable (T3 no refutado formalmente con cotas).

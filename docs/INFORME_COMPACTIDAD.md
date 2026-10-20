@@ -1,26 +1,29 @@
 # Informe de compactidad — paletizado caótico con robot de 6 ejes
 
-> **Borrador en curso** (autopiloto, actualizado el 2026-10-17). Cada cifra tiene su comando de reproducción en
+> **Borrador en curso** (autopiloto, actualizado el 2026-10-20). Cada cifra tiene su comando de reproducción en
 > `docs/autopilot/PROGRESS.md`; las decisiones están en `docs/autopilot/DECISIONS.md`.
 
 ## 1. Resumen ejecutivo
-- **Configuración objetivo:** robot articulado de 6 ejes, `arm6_4orient`. Son 4 orientaciones, sin apoyar la cara Alto × Largo, con
-  accesibilidad de 400 mm, soporte ≥ 0,85, gate de cajas de pie a 400 mm del techo y `micro_plan=False`.
+- **Configuración objetivo:** robot articulado de 6 ejes, `arm6_4orient`: 4 orientaciones (nunca apoyado en la cara Alto × Largo),
+  accesibilidad de 400 mm y soporte ≥ 0,85. El robot solo ve las 15 cajas de la cinta (D-022).
 - **KPI congelado (v1.0.0):** volumen real de las cajas de los palets cerrados / (nº palets cerrados × 1240 × 840 × 2400 mm).
 - **Baseline re-medido: 61,89 % ± 1,32.** Las cifras históricas (64,6 % brazo, 72,1 % gantry) usaban un volumen medio supuesto y una
   envolvente errónea (1240 × 820); además, el "stand_hl" de aquel estudio era un duplicado de "stand_hw".
-- **Techo alcanzable offline (información completa): 81,45 %**, en 9 palets. Gap = 19,56 pp.
+- **Techo alcanzable offline (información completa): 81,45 %**, en 9 palets; igual con la regla de acceso R7. Gap = 19,56 pp.
   Metas: **T1 ≥ 71,67 %**, **T2 ≥ 79,49 %**, **T3 ≥ 92,84 %**.
-- **Mejor resultado online: 74,03 %** (H1+H3+H5+H6) → **62,1 % del gap → T1 alcanzado**, condicionado a la validez en producción
-  de la búsqueda sobre el buffer (D-012).
-- **T2 no se alcanza en `arm6_4orient`, ni con palancas.** El máximo medido con palancas en el brazo es 77,76 % (gate abierto + garra
-  de canto). Con cinemática gantry y 6 orientaciones se llegaría al 82,0 %, pero no es la célula objetivo.
+- **Mejor resultado online: 77,06 % ± 0,90** (H1+H3+H5+H6, sin gate de cajas de pie): **+15,2 pp sobre el baseline, 77,6 % del gap
+  → T1 alcanzado sin condiciones.** Réplica en 20 seeds nuevas: 76,21 %. Tiempo real: 0,957 s/decisión de media, p95 2,36 s.
+- **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado seis líneas más (sección 5).
 - **T3 (+50 %) no se alcanza.** Las cotas formales relajadas no lo descartan, y el techo alcanzable queda 11,4 pp por debajo
   (refutación empírica, D-010).
 
 ## 2. Datos y parámetros
 Ver `docs/PARAMETROS.md`. 186 cajas, 111 referencias distintas, Σ vol = 16,79 m³ (mínimo trivial: 7 palets). Familia dominante
-≈ 600–610 × 440–450 × 345–395 mm (85 cajas). Envolvente real: 1240 × 840 (palet 1200 × 800 + 20 mm de overhang por lado).
+≈ 600–610 × 440–450 × 345–395 mm (85 cajas). Envolvente real: 1240 × 840 (palet 1200 × 800 + 20 mm de vuelo por lado).
+
+Respuestas del responsable incorporadas: el gate de cajas de pie era una regla anti-torres y se elimina porque sin él hay menos torres
+(D-021); las cajas pueden ir pegadas (D-024); una caja que, ya colocada, asoma por encima de todas sus vecinas puede bajar a un pozo de
+más de 400 mm (regla R7, D-026).
 
 ## 3. Techo real medido (Fase 0, `docs/COTAS.md`)
 | Cota / referencia | Valor | Tipo |
@@ -28,55 +31,63 @@ Ver `docs/PARAMETROS.md`. 186 cajas, 111 referencias distintas, Σ vol = 16,79 m
 | Baseline arm6_4orient | 61,89 % | medida |
 | Buffer infinito (k = 186), política de producción | 66,82 % | palanca de información |
 | Beam offline con el scorer de producción | 71,64 % | techo alcanzable |
-| **Columnas offline con plantillas contiguas** | **81,45 %** (9 palets) | **techo alcanzable usado para el gap** |
+| **Columnas offline con plantillas contiguas** | **81,45 %** (9 palets; igual con R7) | **techo alcanzable usado para el gap** |
 | Cota formal por palet (DFF + cortes, relajada) | 100 % flujo / 96,97 % familia dominante | cota formal (no informativa) |
 | Cota trivial | ≥ 6,72 → 7 palets | cota formal |
 
 ## 4. Diagnóstico: dónde se pierde el volumen
-- **Baseline:** el 36 % de la envolvente queda libre por encima del perfil (torres), frente a solo un 2 % de huecos internos. El 18,7 %
-  del suelo nunca se cubre. La regla de accesibilidad del brazo deja inaccesibles las zonas bajas junto a una pila más de 400 mm más alta.
-- **Con la mejor técnica:** el espacio libre baja al 23,7 % y el suelo sin cubrir al 10,2 %. La franja delantera (y < 425 mm) queda
-  prácticamente llena. La pérdida restante está en la **franja trasera de 395 mm** (840 − 445): ahí no caben las cajas planas de la
-  familia dominante, solo cajas estrechas (escasas) o de pie, y el gate solo permite las de pie cerca del techo.
+- **Baseline:** el 36 % de la envolvente queda libre por encima del perfil (torres), frente a solo un 2 % de huecos internos.
+- **Mejor configuración (77,06 %):** cajas 77,1 % · huecos internos 2,2 % · libre sobre el perfil 20,7 %. De ese 20,7 %, 14,7 pp son
+  **pozos** que el brazo ya no puede rellenar (una vecina más de 400 mm más alta); 12 pp tienen más de 1500 mm de profundidad.
+- **Causa:** en cada palet queda un único hueco de suelo junto al borde trasero (≈ 780 × 380 mm, 7,3 % de la planta) que ninguna caja
+  cubre a ninguna altura. La familia dominante no cabe plana en la franja trasera de 395 mm; de pie caben dos y sobran ~350 mm que solo
+  llenan cajas estrechas. Cuando la fila delantera pasa de 400 mm (en el primer quinto del palet), el hueco queda muerto.
+- **Ese hueco es estructural:** el techo offline (información completa) también deja vacío el 7,4 % de la planta y un 11,1 % en pozos.
+  Lo que separa online de offline son ~3,5 pp de pozos adicionales y ~0,9 pp de huecos internos (RESEARCH §1quinquies).
 
-## 5. Ganancia por técnica (10 seeds de referencia; las adoptadas, con réplica cuando fue limítrofe)
+## 5. Ganancia por técnica (10 seeds de referencia; réplica de 20 seeds cuando fue limítrofe)
 | Técnica | Δ KPI (pp, IC95) | KPI acumulado | % del gap | Estado |
 |---|---|---|---|---|
 | H1 deuda de accesibilidad | +2,81 [1,04; 4,57] | 64,70 % | 14 % | adoptada |
-| H3 búsqueda determinista sobre el buffer | +6,24 [5,11; 7,36] | 70,94 % | 46 % | adoptada (D-012) |
-| H5 valor de estado por rollout | +1,11 (réplica +2,12 [1,08; 3,16]) | 72,04 % | 52 % | adoptada (D-012) |
-| H6 rollouts con cajas futuras (prior genérico) | +1,99 [1,23; 2,75] (réplica +1,27) | **74,03 %** | **62 %** | adoptada (D-012) |
+| H3 búsqueda determinista sobre el buffer | +6,24 [5,11; 7,36] | 70,94 % | 46 % | adoptada |
+| H5 valor de estado por rollout | +1,11 (réplica +2,12 [1,08; 3,16]) | 72,04 % | 52 % | adoptada |
+| H6 rollouts con cajas futuras (prior genérico) | +1,99 [1,23; 2,75] (réplica +1,27) | 74,03 % | 62 % | adoptada |
+| Sin gate de cajas de pie (D-021, autorizado) | +3,03 [1,72; 4,35] (réplica +2,62 [1,52; 3,71]) | **77,06 %** | **78 %** | adoptada |
 | H2 ranuras estrechas | −0,04 n.s. | — | — | descartada |
 | H4 plantilla de columnas online | −0,62 n.s. | — | — | descartada |
 | H7 candidatos extreme points / EMS | −0,53 n.s.; fuera de tiempo real | — | — | descartada |
+| Laterales libres como desempate (D-024) | −1,33 [−2,38; −0,27] | — | — | no adoptada (cuesta compactación) |
+| R7 cajas altas en pozos (D-026) | −0,29 n.s. | — | — | regla vigente, sin ganancia |
+| H8 altura muerta bajo el techo | +0,01…+0,62 n.s. (ajuste) | — | — | descartada |
+| H1 fuerte (peso 2, banda 900) | réplica +0,53 [−0,41; 1,45] n.s. | — | — | descartada (D-029) |
+| Fase de suelo (primero llenar el suelo) | −1,0…−8,4 (ajuste) | — | — | descartada |
 | Re-ajuste de mandos existentes / gate solo | 0 / n.s. | — | — | descartadas |
 
-Tiempo por decisión de la mejor configuración: ~0,72 s de media en un proceso (p95 ~1,5 s), dentro del límite de tiempo real (D-007).
-Determinista: las ejecuciones repetidas son idénticas.
+La ventaja de la búsqueda solo usa las 15 cajas visibles (test de fuga, D-022). Es determinista: todas las cifras de evaluación se
+miden sin cortes de reloj (D-028). Tiempo por decisión de la mejor configuración, en un proceso: 0,957 s de media, p95 2,36 s.
 
 ## 6. Palancas operativas y de hardware (sobre la mejor configuración salvo indicación)
 | Palanca | KPI | Δ | Implicación |
 |---|---|---|---|
-| Quitar el gate de cajas de pie (2400) | 77,06 % | +3,03 [1,72; 4,35] | solo software; **depende de si el gate es físico (D-018)** |
-| Gate abierto + garra de canto | 77,76 % | +3,73 | cambio de garra; tiempo por decisión ~1,6 s |
-| Garra de canto (con el gate oficial) | 72,54 % (sobre H1+H3+H5) | +0,50 n.s. | no justifica cambio de garra |
+| Garra de canto | 77,76 % | +0,70 | cambio de garra; ~1,6 s/decisión; no justifica la inversión |
 | Buffer ×2 / ×5 | +0,87 / +0,53 n.s. | — | no compensa más rampa |
 | Secuenciación aguas arriba | −0,81 n.s. | — | no compensa pedirla al almacén |
-| N palets abiertos (política actual) | empeora | — | en estudio la asignación por familia |
-| Gantry 4 orient. + gate abierto (contraste) | 79,29 % | +5,26 | otra cinemática |
-| Gantry 6 orient. + gate abierto (contraste) | 82,00 % | +7,97 | otra cinemática y garra |
+| Palets por familia (2 posiciones) | −0,74 n.s. | — | no compensa una segunda posición |
+| Gantry 4 orient. (contraste) | 79,29 % | +2,23 | otra cinemática |
+| Gantry 6 orient. (contraste) | 82,00 % | +4,94 | otra cinemática y garra |
+
+La única palanca que supera T2 es cambiar de cinemática (gantry), que no es la célula objetivo.
 
 ## 7. Riesgos y preguntas abiertas
-- **D-012:** H3, H5 y H6 usan la maquinaria de `micro_plan`, fijada a `False` sin motivo documentado. Si el motivo era el tiempo o el no
-  determinismo, la búsqueda determinista lo resuelve.
-- **D-015:** la regla de accesibilidad solo considera vecinas las cajas que se tocan. Todas las políticas (también la de producción) y
-  el techo offline dependen de ello: con una holgura de 50 mm serían infactibles el 30–40 % de las colocaciones online y todas las
-  soluciones offline. Hace falta saber qué holgura lateral necesita la garra.
-- **D-018:** si el gate de 400 mm no es físico, el KPI sube a 77,06 % solo con software.
+- **D-015:** la regla de accesibilidad solo considera vecinas las cajas que se tocan. El responsable confirma que las cajas pueden ir
+  pegadas (D-024); conviene validar con ROBOGUIDE las trayectorias junto a vecinas pegadas.
+- **Laterales libres (D-024):** la configuración recomendada ya coloca el 94,7 % de las cajas en huecos con 3–4 laterales libres y
+  ninguna en un hueco cerrado.
 
 ## 8. Recomendación de implantación (provisional)
-1. Implantar **H1+H3+H5+H6** (74,03 %, +12,1 pp sobre el baseline; 9,7 palets por flujo de 186 cajas frente a 11,1, un 13 % menos),
-   tras confirmar D-012 y validar con
-   ROBOGUIDE las trayectorias junto a vecinas casi pegadas (D-015).
-2. Revisar con el fabricante el gate de 400 mm (D-018): es la mayor ganancia restante sin hardware.
-3. No invertir en garra de canto, en más buffer ni en secuenciación aguas arriba: con la búsqueda, no aportan.
+1. Implantar **H1+H3+H5+H6 sin gate** (77,06 %, +15,2 pp sobre el baseline; 9,0 palets por flujo de 186 cajas frente a 11,1, un 19 %
+   menos), validando con ROBOGUIDE las trayectorias junto a vecinas pegadas.
+2. No invertir en garra de canto, en más buffer, en secuenciación aguas arriba ni en una segunda posición de palet: con la búsqueda no
+   aportan.
+3. Lo que queda hasta T2 está en pozos que crea ver solo 15 cajas. Las vías abiertas son de mayor coste: una función de valor
+   aprendida para planificar más allá de la ventana visible, o más información (ver más cajas de la cinta).
