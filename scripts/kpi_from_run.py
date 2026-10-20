@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import sys
@@ -16,13 +16,15 @@ from palca.study.params import REFERENCE_EXCEL
 from palca.study.validate import validate_pallet
 from palca.tuning.episodes import apply_shuffle
 from sim.io import load_arrivals
+from sim.arrival_sequence import sort_arrival_windows
 
 
 def original_dims_for_run(payload: dict, excel_path: str) -> dict[int, tuple]:
     """Reproduce identidad de entrada del DES, sin usar dimensiones del packer.
 
     load_arrivals conserva row_idx de Excel; run_simulation baraja por row_idx
-    y lo renumera; simulate enumera desde 1 por row_idx (immediate) o por
+    y lo renumera; la palanca secuencia después, conservando slots temporales;
+    simulate enumera desde 1 por row_idx (immediate) o por
     (time,row_idx) (excel). time_scale positivo no altera ese orden.
     Solo loader Excel estándar; el payload actual no identifica multi_ramp.
     """
@@ -36,6 +38,13 @@ def original_dims_for_run(payload: dict, excel_path: str) -> dict[int, tuple]:
                                  seed=params.get("episode_seed", 0), window=window, strength=strength)
         indexed = list(enumerate(arrivals, start=1))
     else:
+        indexed = [(a.row_idx, a) for a in arrivals]
+    if params.get("arrival_sort_window", 0) > 1:
+        arrivals = [replace(a, row_idx=i) for i, a in indexed]
+        arrivals = sort_arrival_windows(
+            arrivals, window=params["arrival_sort_window"],
+            key=params.get("arrival_sort_key", "family_height"),
+            arrival_mode=params.get("arrival_mode", "excel"))
         indexed = [(a.row_idx, a) for a in arrivals]
     mode = params.get("arrival_mode", "excel").strip().lower()
     if mode == "excel":
