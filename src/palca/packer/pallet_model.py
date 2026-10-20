@@ -370,6 +370,13 @@ class PalletModel:
         if controls is None:
             controls = build_control_stack(control_config)
         self.controls = controls
+        accessibility = (control_config.accessibility if control_config is not None else
+                         next((c.config for c in controls.placement_controls
+                               if type(c) is RobotAccessibilityControl), None))
+        self.accessibility_tall_box_exemption = bool(
+            accessibility and accessibility.accessibility_tall_box_exemption)
+        self.accessibility_top_clearance_mm = (
+            accessibility.accessibility_top_clearance_mm if accessibility else 0)
 
     @property
     def bin_area_mm2(self) -> int:
@@ -1388,9 +1395,9 @@ class PalletModel:
                     robot_key = None
                     result = None
                     if cache is not None and type(control) is RobotAccessibilityControl:
-                        # The production robot control reads only the footprint,
-                        # its delta and the pre-placement geometry, never box/z.
-                        robot_key = (control.config.accessibility_delta_mm,
+                        # Reuse only for the same effective threshold: tall-box
+                        # exemption makes it depend on the oriented height too.
+                        robot_key = (control.config.effective_delta_mm(adjusted.height_mm),
                                      adjusted.x_mm, adjusted.y_mm,
                                      adjusted.length_mm, adjusted.width_mm)
                         cached = cache.robot.get(robot_key)

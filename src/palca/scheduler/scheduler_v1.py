@@ -15,6 +15,7 @@ from ..scoring.free_sides import free_sides, rank_free_sides, validate_tolerance
 from ..scoring.state_value import placed_volume, visible_completion_potential
 from ..scoring.catalog_prior import observed_seed, sample_catalog
 from ..scoring.access_debt import HeightField, access_debt, build_heightfield
+from ..scoring.dead_headroom import dead_headroom_volume
 from ..scoring.height_slack import (
     ScoreMode,
     SlackDecisionStats,
@@ -46,6 +47,9 @@ class SchedulerConfig:
     access_debt_weight: float = 0.0
     access_debt_band_mm: int = 300
     access_debt_mode: str = "penalty"
+    access_debt_exempt_delta_mm: int = 750
+    dead_headroom_weight: float = 0.0
+    dead_headroom_min_mm: int = 250
     tower_z_band_mm: int = 0
     tower_z_penalty_weight: float = 0.0
     spatial_xy_bin_mm: int = 150
@@ -104,6 +108,10 @@ class SchedulerConfig:
             raise ValueError("access_debt_mode must be penalty or filter")
         if not 0 <= self.access_debt_weight < float("inf") or self.access_debt_band_mm < 0:
             raise ValueError("access debt weight/band must be finite and nonnegative")
+        if self.access_debt_exempt_delta_mm < 0:
+            raise ValueError("access_debt_exempt_delta_mm must be nonnegative")
+        if not 0 <= self.dead_headroom_weight < float("inf") or self.dead_headroom_min_mm < 0:
+            raise ValueError("dead headroom weight/min must be finite and nonnegative")
         lookahead = max(1, int(self.lookahead_k))
         alias = self.pick_window
         if alias is not None:
@@ -205,6 +213,8 @@ class _ScoreTerms:
     access_dead_volume_mm3: float = 0.0
     access_dead_area_mm2: float = 0.0
     access_debt_penalty: float = 0.0
+    dead_headroom_volume_mm3: float = 0.0
+    dead_headroom_penalty: float = 0.0
     tower_z_delta_mm: int = 0
     tower_z_penalty: float = 0.0
     spatial_tower_delta: int = 0
@@ -260,6 +270,9 @@ class _HardFloorScoredExpansion:
 class SchedulerV1:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
+        self.dead_headroom_selected_count = 0
+        self.dead_headroom_volume_sum = 0.0
+        self.dead_headroom_penalty_sum = 0.0
         self.access_debt_selected_count = 0
         self.access_debt_volume_sum = 0.0
         self.access_debt_area_sum = 0.0
@@ -402,6 +415,7 @@ class SchedulerV1:
                     "micro_plan": dict(micro_stats),
                     "mode": "micro",
                 }
+                self._record_dead_headroom_choice(micro_plan, sim_state)
                 return micro_plan
 
             self.micro_plan_fallback_greedy += 1
@@ -419,6 +433,7 @@ class SchedulerV1:
         if plan is not None:
             self._record_selected_spatial_tower_penalty(plan)
             self._update_spatial_state_from_selected_plan(plan)
+            self._record_dead_headroom_choice(plan, sim_state)
         return plan
 
     def _record_micro_time(self, elapsed_ms: float) -> None:
@@ -2418,6 +2433,8 @@ class SchedulerV1:
                 debt = access_debt(
                     fields[key], (placement.x_mm, placement.y_mm, placement.length_mm, placement.width_mm),
                     placement.z_mm + placement.height_mm, delta, self.config.access_debt_band_mm,
+                    accessibility_tall_box_exemption=getattr(pallet, "accessibility_tall_box_exemption", False),
+                    access_debt_exempt_delta_mm=self.config.access_debt_exempt_delta_mm,
                 )
                 debt_volume, debt_area = debt.dead_volume_mm3, debt.dead_area_mm2
                 if self.config.access_debt_mode == "penalty":
@@ -2425,7 +2442,17 @@ class SchedulerV1:
                     penalty = self.config.access_debt_weight * debt_volume / max(1, volume)
                     score -= penalty
                 self.access_debt_candidate_ms.append((time.perf_counter() - started) * 1000)
+        headroom_volume = headroom_penalty = 0.0
+        if self.config.dead_headroom_weight > 0 and pallet is not None and preview.placement is not None:
+            placement = preview.placement
+            headroom_volume = dead_headroom_volume(
+                placement, pallet.spec.max_height_mm, self.config.dead_headroom_min_mm)
+            volume = placement.length_mm * placement.width_mm * placement.height_mm
+            headroom_penalty = self.config.dead_headroom_weight * headroom_volume / max(1, volume)
+            score -= headroom_penalty
         return _ScoreTerms(
+            dead_headroom_volume_mm3=headroom_volume,
+            dead_headroom_penalty=headroom_penalty,
             free_sides_count=(free_sides(preview.placement, pallet.placements)
                               if self.config.free_sides_tiebreak and pallet is not None
                               and preview.placement is not None else 0),
@@ -2500,6 +2527,24 @@ class SchedulerV1:
             self.access_debt_selected_count += 1
             self.access_debt_volume_sum += terms.access_dead_volume_mm3
             self.access_debt_area_sum += terms.access_dead_area_mm2
+
+    def _record_dead_headroom_choice(self, plan: PickPlan, sim_state: SchedulerSimState) -> None:
+        if self.config.dead_headroom_weight <= 0 or plan.preview.placement is None:
+            return
+        placement = plan.preview.placement
+        dead_volume = dead_headroom_volume(placement, sim_state.pallets[plan.pallet_id].spec.max_height_mm,
+                                          self.config.dead_headroom_min_mm)
+        volume = placement.length_mm * placement.width_mm * placement.height_mm
+        self.dead_headroom_selected_count += 1
+        self.dead_headroom_volume_sum += dead_volume
+        self.dead_headroom_penalty_sum += self.config.dead_headroom_weight * dead_volume / max(1, volume)
+
+    def collect_dead_headroom_metrics(self) -> dict[str, Any]:
+        n = self.dead_headroom_selected_count
+        return dict(enabled=self.config.dead_headroom_weight > 0,
+                    weight=self.config.dead_headroom_weight, min_mm=self.config.dead_headroom_min_mm,
+                    selected_count=n, selected_dead_volume_mm3_mean=self.dead_headroom_volume_sum / max(1, n),
+                    selected_penalty_mean=self.dead_headroom_penalty_sum / max(1, n))
 
     def collect_access_debt_metrics(self) -> dict[str, Any]:
         import numpy as np

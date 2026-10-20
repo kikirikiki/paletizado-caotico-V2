@@ -24,6 +24,10 @@ name=$1; model=$2; effort=$3; spec=$4; sid=${5:-}
 mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR/$name.exit"
 cd "$WT" || exit 9
+# D-027: no lanzar trabajos si la cuota semanal de Codex ya está en el límite (60 %).
+if ! bash "$(dirname "$(readlink -f "$0")")/codex_quota.sh" check > "$LOG_DIR/$name.quota"; then
+  echo 3 > "$LOG_DIR/$name.exit"; exit 3
+fi
 if [ -n "$sid" ]; then
   "$CODEX" exec resume "$sid" -c sandbox_mode='"workspace-write"' -m "$model" -c model_reasoning_effort="$effort" \
     --json -o "$LOG_DIR/$name.last.md" - < "$spec" > "$LOG_DIR/$name.jsonl" 2> "$LOG_DIR/$name.err"

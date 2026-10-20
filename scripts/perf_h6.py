@@ -53,12 +53,22 @@ def assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi):
     # Pre-D-024 goldens lack these additive defaults/telemetry. Nondefault
     # settings must still fail equality against the original configuration.
     for actual, expected in ((actual_dump, expected_dump), (actual_kpi, expected_kpi)):
-        for key, default in (("free_sides_tiebreak", False), ("free_sides_tolerance", 0.0)):
+        for key, default in (("free_sides_tiebreak", False), ("free_sides_tolerance", 0.0),
+                             ("accessibility_tall_box_exemption", False), ("accessibility_top_clearance_mm", 0),
+                             ("access_debt_exempt_delta_mm", 750), ("dead_headroom_weight", 0.0),
+                             ("dead_headroom_min_mm", 250)):
             if key not in expected.get("params", {}) and key in actual.get("params", {}):
                 assert actual["params"][key] == default
                 del actual["params"][key]
     if "free_sides" not in expected_kpi:
         actual_kpi.pop("free_sides", None)
+    for key in ("acc_violations", "acc_violations_base_rule"):
+        if key not in expected_kpi and key in actual_kpi:
+            assert actual_kpi.pop(key) == 0
+    if "dead_headroom" not in expected_kpi and "dead_headroom" in actual_kpi:
+        assert actual_kpi.pop("dead_headroom") == dict(
+            enabled=False, weight=0.0, min_mm=250, selected_count=0,
+            selected_dead_volume_mm3_mean=0.0, selected_penalty_mean=0.0)
     # HEAD changes when a patch is committed; never discard any placement field.
     assert dict(actual_dump, git_head=expected_dump['git_head']) == expected_dump
     assert json.loads(json.dumps(deterministic_kpi(actual_kpi))) == json.loads(

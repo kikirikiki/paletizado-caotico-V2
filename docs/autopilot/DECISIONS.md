@@ -225,6 +225,8 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   al 60 %: no lanzar trabajo nuevo, dejar terminar lo que ya corre (y revisarlo/commitearlo solo si el usuario lo autoriza), dejar el
   estado escrito en PROGRESS.md y avisar al usuario. No se escribe `PARADA:` (reservada a las condiciones de §9).
 - Justificación: instrucción explícita del usuario; prevalece sobre el modo autopiloto.
+- **Enmienda (2026-10-20):** con el uso semanal al 65 %, el usuario ordena "continúa hasta el 80 %". **El umbral de pausa pasa a 80 %**
+  (mismo procedimiento). El uso semanal se reinicia el 2026-10-21 a las 12:00 CEST.
 
 ## D-021 · Gate stand_hw eliminado por indicación del usuario (2026-10-17)
 - Respuesta del usuario a D-018: el gate de 400 mm era una regla para evitar torres; si anulándolo no se hacen torres, se elimina.
@@ -264,3 +266,66 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   [−2,38; −0,27] (significativo), réplica −0,17 [−1,06; 0,73]; tolerancias 0,001 y 0,01 peores o iguales. → **NO se adopta** (el
   usuario no quiere perder compactación). La configuración oficial ya coloca el 94,7 % de las cajas con 3–4 laterales libres, el 0,4 %
   con 1 y ninguna con 0 (con desempate: 97,8 % con 3–4). Implementado con `free_sides_tiebreak=False` por defecto (rama feat/laterales-libres).
+
+## D-025 · Ciclo de pensamiento lateral n.º 2: la pérdida está en pozos de acceso (2026-10-20)
+- Contexto: contador anti-estancamiento = 3 (H7 −0,53, secuenciación −0,81, palets por familia −0,74). Mejor: 77,06 % (T2 = 79,49).
+- Diagnóstico nuevo (palets cerrados de h6_sin_gate, 10 seeds de referencia = 80 palets; réplica 20 seeds = 164 palets, igual):
+  cajas 77,1 % · huecos internos 2,2 % · **libre sobre el perfil 20,7 %**. Cierres: 79 de 80 por altura (no cabe ninguna de las 15
+  cajas visibles). Ese 20,7 % por altura libre restante sobre cada celda (entre paréntesis, la parte en "pozo": a < 300 mm hay una
+  celda más de 400 mm por encima):
+  | Altura libre | < 150 | 150–250 | 250–350 | 350–500 | 500–750 | ≥ 750 |
+  |---|---|---|---|---|---|---|
+  | % envolvente | 0,6 | 2,3 | 0,7 | 0,3 (0,15) | 2,0 (1,6) | **14,9 (14,8)** |
+  **El 72 % de la pérdida (14,8 pp) son pozos profundos junto a columnas que los superan en > 400 mm**; el "techo irregular" (< 350)
+  solo suma 3,6 pp. Los pozos son definitivos con la regla actual: `RobotAccessibilityControl` mide desde la **base** de la caja nueva
+  (vecina tocando con techo > base + 400 ⇒ prohibido), **sin tener en cuenta la altura de la caja**: una caja de pie de 750 mm no
+  puede entrar en un pozo de 600 mm aunque su cara superior (donde va la garra) quede por encima de todas sus vecinas.
+- Reformulaciones (ganancia / coste / viabilidad, 1–5):
+  | # | Reformulación | Gan. | Coste | Viab. | Nota |
+  |---|---|---|---|---|---|
+  | R7 | **Regla de acceso referida a la cara superior**: prohibido solo si vecina > base + máx(400, h_caja + holgura) | 5 | 1 | ? | cambia una restricción física (§2): PALANCA hasta que el usuario confirme |
+  | R8 | No crear pozos: reajustar H1 (peso/banda) ahora que hay búsqueda y rollouts | 2 | 1 | 5 | sin código (sweep del director) |
+  | R9 | H8 "altura muerta": penalizar dejar < 250 mm libres hasta 2400 sobre la caja | 1–2 | 2 | 5 | ataca 2,9 pp como máximo |
+  | R10 | Rellenar pozos con cajas de pie que no toquen la pared | — | — | — | prohibido (D-015: nada de huecos artificiales) |
+  | R11 | Valor aprendido para rollouts largos (el pozo se forma muchas cajas antes) | 3 | 5 | 4 | solo si R8/R9 no bastan |
+- Opción: (1) R8 ya, sin Codex (sweep h1_retune_h6 en seeds de ajuste; evaluación en referencia + réplica si mejora). (2) Codex
+  implementa R7 como palanca desactivada por defecto (`accessibility_tall_box_exemption`, también en H1, la búsqueda y las cachés de
+  rendimiento) y R9 como técnica (H8). (3) Pregunta [REVISAR — prioridad alta] al usuario sobre R7. Si R7 se acepta, el techo offline
+  debe recalcularse con la misma regla antes de recalcular el gap.
+- Justificación: protocolo anti-estancamiento §5; la autopsia apunta a una única causa dominante y R7 es la única palanca con
+  ganancia potencial > 2,4 pp (lo que falta para T2).
+
+## D-026 · R7 confirmada por el usuario: la regla de acceso admite cajas que asoman por encima de sus vecinas (2026-10-20)
+- Respuesta del usuario: "si la caja, ya colocada, sobresale por encima de todas sus vecinas, el brazo no choca. Puede entrar aunque el
+  pozo tenga más de 400 mm."
+- Regla física vigente desde ahora: una vecina que toca bloquea solo si su techo > base + máx(400, h_caja). Equivale a
+  `accessibility_tall_box_exemption=True`, `accessibility_top_clearance_mm=0` (techo igual al de la caja: permitido).
+- Opción: R7 deja de ser palanca y pasa a restricción oficial. Como con el gate (D-021), el preset `arm6_4orient` y el baseline
+  congelado (61,89 %) no cambian; la regla entra como override de la configuración oficial y se reporta también el baseline con la
+  regla nueva para separar el efecto de la regla del de las técnicas. Antes de recalcular el gap hay que recalcular el techo offline
+  con la misma regla (si no, el gap quedaría infravalorado). Las variantes de `access_debt_exempt_delta_mm` se ajustan en seeds de ajuste.
+- **Resultado (2026-10-20, sweep determinista tall_det_ref, D-028, 0 cortes):** con el código nuevo y la exención desactivada,
+  `h6_sin_gate` reproduce exactamente 77,064 ± 0,895. Con R7: `tall_c0` −0,29 pp [−1,05; 0,46] n.s.; informativas `tall_c100` +0,31,
+  `tall_c0_d400` +0,31, `tall_c0_d500` −0,37 (todas n.s.). La exención solo se usa en ~7 colocaciones por seed: los pozos de la
+  autopsia D-025 son en su mayoría más hondos que la caja más alta (750 mm), así que no se pueden rellenar ni con la regla nueva.
+  Techo offline con R7: 81,45 % (igual). → R7 es la regla física vigente, pero no aporta compactación: la configuración oficial
+  sigue siendo `h6_sin_gate` (una política que no usa la exención también cumple R7). R7 no cuenta como técnica (contador sin cambios).
+
+## D-027 · Cuota semanal de Codex: no pasar del 60 % (instrucción del usuario, 2026-10-20)
+- Instrucción: "no quiero que el límite semanal de CODEX pase del 60 %". Uso al recibirla: semanal 3 %, 5 h 19 %.
+- Medición: las sesiones de Codex (`~/.codex/sessions/AAAA/MM/DD/*.jsonl`) registran `rate_limits`; `secondary` = ventana semanal
+  (10080 min). `scripts/autopilot/codex_quota.sh check` la lee (0 % si la ventana ya se reinició); `codex_job.sh` no lanza nada si
+  está ≥ 60 %; `codex_quota.sh watch 60` es un guardián en segundo plano que mata los `codex exec` en marcha al llegar al 60 %
+  (quedan reanudables por thread id).
+- Al llegar al 60 %: el director sigue solo con trabajo sin Codex (sweeps de configuraciones ya implementadas, revisión, informes)
+  y avisa al usuario. Usar `gpt-6.1-sol`; `gpt-6-astra` solo si es imprescindible (consume la cuota muy deprisa).
+
+## D-028 · Sweeps de evaluación deterministas: corte de reloj de la búsqueda a 600 s (2026-10-20)
+- Contexto: la búsqueda (micro_plan/H3–H6) tiene un corte de reloj `micro_plan_hard_cap_ms = 10000` además del presupuesto de nodos.
+  Con la CPU saturada (sweep de 13–15 procesos + Codex en 16 CPUs) algunas decisiones superan 10 s y se cortan: los sweeps de hoy
+  tuvieron 20–82 cortes y `h6_sin_gate` dio 76,93 % en lugar de 77,06 % con el mismo código. Todas las cifras oficiales anteriores
+  tienen 0 cortes (se ejecutaron sin carga concurrente), así que siguen siendo válidas.
+- Opción: en todos los sweeps de evaluación y ajuste se fija `micro_plan_hard_cap_ms: 600000`: las decisiones dependen solo del
+  presupuesto de nodos (deterministas, independientes de la carga). Con 0 cortes es idéntico a la configuración oficial. El
+  cumplimiento de tiempo real (D-007) se mide aparte en un solo proceso sin carga. Un sweep con cortes > 0 no se usa.
+- Consecuencia: `h1_retune_h6` (82 cortes) y `tall_ref` (20–52) quedan invalidados y se repiten con esta regla.

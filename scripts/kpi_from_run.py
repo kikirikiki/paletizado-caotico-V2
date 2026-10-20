@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from palca.study.metric import run_kpi, split_pallets
 from palca.study.params import REFERENCE_EXCEL
-from palca.study.validate import validate_pallet
+from palca.study.validate import validate_accessibility, validate_pallet
 from palca.tuning.episodes import apply_shuffle
 from sim.io import load_arrivals
 
@@ -73,8 +73,13 @@ def main() -> None:
             violations = []
             for rec in records:
                 for violation in validate_pallet(rec.items, originals,
-                                                  min_support=payload["params"].get("min_support", 0.85)):
+                                                  min_support=payload["params"].get("min_support", 0.85),
+                                                  run_params=payload["params"]):
                     violations.append({"dest": rec.dest, "index": rec.index, **asdict(violation)})
+            result["acc_violations"] = sum(v["code"] == "ROBOT_ACCESS" for v in violations)
+            base_params = dict(payload["params"], accessibility_tall_box_exemption=False)
+            result["acc_violations_base_rule"] = sum(
+                len(validate_accessibility(rec.items, base_params)) for rec in records)
             result["n_violations"] = len(violations)
             result["violations"] = violations
         print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))

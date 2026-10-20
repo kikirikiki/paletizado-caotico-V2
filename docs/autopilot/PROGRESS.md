@@ -1,9 +1,9 @@
 # PROGRESS — autopiloto de compactidad (fuente única de verdad del estado)
 
-Última actualización: 2026-10-17 ~14:30 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
+Última actualización: 2026-10-20 ~13:30 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
 
-> **REGLA DEL USUARIO (2026-10-17, D-020): si el uso semanal de Claude ("Weekly · all models", herramienta
-> `mcp__ccd_session_mgmt__get_usage`) llega al 60 %, PAUSAR el autopiloto hasta que el usuario diga que continúe.** Comprobarlo al
+> **REGLA DEL USUARIO (2026-10-17, D-020; umbral subido al 80 % el 2026-10-20): si el uso semanal de Claude ("Weekly · all models",
+> herramienta `mcp__ccd_session_mgmt__get_usage`) llega al 80 %, PAUSAR el autopiloto hasta que el usuario diga que continúe.** Comprobarlo al
 > reanudar y antes de cada delegación a Codex, sweep o tarea larga. En pausa: no lanzar trabajo nuevo, dejar terminar lo que ya
 > corre, registrar estado aquí y avisar al usuario. La pausa NO es una línea `PARADA:` (esa queda reservada a §9).
 
@@ -30,7 +30,11 @@
 - **T1 ALCANZADO sin condiciones** (H5/H6 solo usan información visible).
 - **MEJOR ACTUAL: H1+H3+H5+H6 sin gate = 77,06 % ± 0,90 (10 seeds de referencia; +3,03 [1,72; 4,35] vs H6 con gate); réplica 20 seeds
   +2,62 [1,52; 3,71] → 77,6 % del gap.** Faltan 2,4 pp para T2 (79,49).
-- **CODEX SIN CUOTA SEMANAL hasta el 2026-10-22 12:40** → solo trabajo sin Codex hasta entonces.
+- **2026-10-20: Codex vuelve a tener cuota. Ciclo lateral n.º 2 (D-025):** el 72 % de la pérdida (14,8 pp de la envolvente) son
+  pozos profundos de acceso; la regla de 400 mm se mide desde la base de la caja e ignora su altura. En marcha: (a) reajuste de H1
+  sobre h6_sin_gate (sweep `h1_retune_h6`, wt2 en detached b05704c, seeds de ajuste 1001–1010); (b) Codex job `18_pozos`
+  (spec autopilot_logs/18_spec.md, wt1, rama `feat/pozos-acceso`): palanca R7 `accessibility_tall_box_exemption` + técnica H8
+  altura muerta. Pregunta al usuario pendiente sobre R7 [REVISAR].
 - **Laterales libres (D-024): NO adoptado** (desempate exacto −1,33 pp significativo en referencia); la oficial ya tiene 94,7 % de
   cajas con 3–4 laterales libres y 0 % con 0. Rama feat/laterales-libres (borrador).
 - **Tiempo resuelto (feat/h6-rapido):** optimización sin cambiar decisiones (KPI y dumps idénticos 10/10): media 1,156 → 0,957 s,
@@ -64,6 +68,7 @@
 | Formal por palet (DFF + cortes horizontales, sin soporte/accesibilidad) | U* = 100 % flujo; 96,97 % familia dominante → no refuta T3 | docs/COTAS.md (A), `scripts/bound_formal.py` |
 | Buffer k (política de producción) | k=30 +1,13 · k=75 +3,04 · **k=186 66,82 % (+4,93 pp)** (cortes 900 ms con k ≥ 75 → conservador) | out/sweeps/bound_buffer_k_v1 (wt1) |
 | N palets abiertos (política de producción) | N=2 −1,98 · N=3 −5,73 · N=4 −5,96 pp: empeora con el scorer actual (no es cota) | out/sweeps/bound_open_pallets_v1 (wt1) |
+| Techo offline con la regla R7 (D-026) | **81,45 %** (igual; el método de columnas no deja pozos) · 9 palets, 0 violaciones con R7 | `bound_offline.py --method columns --column-gap-mm 0 --templates 0 1 2 --width 8 --cpu-seconds 900 --tall-box-exemption`; docs/autopilot/evidence/offline_witness_r7.json (Codex 19) |
 | Techo offline clarividente (B) | **80,40 %** testigo verificado (9 palets); 78,87 % reproducible (`bound_offline.py --method columns --width 8 --templates 1`); beam 71,64 %; orden 68,34 % | docs/COTAS.md (B), docs/autopilot/evidence/, `scripts/autopilot/verify_offline_witness.py` |
 
 ## Ramas y PRs (apilados, D-003)
@@ -113,7 +118,16 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 - `stand_hl` (PR #139) duplica `stand_hw` (D-004). Gate stand_hw no es palanca. Simulador determinista.
 - H1: banda 200 mm empeora; banda ≥ 445 mejora; paisaje plano con ruido ~2 pp/seed.
 
-## Siguiente acción (vigente)
+## Siguiente acción (vigente, 2026-10-20)
+1. (hecho) R7 confirmada (D-026), implementada (Codex 18/19), medida: sin ganancia; techo igual. Reajuste H1 invalidado (D-028).
+2. (en curso) Smoke sin carga + commit de specs 18/19 en `feat/pozos-acceso`, push y PR (base feat/laterales-libres).
+3. Siguiente: `h8_tune` (técnica H8 altura muerta) en seeds de ajuste con `micro_plan_hard_cap_ms: 600000` (D-028); si mejora,
+   referencia + réplica. Repetir el reajuste de H1 con D-028.
+4. Si H8 < 0,5 pp: el contador anti-estancamiento llega a 4 → nueva autopsia de por qué se forman los pozos profundos (¿en qué
+   momento del palet y con qué cajas?) antes de la siguiente técnica.
+5. Actualizar `docs/INFORME_COMPACTIDAD.md` (77,06 %, D-021..D-028).
+
+## Siguiente acción (anterior, 2026-10-17)
 1. (hecho 00:05–00:40) H4 → descartada, PR borrador #147.
 2. (hecho) H2 → descartada, PR borrador #148. Gate sobre H1+H3 → n.s.
 3. (hecho) H5 adoptada tras réplica (D-016) → T1 alcanzado (condicionado a D-012). PR desde feat/h5-valor-estado (base feat/h3).
@@ -142,4 +156,6 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 | PALANCA garra de canto (cara H×L) y CONTRASTE gantry 6 orientaciones reales | canto: 68,67 % sin técnicas (+6,78 vs baseline); **72,54 % con H1+H3+H5 (+0,50 [−0,97; 1,96] n.s.)**; gantry 6 orient.: 76,39 % / **77,74 % con H1+H3+H5** (+5,70 [4,50; 6,91]) | `run_sweep.py --configs configs/sweeps/lever_canto.yaml --name lever_canto --seeds 10 --workers 15 --baseline arm6_4orient_H1H3H5` (wt2). Con la búsqueda, la garra de canto deja de aportar; la cinemática gantry sí (+5,7) |
 | Palancas buffer sobre H1+H3+H5 (k30, k75) | k30 +0,87 [−0,40; 2,13]; k75 +0,53 [−0,27; 1,34], n.s.; N=2 incompatible con micro_plan (open_pallets>1 lo prohíbe) | informativo (sweep levers_h5 en /tmp/wt_ro_h5): con búsqueda, más buffer apenas aporta |
 | Palanca gate stand_hw sobre H1+H3 sin columnas | gate 2400: −0,40 [−2,09; 1,30]; gate 800: +0,27 [−0,90; 1,43], n.s. (sweep lever_gate_h3 en /tmp/wt_ro_h3) | el gate solo importa combinado con columnas (H4) |
+| R7 regla de acceso desde la cara superior (D-026, confirmada por el usuario) | determinista (D-028): tall_c0 −0,29 [−1,05; 0,46] n.s.; c100 +0,31, d400 +0,31, d500 −0,37 n.s.; ~7 colocaciones/seed usan la exención; techo offline igual (81,45 %) | regla vigente, sin ganancia: la oficial no cambia (sweep tall_det_ref, wt1) |
+| R8 reajuste de H1 sobre h6_sin_gate (peso 0,25–2,0 × banda 600/900; seeds de ajuste) | todas n.s.: mejor w2,0 b900 +0,63 [−0,85; 2,10]; w1,0 b900 +0,47; resto −0,35…+0,12 (sweep h1_retune_h6, wt2) | **INVÁLIDO (D-028: 82 cortes de reloj por carga de CPU)**; se repetirá, con R7, con corte de 600 s |
 | Palancas operativas con H1 (k30, k75, N2) | k30 +0,71 n.s.; k75 +2,79 [1,02; 4,57] (4 cortes/seed); N2 −0,93 n.s. | informativo (out/sweeps/lever_h1_operativas, wt2) |

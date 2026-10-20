@@ -44,6 +44,8 @@ class PolicyConfig:
     loadbear_factor: float = 1.0
     balance_weight: float = 0.0
     accessibility_delta_mm: int = 0
+    accessibility_tall_box_exemption: bool = False
+    accessibility_top_clearance_mm: int = 0
     coverage_grid_x: int = 0
     coverage_grid_y: int = 0
     coverage_weight: float = 0.0
@@ -180,6 +182,8 @@ class PolicyPackerScheduler:
         loadbear_factor: float = 1.0,
         balance_weight: float = 0.0,
         accessibility_delta_mm: int = 0,
+        accessibility_tall_box_exemption: bool = False,
+        accessibility_top_clearance_mm: int = 0,
         coverage_grid_x: int = 0,
         coverage_grid_y: int = 0,
         coverage_weight: float = 0.0,
@@ -190,6 +194,9 @@ class PolicyPackerScheduler:
         access_debt_weight: float = 0.0,
         access_debt_band_mm: int = 300,
         access_debt_mode: str = "penalty",
+        access_debt_exempt_delta_mm: int = 750,
+        dead_headroom_weight: float = 0.0,
+        dead_headroom_min_mm: int = 250,
         tower_z_band_mm: int = 0,
         tower_z_penalty_weight: float = 0.0,
         spatial_xy_bin_mm: int = 150,
@@ -249,6 +256,9 @@ class PolicyPackerScheduler:
             access_debt_weight=access_debt_weight,
             access_debt_band_mm=access_debt_band_mm,
             access_debt_mode=access_debt_mode,
+            access_debt_exempt_delta_mm=access_debt_exempt_delta_mm,
+            dead_headroom_weight=dead_headroom_weight,
+            dead_headroom_min_mm=dead_headroom_min_mm,
             tower_z_band_mm=tower_z_band_mm,
             tower_z_penalty_weight=tower_z_penalty_weight,
             spatial_xy_bin_mm=spatial_xy_bin_mm,
@@ -300,6 +310,8 @@ class PolicyPackerScheduler:
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             accessibility_delta_mm=max(0, int(accessibility_delta_mm)),
+            accessibility_tall_box_exemption=accessibility_tall_box_exemption,
+            accessibility_top_clearance_mm=int(accessibility_top_clearance_mm),
             coverage_grid_x=max(0, int(coverage_grid_x)),
             coverage_grid_y=max(0, int(coverage_grid_y)),
             coverage_weight=max(0.0, float(coverage_weight)),
@@ -875,6 +887,7 @@ class PolicyPackerScheduler:
         )
 
         kpis["access_debt"] = self._scheduler.collect_access_debt_metrics()
+        kpis["dead_headroom"] = self._scheduler.collect_dead_headroom_metrics()
         kpis["score_mode"] = score_mode
         kpis["height_slack_mm"] = int(height_slack_mm)
         kpis["tower_z_penalty_weight"] = float(tower_z_penalty_weight)
@@ -1257,7 +1270,11 @@ class PolicyPackerScheduler:
                 loadbear_factor=self.config.loadbear_factor,
             ),
             balance=BalanceConfig(balance_weight=self.config.balance_weight),
-            accessibility=AccessibilityConfig(accessibility_delta_mm=self.config.accessibility_delta_mm),
+            accessibility=AccessibilityConfig(
+                accessibility_delta_mm=self.config.accessibility_delta_mm,
+                accessibility_tall_box_exemption=self.config.accessibility_tall_box_exemption,
+                accessibility_top_clearance_mm=self.config.accessibility_top_clearance_mm,
+            ),
         )
         return PalletModel(
             spec=self.config.pallet_spec,

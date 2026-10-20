@@ -49,10 +49,12 @@ def flat_zones(pallet: PalletModel):
     return sorted(zones, key=lambda r: (r[4], -r[2]*r[3], r[1], r[0]))
 
 
-def _accessible(pallet, x, y, length, width, z):
+def _accessible(pallet, x, y, length, width, z, height):
     delta = pallet.accessibility_delta_mm
     if delta <= 0:
         return True
+    if pallet.accessibility_tall_box_exemption:
+        delta = max(delta, height + pallet.accessibility_top_clearance_mm)
     # Same touching/overlapping footprint convention as production, at the
     # known flat local height z. No artificial gaps or expanded tolerances.
     return not any(
@@ -90,7 +92,7 @@ def visible_completion_potential(pallet: PalletModel, boxes: list[Box]) -> float
                 continue
             heights = [h for l,w,h in variants if l <= length and w <= width
                        and h <= capacity and any(
-                           _accessible(pallet, px, py, l, w, z)
+                           _accessible(pallet, px, py, l, w, z, h)
                            for px,py in ((x,y), (x+length-l,y),
                                          (x,y+width-w), (x+length-l,y+width-w)))]
             if heights:
