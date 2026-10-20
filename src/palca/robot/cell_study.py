@@ -121,6 +121,20 @@ class RobotModel:
     def label(self, i: int) -> str:
         return "garra" if i == len(self._names) else self._names[i]
 
+    # Interfaz común con otros robots (palca.robot.gantry.GantryModel) para evaluate_run.
+    home_q = (0, 0, 0, 0, -90, 0)
+
+    def solve(self, tcp, box, prefer) -> IKResult:
+        return solve(self.cell, tcp, box, prefer)
+
+    def entry_xy(self, placement) -> tuple[float, float]:
+        """Origen del pasillo de entrada: el brazo llega desde su base."""
+        return (self.cell.base_x, self.cell.base_y)
+
+    def entry_floor_z(self, placement) -> float:
+        """Altura mínima del TCP en la entrada por otros motivos (cinta, volteador...)."""
+        return -np.inf
+
 
 def first_hit(points, labels, boxes: np.ndarray, tol: float = 2.0):
     """Primer punto dentro de una caja (x0,y0,z0,x1,y1,z1), con tolerancia."""
@@ -260,11 +274,12 @@ def solve(cell: Cell, tcp, box, prefer) -> IKResult:
 
 def evaluate_run(model: RobotModel, placements: list[Placement], *, lateral_mm=20.0, clearance_mm=50.0,
                  descent_step_mm=150.0, keep_poses=False) -> list[PlacementResult]:
+    """model: RobotModel (brazo) u otro robot con la misma interfaz (solve, world_points,
+    label, entry_xy, entry_floor_z, home_q, cell.gripper), p. ej. GantryModel."""
     cell = model.cell
-    base_xy = (cell.base_x, cell.base_y)
     results = []
     prev_by_pallet: dict[int, list] = {}
-    q_prev = (0, 0, 0, 0, -90, 0)
+    q_prev = model.home_q
     for pl in placements:
         prev = prev_by_pallet.setdefault(pl.pallet, [])
         x, y, z, dx, dy, dz = pl.box
@@ -275,7 +290,8 @@ def evaluate_run(model: RobotModel, placements: list[Placement], *, lateral_mm=2
         gx, gy = cell.gripper.footprint
         long_x = dx >= dy
         half = (max(dx, gx if long_x else gy) / 2, max(dy, gy if long_x else gx) / 2)
-        lift = max(0.0, corridor_top(pre[:2], half, base_xy, prev) + clearance_mm + dz - final[2])
+        lift = max(0.0, corridor_top(pre[:2], half, model.entry_xy(pl), prev) + clearance_mm + dz - final[2])
+        lift = max(lift, model.entry_floor_z(pl) - final[2])
         zs = [final[2] + lift]
         while zs[-1] - descent_step_mm > final[2]:
             zs.append(zs[-1] - descent_step_mm)
@@ -286,7 +302,7 @@ def evaluate_run(model: RobotModel, placements: list[Placement], *, lateral_mm=2
         checks, reason, other, margins = [], None, None, []
         q = q_prev
         for kind, tcp in poses:
-            r = solve(cell, tcp, pl.box, q)
+            r = model.solve(tcp, pl.box, q)
             pc = PoseCheck(kind, tuple(np.round(tcp, 1)), None if r.q is None else tuple(round(v, 3) for v in r.q))
             if r.q is None or r.reason:
                 pc.reason = "alcance:" + (r.reason or "?")

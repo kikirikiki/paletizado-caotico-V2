@@ -403,6 +403,10 @@ def attach_robot(runs: list[dict], study_path: Path) -> int:
         run["robot"] = dict(model=study["robot"], cell=study["cell"], gripper=study["gripper"],
                             conveyor=study["conveyor"], n_ok=n_ok, n=len(res["results"]),
                             pick_index_hist=study.get("pick_index_hist"), steps=steps)
+        if study.get("type") == "gantry":  # gantry_reach_study.py: estructura, carreras y tiempos
+            run["robot"].update(type="gantry", gantry=study["gantry"], dynamics=study.get("dynamics"),
+                                summary=study.get("summary", {}).get(run.get("config")),
+                                structure_checks=study.get("structure_checks"))
         attached += 1
     return attached
 
@@ -445,7 +449,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, help="JSON de salida (por defecto out/sim3d/<nombre>.json)")
     parser.add_argument("--html", type=Path, help="Genera además el visor autocontenido con el JSON incrustado")
     parser.add_argument("--workdir", type=Path, help="Carpeta para run.json/dump.json (por defecto temporal)")
-    parser.add_argument("--robot-study", type=Path, help="study.json de robot_reach_study.py: añade robot y ciclos")
+    parser.add_argument("--robot-study", type=Path,
+                        help="study.json de robot_reach_study.py o gantry_reach_study.py: añade robot y ciclos")
     parser.add_argument("--robot-mesh", type=Path, help="Mallas del robot (step_to_robot_mesh.py) para el HTML")
     return parser
 
