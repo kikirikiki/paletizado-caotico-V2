@@ -386,7 +386,28 @@ def synthetic_run(stress: int = 0) -> dict:
 
 # --------------------------------------------------------------------------- salida
 
-def render_html(trace: dict, out: Path) -> None:
+def attach_robot(runs: list[dict], study_path: Path) -> int:
+    """Añade a cada run el resultado del estudio del robot (robot_reach_study.py) de su seed."""
+    study = json.loads(Path(study_path).read_text(encoding="utf-8"))
+    by_key = {(r["config"], r["seed"]): r for r in study["runs"]}
+    attached = 0
+    for run in runs:
+        res = by_key.get((run.get("config"), run.get("seed")))
+        if res is None:
+            continue
+        steps = {}
+        for r in res["results"]:
+            steps[r["step"]] = {k: r[k] for k in ("ok", "reason", "approach", "entry_lift_mm", "min_margin_deg",
+                                                  "gripper_fits", "poses", "cycle")}
+        n_ok = sum(1 for r in res["results"] if r["ok"])
+        run["robot"] = dict(model=study["robot"], cell=study["cell"], gripper=study["gripper"],
+                            conveyor=study["conveyor"], n_ok=n_ok, n=len(res["results"]),
+                            pick_index_hist=study.get("pick_index_hist"), steps=steps)
+        attached += 1
+    return attached
+
+
+def render_html(trace: dict, out: Path, robot_mesh: Path | None = None) -> None:
     html = TEMPLATE.read_text(encoding="utf-8")
 
     def inline(match: re.Match) -> str:
@@ -400,6 +421,10 @@ def render_html(trace: dict, out: Path) -> None:
     if marker not in html:
         raise SystemExit("La plantilla no contiene el marcador de datos")
     html = html.replace(marker, f'<script id="sim-data" type="application/json">{data}</script>')
+    if robot_mesh is not None:
+        mesh = Path(robot_mesh).read_text(encoding="utf-8").replace("</", "<\\/")
+        mesh_marker = '<script id="robot-mesh" type="application/json">null</script>'
+        html = html.replace(mesh_marker, f'<script id="robot-mesh" type="application/json">{mesh}</script>')
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
 
@@ -420,6 +445,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, help="JSON de salida (por defecto out/sim3d/<nombre>.json)")
     parser.add_argument("--html", type=Path, help="Genera además el visor autocontenido con el JSON incrustado")
     parser.add_argument("--workdir", type=Path, help="Carpeta para run.json/dump.json (por defecto temporal)")
+    parser.add_argument("--robot-study", type=Path, help="study.json de robot_reach_study.py: añade robot y ciclos")
+    parser.add_argument("--robot-mesh", type=Path, help="Mallas del robot (step_to_robot_mesh.py) para el HTML")
     return parser
 
 
@@ -447,6 +474,8 @@ def main(argv=None) -> None:
         runs.append(synthetic_run(stress=args.stress))
     if not runs:
         raise SystemExit("Nada que exportar")
+    if args.robot_study:
+        print(f"[sim3d] robot añadido a {attach_robot(runs, args.robot_study)} ejecuciones", flush=True)
     trace = dict(schema=SCHEMA, generated_at=datetime.now(timezone.utc).isoformat(),
                  conventions=("mm; origen esquina del palet nominal; z vertical desde la cara superior del palet; "
                               "x,y,z = esquina mínima; dx,dy,dz = dimensiones colocadas (x,y,z)"),
@@ -457,7 +486,7 @@ def main(argv=None) -> None:
     out.write_text(json.dumps(trace, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"[sim3d] JSON: {out}", flush=True)
     if args.html:
-        render_html(trace, args.html)
+        render_html(trace, args.html, args.robot_mesh)
         print(f"[sim3d] HTML: {args.html}", flush=True)
     for run in runs:
         kpi = run["kpi"].get("kpi")

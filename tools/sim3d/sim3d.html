@@ -89,6 +89,7 @@ footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
 <script src="checks.js"></script>
+<script src="robot.js"></script>
 </head>
 <body>
 <div id="app">
@@ -118,6 +119,7 @@ footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
     <aside>
       <section id="secStep"></section>
       <section id="secBox"></section>
+      <section id="secRobot" hidden></section>
       <section id="secSel" hidden></section>
       <section><h2>Cinta (cajas visibles)</h2><div id="belt"></div></section>
       <section><h2>Avisos de viabilidad</h2><div id="warnSummary"></div><ul class="wl" id="warnList"></ul></section>
@@ -134,6 +136,11 @@ footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
         <label><input type="checkbox" id="optWarn" checked> Marcar en rojo las cajas con aviso</label>
         <label><input type="checkbox" id="optApproach"> Bajada con aproximación lateral</label>
         <label><input type="checkbox" id="optShadows" checked> Sombras</label>
+        <div id="robotOpts" hidden>
+          <label><input type="checkbox" id="optRobot" checked> Robot, pedestal y cinta</label>
+          <label><input type="checkbox" id="optRobotAnim" checked> Animar el ciclo completo del robot</label>
+          <label><input type="checkbox" id="optRobotChecks" checked> Avisos de alcance y colisión del robot</label>
+        </div>
         <div class="grid2">
           <span>Duración bajada (s)</span><input type="number" id="optDur" min="0.2" max="3" step="0.1" value="0.8">
           <span>Altura de entrada sobre el palet (mm)</span><input type="number" id="optLift" min="50" max="1000" step="50" value="300">
@@ -169,6 +176,7 @@ footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
   </footer>
 </div>
 <script id="sim-data" type="application/json">null</script>
+<script id="robot-mesh" type="application/json">null</script>
 <script>
 (function () {
 'use strict';
@@ -185,7 +193,7 @@ var S = {
   data: null, run: null, runIdx: 0, pallet: 0, seq: [], k: 0, checks: null, colors: {}, byStep: {},
   meshes: new Map(), anim: null, playing: false, nextPlayAt: 0, selected: null, runChecksCache: {},
   opts: { colorMode: 'unique', labels: true, translucent: false, warn: true, approach: false, shadows: true,
-          durS: 0.8, liftMm: 300, apprMm: 20, playSpeed: 1 },
+          durS: 0.8, liftMm: 300, apprMm: 20, playSpeed: 1, robot: true, robotAnim: true, robotChecks: true },
   th: { minSupportPct: 70, accessDeltaMm: 400, towerRatio: 3, towerBraceGapMm: 50, tolMm: 1 }
 };
 window.__sim = S;
@@ -420,6 +428,8 @@ function applyState() {
     var e = ensureMesh(s), isCur = cur && s.step === cur.step;
     e.mesh.visible = true;
     e.mesh.position.copy(finalCenter(s));
+    e.mesh.quaternion.identity();
+    e.mesh.scale.set(s.dx, s.dy, s.dz);
     var w = S.checks.perStep[s.step] || [];
     var hasErr = S.opts.warn && w.length > 0;
     var faded = S.opts.translucent && !isCur;
@@ -438,7 +448,101 @@ function applyState() {
   var selS = S.selected != null && set.has(S.selected) ? S.byStep[S.selected] : null;
   if (selS) { sel.visible = true; sel.position.copy(finalCenter(selS)); sel.scale.set(selS.dx + 14, selS.dy + 14, selS.dz + 14); }
   else sel.visible = false;
+  robotRest();
   renderPanels();
+}
+
+// ------------------------------------------------------------------ robot
+var HOME_Q = [0, 0, 0, 0, -90, 0];
+function robotStep(s) { return s && S.run.robot && S.run.robot.steps ? S.run.robot.steps[s.step] : null; }
+function robotOn() { return !!(S.robot && S.opts.robot); }
+function m4(rows) { var m = new THREE.Matrix4(); m.set.apply(m, [].concat.apply([], rows)); return m; }
+/* Pose determinista del robot en el estado k: última pose del ciclo, o la pose que falla. */
+function robotRest() {
+  if (!S.robot) return;
+  S.robot.setVisible(S.opts.robot);
+  var cur = currentStep(), rs = robotStep(cur), q = HOME_Q, bad = null;
+  if (rs) {
+    var failing = (rs.poses || []).find(function (p) { return p.reason; });
+    if (failing && failing.q) { q = failing.q; var m = /colision:(\w+)/.exec(failing.reason || ''); bad = m ? m[1] : null; }
+    else if (rs.cycle && rs.cycle.waypoints.length) q = rs.cycle.waypoints[rs.cycle.waypoints.length - 1].q;
+  }
+  S.robot.setQ(q, bad);
+  renderQueue();
+}
+var queuePool = [];
+/* Cola de 15 cajas visibles para la próxima decisión, aguas arriba de la estación de
+ * recogida (la elegida, en amarillo, la tiene que llevar la cinta hasta la estación). */
+function renderQueue() {
+  queuePool.forEach(function (m) { m.visible = false; });
+  if (!S.robot || !S.robot.conveyor || !S.opts.robot) return;
+  var animating = S.anim && S.anim.type === 'robot';
+  var nxt = animating ? S.anim.step : S.k < S.seq.length ? S.run.steps[S.seq[S.k]] : null;
+  if (!nxt || !nxt.conveyor) return;
+  var cv = S.robot.conveyor, s = 450;
+  nxt.conveyor.forEach(function (b, i) {
+    var L = b.lwh[0], W = b.lwh[1], H = b.lwh[2];
+    s += W / 2 + 15;
+    var m = queuePool[i];
+    if (!m) {
+      m = new THREE.Mesh(UNIT, new THREE.MeshStandardMaterial({ color: 0xd9c7a3, roughness: 0.9 }));
+      m.add(new THREE.LineSegments(UNIT_EDGES, new THREE.LineBasicMaterial({ color: 0x333333 })));
+      m.castShadow = true; scene.add(m); queuePool[i] = m;
+    }
+    var hide = animating && i === nxt.chosen_index;
+    m.visible = !hide;
+    m.material.color.set(i === nxt.chosen_index ? 0xffd166 : 0xd9c7a3);
+    m.matrixAutoUpdate = false;
+    var basis = new THREE.Matrix4().makeBasis(cv.u, cv.t, new THREE.Vector3(0, 0, 1));
+    var pos = cv.point.clone().addScaledVector(cv.t, -s).add(new THREE.Vector3(0, 0, H / 2));
+    m.matrix.copy(basis).setPosition(pos).multiply(new THREE.Matrix4().makeScale(L, W, H));
+    s += W / 2;
+  });
+}
+function startRobotAnim(s, dir) {
+  var rs = robotStep(s);
+  if (!rs || !rs.cycle || !rs.cycle.waypoints.length || !rs.cycle.box_rel || !S.opts.robotAnim) return false;
+  var wps = rs.cycle.waypoints, idx = S.seq.indexOf(S.run.steps.indexOf(s));
+  var prevS = idx > 0 ? S.run.steps[S.seq[idx - 1]] : null, prs = robotStep(prevS);
+  var restPrev = prs && prs.cycle && prs.cycle.waypoints.length ? prs.cycle.waypoints[prs.cycle.waypoints.length - 1].q : HOME_Q;
+  var qs = [restPrev].concat(wps.map(function (w) { return w.q; }));
+  var kinds = ['reposo'].concat(wps.map(function (w) { return w.kind; }));
+  var att = [false].concat(wps.map(function (w) { return w.attached && w.kind !== 'final'; }));
+  var speed = 140 * (0.8 / Math.max(0.1, S.opts.durS)); // grados/s de la articulación más lenta
+  var dur = [];
+  for (var i = 0; i + 1 < qs.length; i++) {
+    var d = 0; for (var j = 0; j < 6; j++) d = Math.max(d, Math.abs(qs[i + 1][j] - qs[i][j]));
+    dur.push(Math.max(140, 1000 * d / speed) * (/bajada|aproximacion|final/.test(kinds[i + 1]) ? 1.6 : 1));
+  }
+  var e = ensureMesh(s);
+  var finalIdx = kinds.indexOf('final');
+  var qFinal = finalIdx >= 0 ? qs[finalIdx] : qs[qs.length - 1];
+  var rel = m4(rs.cycle.box_rel);
+  var bFinal = S.robot.toolWorld(qFinal).multiply(rel);
+  var mFinal = new THREE.Matrix4().compose(finalCenter(s), new THREE.Quaternion(), new THREE.Vector3(s.dx, s.dy, s.dz));
+  var X = bFinal.clone().invert().multiply(mFinal);
+  var conv = rs.cycle.box_conveyor ? m4(rs.cycle.box_conveyor).multiply(X) : mFinal;
+  S.anim = { type: 'robot', step: s, e: e, qs: qs, dur: dur, att: att, kinds: kinds, rel: rel, X: X, conv: conv, mFinal: mFinal,
+             dir: dir, total: dur.reduce(function (a, b) { return a + b; }, 0), t0: performance.now() };
+  e.mesh.visible = true;
+  renderQueue();
+  stepAnim(S.anim.t0);
+  return true;
+}
+function setBoxMatrix(mesh, m) { m.decompose(mesh.position, mesh.quaternion, mesh.scale); }
+/* El ciclo se define hacia delante; hacia atrás se recorre con el tiempo invertido. */
+function stepRobotAnim(a, t) {
+  if (a.dir < 0) t = a.total - t;
+  var i = 0;
+  while (i < a.dur.length - 1 && t > a.dur[i]) { t -= a.dur[i]; i++; }
+  var u = ease(Math.max(0, Math.min(1, t / a.dur[i]))), q = [];
+  for (var j = 0; j < 6; j++) q.push(a.qs[i][j] + (a.qs[i + 1][j] - a.qs[i][j]) * u);
+  S.robot.setQ(q);
+  // Caja: en la cinta antes de cogerla, pegada a la garra después y en su sitio al soltarla.
+  var released = a.kinds.slice(0, i + 1).indexOf('final') >= 0;
+  if (a.att[i]) setBoxMatrix(a.e.mesh, S.robot.toolWorld(q).multiply(a.rel).multiply(a.X));
+  else if (released) setBoxMatrix(a.e.mesh, a.mFinal);
+  else setBoxMatrix(a.e.mesh, a.conv);
 }
 
 // ------------------------------------------------------------------ animación (solo visual)
@@ -463,6 +567,7 @@ function descentPath(s) {
   return { pts: [new THREE.Vector3(c.x, c.y, zStart), c], dur: [D] };
 }
 function startAnim(s, dir) {
+  if (robotOn() && startRobotAnim(s, dir)) return;
   var e = ensureMesh(s), p = descentPath(s);
   var pts = dir > 0 ? p.pts : p.pts.slice().reverse(), dur = dir > 0 ? p.dur : p.dur.slice().reverse();
   e.mesh.visible = true;
@@ -474,6 +579,7 @@ function stepAnim(now) {
   var a = S.anim; if (!a) return;
   var t = now - a.t0;
   if (t >= a.total) { finishAnim(); return; }
+  if (a.type === 'robot') { stepRobotAnim(a, t); return; }
   for (var i = 0; i < a.dur.length; i++) {
     if (t <= a.dur[i]) { a.e.mesh.position.lerpVectors(a.pts[i], a.pts[i + 1], ease(t / a.dur[i])); return; }
     t -= a.dur[i];
@@ -587,6 +693,7 @@ function renderPanels() {
   }
   $('secStep').innerHTML = h;
   $('secBox').innerHTML = card(cur, 'Caja actual');
+  renderRobotPanel(cur);
   var selS = S.selected != null ? S.byStep[S.selected] : null;
   $('secSel').hidden = !selS || (cur && selS.step === cur.step);
   if (selS) $('secSel').innerHTML = card(selS, 'Caja seleccionada');
@@ -615,6 +722,40 @@ function renderPanels() {
   if (document.activeElement !== $('goto')) $('goto').value = S.k;
   $('goto').max = N;
 }
+var SIDE_ES = { '-X': 'izquierda (−X)', '+X': 'derecha (+X)', '-Y': 'delante (−Y)', '+Y': 'detrás (+Y)' };
+function renderRobotPanel(cur) {
+  var sec = $('secRobot'), R = S.run.robot;
+  sec.hidden = !S.robot;
+  if (!S.robot) return;
+  var c = R.cell, cv = R.conveyor, rs = robotStep(cur);
+  var h = '<h2>Robot ' + esc(R.model) + '</h2><div class="kv">' +
+    '<span class="k">Base (J1)</span><span class="v">x ' + fmt(c.base_x) + ', y ' + fmt(c.base_y) + ' mm · ' + esc(c.side_label) + '</span>' +
+    '<span class="k">Distancia</span><span class="v">' + fmt(c.dist_from_envelope_mm) + ' mm del borde de la envolvente</span>' +
+    '<span class="k">Pedestal</span><span class="v">' + fmt(c.pedestal_mm) + ' mm (J2 a ' + fmt(c.pedestal_mm + 670) + ' mm del suelo)</span>' +
+    (cv ? '<span class="k">Cinta</span><span class="v">recogida a ' + fmt(cv.radius) + ' mm de J1, ' + fmt(cv.angle) + '° respecto al palet, superficie a ' +
+      fmt(cv.height_mm || (cv.z_conveyor + 144)) + ' mm; alcance a lo largo ±' + fmt(cv.reach_along_mm.downstream) + ' mm</span>' : '') +
+    '<span class="k">Colocaciones viables</span><span class="v ' + (R.n_ok === R.n ? 'ok' : 'warn') + '"><b>' + R.n_ok + ' / ' + R.n + '</b> (' + pct(R.n_ok / R.n, 1) + ')</span>' +
+    '</div>';
+  if (cur && rs) {
+    var fin = (rs.poses || []).find(function (p) { return p.kind === 'final'; });
+    var dir = rs.approach ? (rs.approach[0] < 0 ? '-X' : rs.approach[0] > 0 ? '+X' : rs.approach[1] < 0 ? '-Y' : '+Y') : null;
+    h += '<div class="kv" style="margin-top:6px">' +
+      '<span class="k">Esta caja</span><span class="v ' + (rs.ok ? 'ok' : 'err') + '"><b>' + (rs.ok ? 'viable' : 'NO viable') + '</b></span>' +
+      '<span class="k">Bajada</span><span class="v">' + (dir ? 'desplazada 20 mm por ' + SIDE_ES[dir] : 'cenital (sin lateral libre)') + '</span>' +
+      '<span class="k">Elevación de entrada</span><span class="v">' + fmt(rs.entry_lift_mm) + ' mm sobre la posición final</span>' +
+      (fin && fin.q ? '<span class="k">J1…J6 final</span><span class="v">' + fin.q.map(function (v) { return fmt(v, 0) + '°'; }).join(' ') + '</span>' : '') +
+      (rs.min_margin_deg != null ? '<span class="k">Margen a límites</span><span class="v">' + fmt(rs.min_margin_deg, 1) + '°</span>' : '') +
+      (cur.chosen_index != null ? '<span class="k">Cinta</span><span class="v">elegida la n.º ' + (cur.chosen_index + 1) + ' de la cola' + '</span>' : '') +
+      '</div>';
+  }
+  sec.innerHTML = h;
+}
+function updateShadowCamera() {
+  var sc = sun.shadow.camera, r = S.robot ? 3600 : 1700;
+  sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.far = S.robot ? 14000 : 9000;
+  if (S.robot) { sun.target.position.set((600 + S.robot.cell.base_x) / 2, (400 + S.robot.cell.base_y) / 2, 0); sun.position.set(sun.target.position.x - 2500, sun.target.position.y - 3500, 5200); }
+  sc.updateProjectionMatrix();
+}
 function renderRunInfo() {
   var r = S.run, v = r.verify || {};
   var h = '<h2>Ejecución</h2><div class="kv">' +
@@ -632,9 +773,35 @@ function renderRunInfo() {
   $('secRun').innerHTML = h;
 }
 function runChecks(i) {
-  var key = i + '|' + JSON.stringify(S.th);
-  if (!S.runChecksCache[key]) { var r = S.data.runs[i]; S.runChecksCache[key] = C.computeChecks(r.steps, r.envelope, S.th); }
+  var key = i + '|' + JSON.stringify(S.th) + '|' + S.opts.robotChecks;
+  if (!S.runChecksCache[key]) {
+    var r = S.data.runs[i], res = C.computeChecks(r.steps, r.envelope, S.th);
+    if (r.robot && S.opts.robotChecks) addRobotChecks(r, res);
+    S.runChecksCache[key] = res;
+  }
   return S.runChecksCache[key];
+}
+var POSE_ES = { entrada: 'entrada sobre el pasillo', bajada: 'bajada', aproximacion: 'aproximación lateral', final: 'posición final' };
+/* Avisos del estudio del robot (alcance, límites y colisiones), en la misma lista. */
+function addRobotChecks(run, res) {
+  run.steps.forEach(function (s) {
+    var rs = run.robot.steps[s.step]; if (!rs) return;
+    var found = [];
+    if (!rs.ok && rs.reason) {
+      var m = /^(\w+):(alcance|colision):([\w_]+)(?:\(paso (\d+)\))?/.exec(rs.reason) || [];
+      var what = m[2] === 'colision' ? 'choca ' + ({ caja_transportada: 'la caja transportada', garra: 'la garra' }[m[3]] || 'el eslabón ' + (m[3] || '?').toUpperCase()) +
+        (m[4] ? ' con la caja del paso ' + m[4] : ' con el palet') : 'fuera de alcance (' + (m[3] || '?').replace(/_/g, ' ') + ')';
+      found.push({ code: 'robot', severity: 'error', label: 'Robot', msg: 'En la ' + (POSE_ES[m[1]] || m[1]) + ': ' + what, other: m[4] ? +m[4] : null });
+    }
+    if (rs.cycle && rs.cycle.pick_ok === false) found.push({ code: 'robot_pick', severity: 'error', label: 'Recogida', msg: 'El robot no alcanza la recogida en la cinta con esta orientación' });
+    if (rs.gripper_fits === false) found.push({ code: 'gripper_fit', severity: 'warn', label: 'Ventosas', msg: 'Las 4 ventosas no caben en la cara de agarre' });
+    found.forEach(function (w) { w.step = s.step; w.pallet = s.pallet; w.box_id = s.box_id; });
+    if (found.length) {
+      res.perStep[s.step] = (res.perStep[s.step] || []).concat(found);
+      res.list = res.list.concat(found);
+    }
+  });
+  res.list.sort(function (a, b) { return a.step - b.step; });
 }
 function renderRuns() {
   var h = '<table class="runs"><tr><th>Ejecución</th><th>KPI</th><th>Palets</th><th>Cajas</th><th>Avisos</th></tr>';
@@ -663,6 +830,10 @@ function selectRun(i) {
   S.colors = computeColors(S.run.steps);
   S.checks = runChecks(i);
   buildStatic(S.run.envelope, S.run.pallet_nominal || { length: 1200, width: 800 });
+  if (S.robot) { S.robot.dispose(scene); S.robot = null; }
+  if (S.run.robot && window.Sim3DRobot) S.robot = new Sim3DRobot.Robot(scene, S.run.robot, ROBOT_MESH);
+  $('robotOpts').hidden = !S.robot;
+  updateShadowCamera();
   $('runSel').value = String(i);
   $('palSel').innerHTML = '<option value="0">Secuencia global</option>' + S.run.pallets.map(function (p) {
     return '<option value="' + p.index + '">Palet ' + p.index + ' · ' + p.n_boxes + ' cajas · ' + pct(p.util, 1) + ' · ' + esc(p.closure_reason) + '</option>';
@@ -689,8 +860,17 @@ var CAMS = { iso: [-1, -1.25, 0.95], top: [0, -0.0001, 1], front: [0, -1, 0.08],
 function setCam(name) {
   var env = S.run ? S.run.envelope : { x0: -20, y0: -20, x1: 1220, y1: 820, z1: 2400 };
   var target = new THREE.Vector3((env.x0 + env.x1) / 2, (env.y0 + env.y1) / 2, name === 'top' ? 0 : 900);
+  var k = 1;
+  if (S.robot && S.opts.robot) {  // encuadra palet, robot y cinta
+    var c = S.robot.cell, cv = S.run.robot.conveyor;
+    var pts = [[env.x0, env.y0], [env.x1, env.y1], [c.base_x, c.base_y]].concat(cv ? [cv.point.slice(0, 2)] : []);
+    var xs = pts.map(function (p) { return p[0]; }), ys = pts.map(function (p) { return p[1]; });
+    target.x = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2;
+    target.y = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
+    k = Math.max(1, Math.hypot(Math.max.apply(null, xs) - Math.min.apply(null, xs), Math.max.apply(null, ys) - Math.min.apply(null, ys)) / 1500);
+  }
   var d = new THREE.Vector3().fromArray(CAMS[name]).normalize();
-  var dist = name === 'top' ? 4300 : name === 'iso' ? 5200 : 5000;
+  var dist = k * (name === 'top' ? 4300 : name === 'iso' ? 5200 : 5000);
   camera.position.copy(target).addScaledVector(d, dist);
   controls.target.copy(target);
   camera.lookAt(target);
@@ -759,6 +939,9 @@ $('optLabels').onchange = function () { S.opts.labels = this.checked; finishAnim
 $('optTrans').onchange = function () { S.opts.translucent = this.checked; finishAnim(); applyState(); };
 $('optWarn').onchange = function () { S.opts.warn = this.checked; finishAnim(); applyState(); };
 $('optApproach').onchange = function () { S.opts.approach = this.checked; };
+$('optRobot').onchange = function () { S.opts.robot = this.checked; finishAnim(); applyState(); };
+$('optRobotAnim').onchange = function () { S.opts.robotAnim = this.checked; };
+$('optRobotChecks').onchange = function () { S.opts.robotChecks = this.checked; recheck(); };
 $('optShadows').onchange = function () { S.opts.shadows = this.checked; renderer.shadowMap.enabled = this.checked; sun.castShadow = this.checked;
   scene.traverse(function (o) { if (o.material) o.material.needsUpdate = true; }); };
 $('optDur').onchange = function () { S.opts.durS = Math.max(0, +this.value || 0); };
@@ -804,6 +987,8 @@ function loop(now) {
 resize();
 setCam('iso');
 renderLegend();
+var ROBOT_MESH = null;
+try { ROBOT_MESH = JSON.parse($('robot-mesh').textContent); } catch (e) { ROBOT_MESH = null; }
 var embedded = null;
 try { embedded = JSON.parse($('sim-data').textContent); } catch (e) { embedded = null; }
 if (embedded) loadData(embedded);
@@ -813,6 +998,7 @@ requestAnimationFrame(loop);
 // API mínima para pruebas automáticas.
 S.api = { next: next, prev: prev, setK: setK, finishAnim: finishAnim, setPallet: setPallet, selectRun: selectRun,
           gotoStepNumber: gotoStepNumber, loadData: loadData, visibleSteps: visibleSteps, setCam: setCam,
+          view: function (pos, target) { camera.position.fromArray(pos); controls.target.fromArray(target); controls.update(); },
           // Avanza la animación con un reloj simulado (para pruebas con la pestaña en segundo plano).
           tick: function (now) { stepAnim(now); },
           // ms por frame de render síncrono (readPixels fuerza a esperar a la GPU).
