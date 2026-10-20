@@ -1,0 +1,55 @@
+# Ajuste del presupuesto de nodos de H6 sin gate para cumplir D-007 (media <= 1 s). Director (D-011), seeds de ajuste.
+- name: sg_B35
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 35
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout
+    micro_plan_rollout_leaves: 2
+    rollout_future_boxes: 6
+    rollout_future_samples: 1
+    rollout_prior: generic
+    stand_hw_height_margin_gate_mm: 2400
+- name: sg_B45
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 45
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout
+    micro_plan_rollout_leaves: 2
+    rollout_future_boxes: 6
+    rollout_future_samples: 1
+    rollout_prior: generic
+    stand_hw_height_margin_gate_mm: 2400
+- name: sg_B57
+  preset: arm6_4orient
+  role: control
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 57
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout
+    micro_plan_rollout_leaves: 2
+    rollout_future_boxes: 6
+    rollout_future_samples: 1
+    rollout_prior: generic
+    stand_hw_height_margin_gate_mm: 2400

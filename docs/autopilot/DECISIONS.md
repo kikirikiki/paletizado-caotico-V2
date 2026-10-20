@@ -137,6 +137,8 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   se recalculan al alza.
 - Justificación: usar el techo más alto hace las metas más exigentes (criterio conservador); la validez de un testigo no depende
   de cómo se generó.
+- **Actualización (2026-10-17):** con plantillas contiguas (`--column-gap-mm 0`, sin el resquicio de 2 mm) el método de columnas llega a
+  **81,449 %** (reproducible con un comando, verificado). Metas vigentes: gap 19,56 pp, **T1 ≥ 71,67 %**, **T2 ≥ 79,49 %**, T3 ≥ 92,84 %.
 
 ## D-014 · Commits con smoke fallido por lock de sweeps ocupado (2026-10-16)
 - Contexto: acd5bda y 956f527 (feat/cotas-superiores) se commitearon con dos tests de `test_run_sweep.py` en rojo, porque el
@@ -145,6 +147,24 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Opción: se re-ejecuta el smoke de esa rama cuando el lock quede libre y el resultado se anota en PROGRESS. Los scripts de commit
   pasan a `smoke || exit 1`. La rama de H1 ya añade reintentos de lock a esos tests (no hay regresión de código).
 - Justificación: transparencia sobre la regla "smoke antes de cada commit".
+
+## D-019 · Ciclo de pensamiento lateral n.º 1 (2026-10-17)
+- Contexto: tras H6 (74,03 %), H7 no aporta y el análisis indica que, con las restricciones oficiales, `arm6_4orient` está cerca de su
+  techo práctico: la franja trasera de 395 mm (y ≥ 425) solo se llena con cajas de pie (la política ya manda allí el 81 % de las de pie
+  y el 76 % de las estrechas), y el gate las retrasa. El techo offline (81,45 %) planifica columnas completas con información total.
+  No se ha llegado aún a 3 técnicas seguidas < 0,5 pp (contador: 1), pero el ciclo se adelanta para no gastar cuota en variantes.
+- Reformulaciones (ganancia esperada / coste / viabilidad física, 1–5):
+  | # | Reformulación | Gan. | Coste | Viab. | Nota |
+  |---|---|---|---|---|---|
+  | R1 | Palets por familia con 2 posiciones (palet de familia dominante + palet mixto) | 3 | 4 | 4 | palanca (2.ª posición); N>1 hoy incompatible con la búsqueda |
+  | R2 | Quitar el gate stand_hw (franja trasera con cajas de pie desde el suelo) | 3 (+3,0 medido) | 1 | ? | pendiente del responsable (D-018) |
+  | R3 | Zona de staging (aparcar cajas para colocarlas después) | 1–2 | 3 | 2 | con búsqueda, más buffer apenas aporta (k30/k75 n.s.) |
+  | R4 | **Secuenciación aguas arriba** (el almacén entrega las cajas agrupadas por familia/altura en ventanas) | 4 | 2 | 3 | palanca operativa: acerca el problema online al offline (81,45 %) |
+  | R5 | Cambiar qué se optimiza: palet "de residuos" que acumula los inencajables hasta el final | 2 | 2 | 3 | sesga el KPI (el último palet no cuenta): solo con métrica de flujo, no se adopta |
+  | R6 | Valor aprendido (PCT/DRL) para los rollouts | 2–3 | 5 | 5 | solo si lo heurístico se estanca de verdad |
+- Opción: atacar R4 (mayor ganancia/coste) como palanca operativa cuantificada: ordenar el flujo de llegada dentro de ventanas de W cajas
+  según una clave (familia, altura) y medir H6 con W ∈ {15, 30, 60, 186}. Después, R1 si queda cuota. R2 depende del responsable.
+- Justificación: protocolo anti-estancamiento §5 y prioridad por ganancia/coste.
 
 ## D-018 · El gate stand_hw es la palanca de software más potente restante: se reporta aparte (2026-10-17)
 - Contexto: el prompt lista `stand_hw_height_margin_gate_mm=400` entre las "restricciones físicas" (§2), aunque §7 no lo menciona entre
@@ -197,3 +217,38 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - **[REVISAR — prioridad alta]** ¿Qué holgura lateral necesita realmente la garra? Si la regla física debe considerar vecinas a
   pocos centímetros, el baseline, las técnicas y el techo offline cambian (el techo, previsiblemente, mucho). Con la respuesta
   se puede fijar `adjacency_gap_mm` y re-medir todo con el mismo método.
+
+## D-020 · Pausa por uso semanal de Claude ≥ 60 % (instrucción del usuario, 2026-10-17)
+- Contexto: el usuario pide que, si el uso semanal de Claude llega al 60 %, el autopiloto se pause hasta que él diga que continúe.
+  Uso al recibir la instrucción: 41 % ("Weekly · all models", reinicio el 2026-10-21 a las 12:00 CEST).
+- Opción: comprobar `mcp__ccd_session_mgmt__get_usage` al reanudar y antes de cada delegación a Codex, sweep o tarea larga. Al llegar
+  al 60 %: no lanzar trabajo nuevo, dejar terminar lo que ya corre (y revisarlo/commitearlo solo si el usuario lo autoriza), dejar el
+  estado escrito en PROGRESS.md y avisar al usuario. No se escribe `PARADA:` (reservada a las condiciones de §9).
+- Justificación: instrucción explícita del usuario; prevalece sobre el modo autopiloto.
+
+## D-021 · Gate stand_hw eliminado por indicación del usuario (2026-10-17)
+- Respuesta del usuario a D-018: el gate de 400 mm era una regla para evitar torres; si anulándolo no se hacen torres, se elimina.
+- Comprobación (H1+H3+H5+H6, 10 seeds de referencia, autopsia de palets cerrados): sin gate hay MENOS torres. Espacio libre sobre el
+  perfil 23,7 % → 20,7 %; altura media de la superficie 1831 → 1902 mm; suelo sin cubrir 10,2 % → 7,8 %; fracción > 400 mm bajo el
+  máximo 28,6 % → 28,1 %; peor palet 59,1 % → 65,5 %; cierres por estabilidad 6 → 1.
+- Opción: la configuración oficial pasa a stand_hw_height_margin_gate_mm=2400 (sin gate). El preset rm6_4orient y el baseline
+  congelado (61,89 %) no cambian: el gate se quita como override de la mejor configuración. Réplica en las 20 seeds de D-016 en curso.
+
+## D-022 · D-012 resuelto: el robot solo ve las 15 cajas de la cinta (2026-10-17)
+- Respuesta del usuario: el robot solo ve lo que está en la cinta (15 cajas), no el Excel completo.
+- Comprobación en código: el micro_plan original (y H3, micro_plan_value=score) rellena la cinta simulada con cajas reales de
+  upstream (scheduler_v1 líneas ~1286–1292): mira cajas que aún no han llegado. H5 y H6 (micro_plan_value ≠ score) congelan la
+  ventana visible y nunca usan upstream (líneas ~710–715); H6 usa cajas futuras sintéticas de un prior genérico.
+- Test de fuga (flujo idéntico hasta la fila 100 y permutado después): H6 toma decisiones idénticas hasta el paso 86, exactamente
+  cuando la primera caja cambiada entra en la cinta → **H6 solo usa información visible**.
+- Opción: H5/H6 cuentan para las metas sin condición. H3 sola y la palanca micro_plan por tiempo quedan marcadas como "con fuga" y
+  no se usan. Cualquier técnica futura debe pasar el mismo test de fuga (decisiones idénticas mientras las cajas cambiadas no estén
+  en la cinta).
+
+## D-023 · Holgura lateral de la garra: interpretación pendiente de confirmar (2026-10-17)
+- Respuesta del usuario a D-015: "basta con que no se toquen, pero si se dejan 2 cm de margen de maniobra para que al bajar con la
+  caja no se golpee con la caja ya posicionada, es suficiente"; y la regla de los 400 mm tiene que ver con el margen en Z para que el
+  brazo (la parte que queda por encima de las cajas) no golpee.
+- Interpretación provisional: la regla de los 400 mm (margen en Z del brazo) se mantiene tal cual. Queda por confirmar si debe haber
+  ~2 cm de hueco lateral entre la caja que se baja y sus vecinas (lo que cambiaría todas las cifras, porque hoy el simulador coloca las
+  cajas pegadas) o si basta con que no se solapen. Se ha preguntado al usuario; mientras tanto no se cambia la regla.
