@@ -80,6 +80,8 @@ class PolicyConfig:
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
     rollout_prior: str = "catalog"
+    extra_candidates: str = "off"
+    extra_candidates_max: int = 32
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -217,6 +219,8 @@ class PolicyPackerScheduler:
         rollout_future_boxes: int = 0,
         rollout_future_samples: int = 1,
         rollout_prior: str = "catalog",
+        extra_candidates: str = "off",
+        extra_candidates_max: int = 32,
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
@@ -278,6 +282,8 @@ class PolicyPackerScheduler:
             batchfill_greedy_topk=batchfill_greedy_topk,
         )
         config = PolicyConfig(
+            extra_candidates=extra_candidates,
+            extra_candidates_max=extra_candidates_max,
             pallet_spec=pallet_spec,
             heuristic=heuristic,
             stacking_mode=str(stacking_mode),
@@ -1252,6 +1258,8 @@ class PolicyPackerScheduler:
             accessibility=AccessibilityConfig(accessibility_delta_mm=self.config.accessibility_delta_mm),
         )
         return PalletModel(
+            extra_candidates=self.config.extra_candidates,
+            extra_candidates_max=self.config.extra_candidates_max,
             spec=self.config.pallet_spec,
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,

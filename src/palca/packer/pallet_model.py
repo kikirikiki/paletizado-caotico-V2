@@ -285,7 +285,15 @@ class PalletModel:
         coverage_weight: float = 0.0,
         dominant_free_rect_weight: float = 0.0,
         dominant_free_rect_ratio_gate: float = 0.35,
+        extra_candidates: str = "off",
+        extra_candidates_max: int = 32,
     ) -> None:
+        if extra_candidates not in ("off", "ep", "ems", "ep+ems"):
+            raise ValueError("extra_candidates must be off, ep, ems or ep+ems")
+        if type(extra_candidates_max) is not int or extra_candidates_max < 0:
+            raise ValueError("extra_candidates_max must be a nonnegative integer")
+        self.extra_candidates = extra_candidates
+        self.extra_candidates_max = extra_candidates_max
         self.spec = spec or PalletSpec()
         self.heuristic = heuristic
         self.scoring_weights = _normalize_scoring_weights(scoring_weights)
@@ -1085,6 +1093,7 @@ class PalletModel:
                     _add_point(x, y)
 
         ordered = sorted(points, key=lambda pt: (pt[0], pt[1]))
+        in_region = None
         if any(v is not None for v in (x_min, x_max, y_min, y_max)):
             _offset = int(self.spec.offset_mm)
             def _in_region(pt: tuple[int, int]) -> bool:
@@ -1097,9 +1106,18 @@ class PalletModel:
                 if y_max is not None and cy >= y_max: return False
                 return True
             ordered = [pt for pt in ordered if _in_region(pt)]
+            in_region = _in_region
         limit = max(1, int(cap))
-        if len(ordered) > limit:
-            return ordered[:limit]
+        ordered = ordered[:limit]
+        # Keep the legacy prefix, regional filtering and cap. Extras have a
+        # separate per-orientation cap and use the same preview/control path.
+        if self.extra_candidates != "off" and self.extra_candidates_max:
+            from .extra_candidates import extra_xy_candidates
+
+            extra = extra_xy_candidates(self, item_l, item_w, exclude=set(ordered))
+            if in_region is not None:
+                extra = [pt for pt in extra if in_region(pt)]
+            ordered.extend(extra)
         return ordered
 
     def _preview_place_heightfield(

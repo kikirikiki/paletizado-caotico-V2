@@ -90,6 +90,8 @@ REQUIRED_PARAM_KEYS = {
     "rollout_future_boxes",
     "rollout_future_samples",
     "rollout_prior",
+    "extra_candidates",
+    "extra_candidates_max",
     "micro_topk",
     "micro_width",
     "min_support",

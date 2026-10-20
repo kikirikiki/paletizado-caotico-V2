@@ -91,6 +91,8 @@
     "watchdog_heartbeat_sec": 1.0,
     "force_destination": 1,
     "continuous_pallets": true,
-    "max_pallets": 1
+    "max_pallets": 1,
+    "extra_candidates": "off",
+    "extra_candidates_max": 32
   }
 }
