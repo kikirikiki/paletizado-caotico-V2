@@ -397,3 +397,11 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   flujos SINTÉTICOS del prior genérico (sin información del flujo evaluado, D-032), y lo usa como valor de las hojas de H5/H6. Se ajusta
   en seeds 1001–1010 y se evalúa con el protocolo preregistrado (referencia + réplica 20 seeds). Límite de tiempo D-007.
 - Si R13 no aporta: se documenta el límite práctico de la célula en el INFORME (sin escribir `PARADA:`, que exige T3 refutado).
+- Implementación (commit 87e083e): ridge de 88 características, 360 flujos sintéticos (68.613 estados), R² 0,33, MAE 4,2 pp; defaults
+  idénticos; fugas D-022/D-032 OK; 0,749 s/decisión.
+- Ajuste determinista (r13_tune, seeds 1001–1010): solo aprendido −5,02 (sig.); mezcla w0,5 +1,20 [−0,20; 2,61]; w1 −0,69; w2 −0,26.
+
+## D-034 · R13 mezcla w0,5 como candidata preregistrada (2026-10-21, ANTES de evaluar)
+- Candidata = `r13_mix_w05`; misma regla que D-029/D-031: referencia 10 seeds + réplica 20 seeds (D-016), deterministas; se adopta si
+  la pareada en la réplica es significativa. Advertencia previa: el ajuste no es monótono en el peso (0,5 bien, 1 y 2 mal), patrón
+  parecido al de H1 fuerte (D-029), que no se confirmó.

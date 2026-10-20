@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 study = ["ortools>=9.15,<10"]
 
+[tool.setuptools.package-data]
+"palca.scoring" = ["models/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
