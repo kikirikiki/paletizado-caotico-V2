@@ -1,0 +1,1014 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador paletizado 3D</title>
+<style>
+:root {
+  --bg: #eef0f3; --panel: #ffffff; --panel-2: #f6f7f9; --ink: #1d2127; --ink-2: #5b6470; --line: #d9dde3;
+  --accent: #0a6cff; --accent-ink: #ffffff; --ok: #1a8f4c; --warn: #c77700; --err: #d0202e; --chosen: #fff1b8;
+  --canvas: #dfe3e8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181c; --panel: #1e2228; --panel-2: #252a31; --ink: #e8ebef; --ink-2: #9aa4b1; --line: #343a43;
+    --accent: #4c94ff; --accent-ink: #0b0d10; --ok: #38c172; --warn: #f0a32a; --err: #ff5a64; --chosen: #4a3f12;
+    --canvas: #262b31;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+  font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+#app { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+header { display: flex; gap: 10px; align-items: center; padding: 8px 12px; background: var(--panel);
+  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; letter-spacing: .2px; }
+header .grow { flex: 1; }
+select, input[type=number], button { font: inherit; color: var(--ink); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+main { display: grid; grid-template-columns: 1fr 380px; min-height: 0; }
+#view { position: relative; min-width: 0; min-height: 0; background: var(--canvas); }
+#view canvas { display: block; width: 100%; height: 100%; }
+#cams { position: absolute; top: 8px; left: 8px; display: flex; gap: 4px; flex-wrap: wrap; }
+#cams button { background: color-mix(in srgb, var(--panel) 88%, transparent); padding: 3px 8px; }
+#cams button.on { background: var(--accent); color: var(--accent-ink); }
+#fps { position: absolute; bottom: 6px; left: 8px; font: 11px ui-monospace, monospace; color: var(--ink-2); }
+#legend { position: absolute; bottom: 8px; right: 8px; background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; max-width: 260px; }
+#legend .sw { display: inline-block; width: 12px; height: 12px; border: 1px solid #0006; border-radius: 2px;
+  vertical-align: -2px; margin-right: 4px; }
+#legend .row { white-space: nowrap; }
+#tip { position: absolute; pointer-events: none; display: none; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 20px #0003; font-size: 12px; min-width: 200px; z-index: 5; }
+#drop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center;
+  font-size: 16px; color: var(--ink-2); padding: 20px; }
+#drop.show { display: flex; }
+#drop.drag { background: color-mix(in srgb, var(--accent) 15%, transparent); outline: 3px dashed var(--accent); outline-offset: -12px; }
+aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; }
+section { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--ink-2); margin: 0 0 6px; font-weight: 650; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+.kv .k { color: var(--ink-2); }
+.kv .v { font-variant-numeric: tabular-nums; }
+.big { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-2); }
+.err { color: var(--err); } .warn { color: var(--warn); } .ok { color: var(--ok); }
+.belt { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+.belt td, .belt th { padding: 2px 4px; border-bottom: 1px solid var(--line); text-align: left; }
+.belt th { color: var(--ink-2); font-weight: 600; }
+.belt tr.chosen td { background: var(--chosen); font-weight: 650; }
+.wl { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.wl li { padding: 3px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.wl li:hover { background: var(--panel-2); }
+.wl li.cur { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tag { display: inline-block; border-radius: 4px; padding: 0 5px; font-size: 11px; font-weight: 650; color: #fff; margin-right: 4px; }
+.tag.error { background: var(--err); } .tag.warn { background: var(--warn); }
+.opts label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.opts .grid2 { display: grid; grid-template-columns: 1fr 90px; gap: 4px 8px; align-items: center; }
+.opts input[type=number] { width: 90px; }
+.banner { border-radius: 8px; padding: 6px 8px; margin-top: 6px; }
+.banner.close { background: color-mix(in srgb, var(--ok) 15%, transparent); border: 1px solid var(--ok); }
+.banner.alert { background: color-mix(in srgb, var(--err) 12%, transparent); border: 1px solid var(--err); }
+footer { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--panel); border-top: 1px solid var(--line); flex-wrap: wrap; }
+footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
+#slider { flex: 1; min-width: 160px; }
+#stepLabel { font-variant-numeric: tabular-nums; min-width: 150px; font-weight: 600; }
+.runs { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.runs td, .runs th { padding: 3px 4px; border-bottom: 1px solid var(--line); text-align: left; }
+.runs tr { cursor: pointer; } .runs tr.cur td { background: var(--panel-2); font-weight: 650; }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; grid-template-rows: 55vh auto; }
+  aside { border-left: 0; border-top: 1px solid var(--line); }
+}
+</style>
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script src="checks.js"></script>
+<script src="robot.js"></script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Simulador paletizado 3D</h1>
+    <label>Ejecución <select id="runSel"></select></label>
+    <label>Palet <select id="palSel"></select></label>
+    <span class="grow"></span>
+    <span id="warnCounter" class="muted"></span>
+    <button id="wPrev" title="Aviso anterior">◀ aviso</button>
+    <button id="wNext" title="Aviso siguiente">aviso ▶</button>
+    <button id="openBtn">Abrir JSON…</button>
+    <input id="file" type="file" accept=".json,application/json" hidden>
+  </header>
+  <main>
+    <div id="view">
+      <div id="cams">
+        <button data-cam="iso">Isométrica</button><button data-cam="top">Planta</button>
+        <button data-cam="front">Frontal</button><button data-cam="back">Trasera</button>
+        <button data-cam="left">Lat. izq.</button><button data-cam="right">Lat. der.</button>
+      </div>
+      <div id="legend"></div>
+      <div id="fps"></div>
+      <div id="tip"></div>
+      <div id="drop">Arrastra aquí un JSON exportado con scripts/export_sim_trace.py<br>o pulsa «Abrir JSON…»</div>
+    </div>
+    <aside>
+      <section id="secStep"></section>
+      <section id="secBox"></section>
+      <section id="secRobot" hidden></section>
+      <section id="secSel" hidden></section>
+      <section><h2>Cinta (cajas visibles)</h2><div id="belt"></div></section>
+      <section><h2>Avisos de viabilidad</h2><div id="warnSummary"></div><ul class="wl" id="warnList"></ul></section>
+      <section class="opts"><h2>Visualización</h2>
+        <label>Color <select id="colorMode">
+          <option value="unique">Color único por caja</option>
+          <option value="orient">Por orientación (plana / de canto)</option>
+          <option value="free">Por lados libres (0–4)</option>
+          <option value="order">Por orden de colocación</option>
+          <option value="height">Por altura de la cara superior</option>
+        </select></label>
+        <label><input type="checkbox" id="optLabels" checked> Etiquetas con nº de paso</label>
+        <label><input type="checkbox" id="optTrans"> Las demás translúcidas (ver interior)</label>
+        <label><input type="checkbox" id="optWarn" checked> Marcar en rojo las cajas con aviso</label>
+        <label><input type="checkbox" id="optApproach"> Bajada con aproximación lateral</label>
+        <label><input type="checkbox" id="optShadows" checked> Sombras</label>
+        <div id="robotOpts" hidden>
+          <label><input type="checkbox" id="optRobot" checked> Robot, pedestal y cinta</label>
+          <label><input type="checkbox" id="optRobotAnim" checked> Animar el ciclo completo del robot</label>
+          <label><input type="checkbox" id="optRobotChecks" checked> Avisos de alcance y colisión del robot</label>
+        </div>
+        <div class="grid2">
+          <span>Duración bajada (s)</span><input type="number" id="optDur" min="0.2" max="3" step="0.1" value="0.8">
+          <span>Altura de entrada sobre el palet (mm)</span><input type="number" id="optLift" min="50" max="1000" step="50" value="300">
+          <span>Separación de aproximación (mm)</span><input type="number" id="optAppr" min="0" max="200" step="5" value="20">
+        </div>
+      </section>
+      <section class="opts"><h2>Umbrales de comprobación</h2>
+        <div class="grid2">
+          <span>Apoyo mínimo (%)</span><input type="number" id="thSupport" min="0" max="100" step="5" value="70">
+          <span>Accesibilidad, delta (mm)</span><input type="number" id="thAccess" min="0" max="2400" step="50" value="400">
+          <span>Torre: altura exenta / base</span><input type="number" id="thTower" min="0" max="20" step="0.5" value="3">
+          <span>Torre: hueco que aún arriostra (mm)</span><input type="number" id="thBrace" min="0" max="300" step="5" value="50">
+          <span>Tolerancia solape/envolvente (mm)</span><input type="number" id="thTol" min="0" max="20" step="0.5" value="1">
+        </div>
+      </section>
+      <section><h2>Ejecuciones del fichero</h2><div id="runsTable"></div></section>
+      <section id="secRun"></section>
+    </aside>
+  </main>
+  <footer>
+    <span class="tr">
+      <button id="bStart" title="Inicio del palet">⏮</button>
+      <button id="bPrev" title="Caja anterior (←)">◀</button>
+      <button id="bPlay" title="Play / pausa (espacio)">Play</button>
+      <button id="bNext" class="primary" title="Siguiente caja (→)">▶</button>
+      <button id="bEnd" title="Final del palet">⏭</button>
+    </span>
+    <span id="stepLabel"></span>
+    <input id="slider" type="range" min="0" max="0" value="0">
+    <label>Ir al paso <input id="goto" type="number" min="0" value="0" style="width:72px"></label>
+    <label>Velocidad play <input id="playSpeed" type="range" min="0.25" max="4" step="0.25" value="1" style="width:90px"></label>
+    <span id="playSpeedLbl" class="muted">1×</span>
+  </footer>
+</div>
+<script id="sim-data" type="application/json">null</script>
+<script id="robot-mesh" type="application/json">null</script>
+<script>
+(function () {
+'use strict';
+var C = window.Sim3DChecks;
+var $ = function (id) { return document.getElementById(id); };
+if (!window.THREE || !THREE.OrbitControls) {
+  document.body.innerHTML = '<p style="padding:20px">No se ha podido cargar Three.js (tools/sim3d/vendor). ' +
+    'Genera el HTML con scripts/export_sim_trace.py --html, que lo incrusta.</p>';
+  return;
+}
+
+// ------------------------------------------------------------------ estado
+var S = {
+  data: null, run: null, runIdx: 0, pallet: 0, seq: [], k: 0, checks: null, colors: {}, byStep: {},
+  meshes: new Map(), anim: null, playing: false, nextPlayAt: 0, selected: null, runChecksCache: {},
+  opts: { colorMode: 'unique', labels: true, translucent: false, warn: true, approach: false, shadows: true,
+          durS: 0.8, liftMm: 300, apprMm: 20, playSpeed: 1, robot: true, robotAnim: true, robotChecks: true },
+  th: { minSupportPct: 70, accessDeltaMm: 400, towerRatio: 3, towerBraceGapMm: 50, tolMm: 1 }
+};
+window.__sim = S;
+
+var fmt = function (v, d) { return v == null ? '—' : Number(v).toLocaleString('es-ES', { maximumFractionDigits: d == null ? 0 : d, minimumFractionDigits: d || 0 }); };
+var pct = function (v, d) { return v == null ? '—' : fmt(100 * v, d == null ? 2 : d) + ' %'; };
+var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+
+// ------------------------------------------------------------------ escena (mm, z vertical)
+var view = $('view');
+var renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+view.insertBefore(renderer.domElement, view.firstChild);
+var scene = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera(38, 1, 20, 60000);
+camera.up.set(0, 0, 1);
+var controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.12;
+controls.screenSpacePanning = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 0.75));
+var sun = new THREE.DirectionalLight(0xffffff, 0.75);
+sun.position.set(-1800, -2600, 4200);
+sun.target.position.set(600, 400, 0);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+var sc = sun.shadow.camera; sc.left = -1600; sc.right = 1600; sc.top = 1800; sc.bottom = -1800; sc.near = 500; sc.far = 9000;
+sun.shadow.bias = -0.0005;
+scene.add(sun, sun.target);
+var fill = new THREE.DirectionalLight(0xffffff, 0.25); fill.position.set(2500, 3000, 1500); scene.add(fill);
+
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function applyTheme() { scene.background = new THREE.Color(cssVar('--canvas') || '#dfe3e8'); }
+applyTheme();
+if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+
+var PALLET_H = 144;
+var staticGroup = new THREE.Group(); scene.add(staticGroup);
+var boxGroup = new THREE.Group(); scene.add(boxGroup);
+
+function woodTexture() {
+  var c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  var g = c.getContext('2d');
+  g.fillStyle = '#c9a26a'; g.fillRect(0, 0, 256, 64);
+  for (var i = 0; i < 40; i++) {
+    g.strokeStyle = 'rgba(' + (110 + Math.random() * 40 | 0) + ',' + (70 + Math.random() * 30 | 0) + ',30,' + (0.12 + Math.random() * 0.2) + ')';
+    g.lineWidth = 0.5 + Math.random() * 1.5;
+    g.beginPath(); var y = Math.random() * 64; g.moveTo(0, y);
+    for (var x = 0; x <= 256; x += 16) g.lineTo(x, y + Math.sin(x / 30 + i) * 2 + (Math.random() - 0.5));
+    g.stroke();
+  }
+  var t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
+function buildStatic(env, nominal) {
+  while (staticGroup.children.length) staticGroup.remove(staticGroup.children[0]);
+  var L = nominal.length, W = nominal.width;
+  var tex = woodTexture();
+  var woodA = new THREE.MeshStandardMaterial({ color: 0xd8b27a, map: tex, roughness: 0.85 });
+  var woodB = new THREE.MeshStandardMaterial({ color: 0xb98d55, map: tex, roughness: 0.9 });
+  function plank(x0, y0, z0, dx, dy, dz, mat) {
+    var m = new THREE.Mesh(new THREE.BoxGeometry(dx, dy, dz), mat);
+    m.position.set(x0 + dx / 2, y0 + dy / 2, z0 + dz / 2); m.castShadow = true; m.receiveShadow = true;
+    staticGroup.add(m);
+    var e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({ color: 0x5a3e1b, transparent: true, opacity: 0.55 }));
+    m.add(e);
+  }
+  // Europalet 1200x800x144: 5 tablas superiores (en x), 3 travesaños, 9 tacos, 3 tablas inferiores.
+  var tops = [145, 100, 145, 100, 145], gap = (W - tops.reduce(function (a, b) { return a + b; }, 0)) / (tops.length - 1), ty = 0;
+  tops.forEach(function (w) { plank(0, ty, -22, L, w, 22, woodA); ty += w + gap; });
+  [0, W / 2 - 72.5, W - 145].forEach(function (y) { plank(0, y, -44, L, 145, 22, woodB); });
+  [0, L / 2 - 72.5, L - 145].forEach(function (x) {
+    [0, W / 2 - 72.5, W - 145].forEach(function (y) { plank(x, y, -122, 145, 145, 78, woodB); });
+  });
+  [0, W / 2 - 72.5, W - 145].forEach(function (y) { plank(0, y, -144, L, 145, 22, woodA); });
+
+  // Suelo y rejilla.
+  var floor = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), new THREE.MeshStandardMaterial({ color: 0xb9bec6, roughness: 1 }));
+  floor.position.set(600, 400, -PALLET_H - 0.5); floor.receiveShadow = true; staticGroup.add(floor);
+  var grid = new THREE.GridHelper(6000, 60, 0x7d848e, 0x9aa1aa); grid.rotation.x = Math.PI / 2;
+  grid.position.set(600, 400, -PALLET_H); grid.material.transparent = true; grid.material.opacity = 0.45; staticGroup.add(grid);
+
+  // Envolvente en alambre semitransparente.
+  var ex = env.x1 - env.x0, ey = env.y1 - env.y0, ez = env.z1 - env.z0;
+  var envGeo = new THREE.BoxGeometry(ex, ey, ez);
+  var envMesh = new THREE.Mesh(envGeo, new THREE.MeshBasicMaterial({ color: 0x2b7bff, transparent: true, opacity: 0.035, depthWrite: false }));
+  envMesh.position.set(env.x0 + ex / 2, env.y0 + ey / 2, env.z0 + ez / 2); envMesh.renderOrder = 10;
+  staticGroup.add(envMesh);
+  var envEdges = new THREE.LineSegments(new THREE.EdgesGeometry(envGeo), new THREE.LineBasicMaterial({ color: 0x2b7bff, transparent: true, opacity: 0.6 }));
+  envMesh.add(envEdges);
+  // Contorno del palet nominal a z=0.
+  var nom = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(L, W)), new THREE.LineBasicMaterial({ color: 0x5a3e1b }));
+  nom.position.set(L / 2, W / 2, 0.5); staticGroup.add(nom);
+
+  // Ejes en el origen (esquina del palet nominal, cara superior).
+  var axes = new THREE.AxesHelper(350); axes.position.set(0, 0, 1); staticGroup.add(axes);
+  [['X', 400, 0, 0, '#d0202e'], ['Y', 0, 400, 0, '#1a8f4c'], ['Z', 0, 0, 400, '#0a6cff']].forEach(function (a) {
+    var s = textSprite(a[0], a[4], 'rgba(255,255,255,0.85)'); s.position.set(a[1], a[2], a[3] + 1); s.scale.set(90, 90, 1); staticGroup.add(s);
+  });
+  var dimLbl = textSprite(ex + '×' + ey + '×' + ez + ' mm', '#2b7bff', 'rgba(255,255,255,0.8)', 512);
+  dimLbl.position.set(env.x1, env.y0, env.z1 + 60); dimLbl.scale.set(520, 130, 1); staticGroup.add(dimLbl);
+}
+
+function textCanvas(text, color, bg, w) {
+  var c = document.createElement('canvas'); c.width = w || 128; c.height = 128;
+  var g = c.getContext('2d');
+  if (bg) { g.fillStyle = bg; roundRect(g, 4, 18, c.width - 8, 92, 18); g.fill(); }
+  g.fillStyle = color; g.textAlign = 'center'; g.textBaseline = 'middle';
+  var size = 76; g.font = 'bold ' + size + 'px system-ui, Segoe UI, sans-serif';
+  while (g.measureText(text).width > c.width - 18 && size > 20) { size -= 4; g.font = 'bold ' + size + 'px system-ui, Segoe UI, sans-serif'; }
+  g.fillText(text, c.width / 2, 66);
+  return c;
+}
+function roundRect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+function textSprite(text, color, bg, w) {
+  var t = new THREE.CanvasTexture(textCanvas(text, color, bg, w)); t.encoding = THREE.sRGBEncoding;
+  return new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false, transparent: true }));
+}
+
+// ------------------------------------------------------------------ colores
+var PALETTE = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231', '#911eb4', '#46f0f0', '#f032e6', '#bcf60c',
+  '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8', '#800000', '#aaffc3', '#808000', '#ffd8b1'];
+var ORIENT = { LWH: '#3d7be0', WLH: '#86b3ff', HWL: '#e07a1f', WHL: '#ffb066' };
+var FREE = ['#d0202e', '#f2711c', '#f5c518', '#9bd35a', '#1a9e4b'];
+var GRAD = [[0, [68, 1, 84]], [0.25, [59, 82, 139]], [0.5, [33, 145, 140]], [0.75, [94, 201, 98]], [1, [253, 231, 37]]];
+function grad(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (var i = 1; i < GRAD.length; i++) if (t <= GRAD[i][0]) {
+    var a = GRAD[i - 1], b = GRAD[i], u = (t - a[0]) / (b[0] - a[0]);
+    return 'rgb(' + [0, 1, 2].map(function (j) { return Math.round(a[1][j] + u * (b[1][j] - a[1][j])); }).join(',') + ')';
+  }
+  return 'rgb(253,231,37)';
+}
+function touching(a, b, gap) {
+  var ox = Math.min(a.x + a.dx, b.x + b.dx) - Math.max(a.x, b.x), oy = Math.min(a.y + a.dy, b.y + b.dy) - Math.max(a.y, b.y);
+  var oz = Math.min(a.z + a.dz, b.z + b.dz) - Math.max(a.z, b.z);
+  return (ox > -gap && oy > 0 && oz > 0) || (oy > -gap && ox > 0 && oz > 0) || (ox > 0 && oy > 0 && oz > -gap);
+}
+/* Color único con coloreado voraz: ninguna vecina (contacto < 20 mm) comparte color. */
+function computeColors(steps) {
+  var colors = {}, byPallet = {};
+  steps.forEach(function (s) { (byPallet[s.pallet] = byPallet[s.pallet] || []).push(s); });
+  Object.keys(byPallet).forEach(function (p) {
+    var placed = [];
+    byPallet[p].forEach(function (s, i) {
+      var used = new Set();
+      placed.forEach(function (o) { if (touching(s, o, 20)) used.add(colors[o.step]); });
+      if (placed.length) used.add(colors[placed[placed.length - 1].step]);
+      var start = (i * 7) % PALETTE.length, pick = PALETTE[start];
+      for (var j = 0; j < PALETTE.length; j++) { var c = PALETTE[(start + j) % PALETTE.length]; if (!used.has(c)) { pick = c; break; } }
+      colors[s.step] = pick; placed.push(s);
+    });
+  });
+  return colors;
+}
+function colorFor(s) {
+  switch (S.opts.colorMode) {
+    case 'orient': return ORIENT[s.orientation] || '#999';
+    case 'free': return FREE[Math.max(0, Math.min(4, s.free_sides))];
+    case 'order': { var n = S.run.pallets[s.pallet - 1].n_boxes; return grad(n > 1 ? (s.idx_in_pallet - 1) / (n - 1) : 0); }
+    case 'height': return grad((s.z + s.dz) / (S.run.envelope.z1 || 2400));
+    default: return S.colors[s.step];
+  }
+}
+function renderLegend() {
+  var h = '', m = S.opts.colorMode;
+  var sw = function (c, t) { return '<div class="row"><span class="sw" style="background:' + c + '"></span>' + t + '</div>'; };
+  if (m === 'orient') h = sw(ORIENT.LWH, 'LWH plana') + sw(ORIENT.WLH, 'WLH plana girada') + sw(ORIENT.HWL, 'HWL de canto') + sw(ORIENT.WHL, 'WHL de canto girada');
+  else if (m === 'free') h = [4, 3, 2, 1, 0].map(function (n) { return sw(FREE[n], n + ' lados libres'); }).join('');
+  else if (m === 'order') h = sw(grad(0), 'primera del palet') + sw(grad(0.5), '…') + sw(grad(1), 'última del palet');
+  else if (m === 'height') h = sw(grad(0), '0 mm') + sw(grad(0.5), '1200 mm') + sw(grad(1), '2400 mm (cara superior)');
+  else h = '<div class="muted">Color único por caja (vecinas distintas)</div>';
+  h += '<div class="row" style="margin-top:4px"><span class="sw" style="background:transparent;border:2px solid #00c8ff"></span>caja actual' +
+       ' &nbsp;<span class="sw" style="background:transparent;border:2px solid #ff2a2a"></span>con aviso</div>';
+  $('legend').innerHTML = h;
+}
+
+// ------------------------------------------------------------------ cajas
+var UNIT = new THREE.BoxGeometry(1, 1, 1), UNIT_EDGES = new THREE.EdgesGeometry(UNIT);
+var LABEL_GEO = new THREE.PlaneGeometry(1, 1);
+var hl = new THREE.LineSegments(UNIT_EDGES, new THREE.LineBasicMaterial({ color: 0x00c8ff, depthTest: false, transparent: true }));
+hl.renderOrder = 20; hl.visible = false; scene.add(hl);
+var sel = new THREE.LineSegments(UNIT_EDGES, new THREE.LineBasicMaterial({ color: 0xff00ff, depthTest: false, transparent: true }));
+sel.renderOrder = 21; sel.visible = false; scene.add(sel);
+
+function finalCenter(s) { return new THREE.Vector3(s.x + s.dx / 2, s.y + s.dy / 2, s.z + s.dz / 2); }
+function ensureMesh(s) {
+  var e = S.meshes.get(s.step);
+  if (e) return e;
+  var mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75, metalness: 0, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+  var mesh = new THREE.Mesh(UNIT, mat);
+  mesh.scale.set(s.dx, s.dy, s.dz); mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.userData.step = s.step;
+  var edges = new THREE.LineSegments(UNIT_EDGES, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true }));
+  mesh.add(edges);
+  var tex = new THREE.CanvasTexture(textCanvas(String(s.step), '#111', 'rgba(255,255,255,0.88)')); tex.encoding = THREE.sRGBEncoding;
+  var label = new THREE.Mesh(LABEL_GEO, new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  var size = Math.min(160, 0.7 * Math.min(s.dx, s.dy));
+  // La etiqueta es hija de la caja (escala dx,dy,dz): se compensa para que sea cuadrada.
+  label.scale.set(size / s.dx, size / s.dy, 1); label.position.set(0, 0, 0.5 + 2 / s.dz); label.renderOrder = 5;
+  mesh.add(label);
+  boxGroup.add(mesh);
+  e = { mesh: mesh, edges: edges, label: label, step: s.step };
+  S.meshes.set(s.step, e);
+  return e;
+}
+function clearMeshes() {
+  S.meshes.forEach(function (e) {
+    boxGroup.remove(e.mesh); e.mesh.material.dispose(); e.edges.material.dispose();
+    e.label.material.map.dispose(); e.label.material.dispose();
+  });
+  S.meshes.clear();
+}
+
+function currentStep() { return S.k > 0 ? S.run.steps[S.seq[S.k - 1]] : null; }
+/* Conjunto visible: depende SOLO de (ejecución, filtro de palet, k). */
+function visibleSteps() {
+  var cur = currentStep(), out = [];
+  if (!cur) return out;
+  for (var i = 0; i < S.k; i++) { var s = S.run.steps[S.seq[i]]; if (s.pallet === cur.pallet) out.push(s); }
+  return out;
+}
+function applyState() {
+  var vis = visibleSteps(), cur = currentStep(), set = new Set(vis.map(function (s) { return s.step; }));
+  S.meshes.forEach(function (e) { if (!set.has(e.step)) e.mesh.visible = false; });
+  vis.forEach(function (s) {
+    var e = ensureMesh(s), isCur = cur && s.step === cur.step;
+    e.mesh.visible = true;
+    e.mesh.position.copy(finalCenter(s));
+    e.mesh.quaternion.identity();
+    e.mesh.scale.set(s.dx, s.dy, s.dz);
+    var w = S.checks.perStep[s.step] || [];
+    var hasErr = S.opts.warn && w.length > 0;
+    var faded = S.opts.translucent && !isCur;
+    var m = e.mesh.material;
+    m.color.set(colorFor(s));
+    m.transparent = faded; m.opacity = faded ? 0.14 : 1; m.depthWrite = !faded;
+    m.emissive.set(isCur ? 0x1a2a33 : 0x000000);
+    e.mesh.castShadow = !faded;
+    e.edges.material.color.set(hasErr ? 0xff2a2a : 0x000000);
+    e.edges.material.opacity = faded ? 0.35 : 1;
+    e.label.visible = S.opts.labels;
+    e.label.material.opacity = faded ? 0.4 : 1;
+  });
+  if (cur) { hl.visible = true; hl.position.copy(finalCenter(cur)); hl.scale.set(cur.dx + 8, cur.dy + 8, cur.dz + 8); }
+  else hl.visible = false;
+  var selS = S.selected != null && set.has(S.selected) ? S.byStep[S.selected] : null;
+  if (selS) { sel.visible = true; sel.position.copy(finalCenter(selS)); sel.scale.set(selS.dx + 14, selS.dy + 14, selS.dz + 14); }
+  else sel.visible = false;
+  robotRest();
+  renderPanels();
+}
+
+// ------------------------------------------------------------------ robot
+var HOME_Q = [0, 0, 0, 0, -90, 0];
+function robotStep(s) { return s && S.run.robot && S.run.robot.steps ? S.run.robot.steps[s.step] : null; }
+function robotOn() { return !!(S.robot && S.opts.robot); }
+function m4(rows) { var m = new THREE.Matrix4(); m.set.apply(m, [].concat.apply([], rows)); return m; }
+/* Pose determinista del robot en el estado k: última pose del ciclo, o la pose que falla. */
+function robotRest() {
+  if (!S.robot) return;
+  S.robot.setVisible(S.opts.robot);
+  var cur = currentStep(), rs = robotStep(cur), q = HOME_Q, bad = null;
+  if (rs) {
+    var failing = (rs.poses || []).find(function (p) { return p.reason; });
+    if (failing && failing.q) { q = failing.q; var m = /colision:(\w+)/.exec(failing.reason || ''); bad = m ? m[1] : null; }
+    else if (rs.cycle && rs.cycle.waypoints.length) q = rs.cycle.waypoints[rs.cycle.waypoints.length - 1].q;
+  }
+  S.robot.setQ(q, bad);
+  renderQueue();
+}
+var queuePool = [];
+/* Cola de 15 cajas visibles para la próxima decisión, aguas arriba de la estación de
+ * recogida (la elegida, en amarillo, la tiene que llevar la cinta hasta la estación). */
+function renderQueue() {
+  queuePool.forEach(function (m) { m.visible = false; });
+  if (!S.robot || !S.robot.conveyor || !S.opts.robot) return;
+  var animating = S.anim && S.anim.type === 'robot';
+  var nxt = animating ? S.anim.step : S.k < S.seq.length ? S.run.steps[S.seq[S.k]] : null;
+  if (!nxt || !nxt.conveyor) return;
+  var cv = S.robot.conveyor, s = 450;
+  nxt.conveyor.forEach(function (b, i) {
+    var L = b.lwh[0], W = b.lwh[1], H = b.lwh[2];
+    s += W / 2 + 15;
+    var m = queuePool[i];
+    if (!m) {
+      m = new THREE.Mesh(UNIT, new THREE.MeshStandardMaterial({ color: 0xd9c7a3, roughness: 0.9 }));
+      m.add(new THREE.LineSegments(UNIT_EDGES, new THREE.LineBasicMaterial({ color: 0x333333 })));
+      m.castShadow = true; scene.add(m); queuePool[i] = m;
+    }
+    var hide = animating && i === nxt.chosen_index;
+    m.visible = !hide;
+    m.material.color.set(i === nxt.chosen_index ? 0xffd166 : 0xd9c7a3);
+    m.matrixAutoUpdate = false;
+    var basis = new THREE.Matrix4().makeBasis(cv.u, cv.t, new THREE.Vector3(0, 0, 1));
+    var pos = cv.point.clone().addScaledVector(cv.t, -s).add(new THREE.Vector3(0, 0, H / 2));
+    m.matrix.copy(basis).setPosition(pos).multiply(new THREE.Matrix4().makeScale(L, W, H));
+    s += W / 2;
+  });
+}
+function startRobotAnim(s, dir) {
+  var rs = robotStep(s);
+  if (!rs || !rs.cycle || !rs.cycle.waypoints.length || !rs.cycle.box_rel || !S.opts.robotAnim) return false;
+  var wps = rs.cycle.waypoints, idx = S.seq.indexOf(S.run.steps.indexOf(s));
+  var prevS = idx > 0 ? S.run.steps[S.seq[idx - 1]] : null, prs = robotStep(prevS);
+  var restPrev = prs && prs.cycle && prs.cycle.waypoints.length ? prs.cycle.waypoints[prs.cycle.waypoints.length - 1].q : HOME_Q;
+  var qs = [restPrev].concat(wps.map(function (w) { return w.q; }));
+  var kinds = ['reposo'].concat(wps.map(function (w) { return w.kind; }));
+  var att = [false].concat(wps.map(function (w) { return w.attached && w.kind !== 'final'; }));
+  var speed = 140 * (0.8 / Math.max(0.1, S.opts.durS)); // grados/s de la articulación más lenta
+  var dur = [];
+  for (var i = 0; i + 1 < qs.length; i++) {
+    var d = 0; for (var j = 0; j < 6; j++) d = Math.max(d, Math.abs(qs[i + 1][j] - qs[i][j]));
+    dur.push(Math.max(140, 1000 * d / speed) * (/bajada|aproximacion|final/.test(kinds[i + 1]) ? 1.6 : 1));
+  }
+  var e = ensureMesh(s);
+  var finalIdx = kinds.indexOf('final');
+  var qFinal = finalIdx >= 0 ? qs[finalIdx] : qs[qs.length - 1];
+  var rel = m4(rs.cycle.box_rel);
+  var bFinal = S.robot.toolWorld(qFinal).multiply(rel);
+  var mFinal = new THREE.Matrix4().compose(finalCenter(s), new THREE.Quaternion(), new THREE.Vector3(s.dx, s.dy, s.dz));
+  var X = bFinal.clone().invert().multiply(mFinal);
+  var conv = rs.cycle.box_conveyor ? m4(rs.cycle.box_conveyor).multiply(X) : mFinal;
+  S.anim = { type: 'robot', step: s, e: e, qs: qs, dur: dur, att: att, kinds: kinds, rel: rel, X: X, conv: conv, mFinal: mFinal,
+             dir: dir, total: dur.reduce(function (a, b) { return a + b; }, 0), t0: performance.now() };
+  e.mesh.visible = true;
+  renderQueue();
+  stepAnim(S.anim.t0);
+  return true;
+}
+function setBoxMatrix(mesh, m) { m.decompose(mesh.position, mesh.quaternion, mesh.scale); }
+/* El ciclo se define hacia delante; hacia atrás se recorre con el tiempo invertido. */
+function stepRobotAnim(a, t) {
+  if (a.dir < 0) t = a.total - t;
+  var i = 0;
+  while (i < a.dur.length - 1 && t > a.dur[i]) { t -= a.dur[i]; i++; }
+  var u = ease(Math.max(0, Math.min(1, t / a.dur[i]))), q = [];
+  for (var j = 0; j < 6; j++) q.push(a.qs[i][j] + (a.qs[i + 1][j] - a.qs[i][j]) * u);
+  S.robot.setQ(q);
+  // Caja: en la cinta antes de cogerla, pegada a la garra después y en su sitio al soltarla.
+  var released = a.kinds.slice(0, i + 1).indexOf('final') >= 0;
+  if (a.att[i]) setBoxMatrix(a.e.mesh, S.robot.toolWorld(q).multiply(a.rel).multiply(a.X));
+  else if (released) setBoxMatrix(a.e.mesh, a.mFinal);
+  else setBoxMatrix(a.e.mesh, a.conv);
+}
+
+// ------------------------------------------------------------------ animación (solo visual)
+function prevInPallet(s) {
+  var out = [];
+  for (var i = 0; i < S.run.steps.length; i++) { var o = S.run.steps[i]; if (o.step >= s.step) break; if (o.pallet === s.pallet) out.push(o); }
+  return out;
+}
+function approachFor(s) {
+  return C.approachSide(C.box(s), prevInPallet(s).map(C.box), S.run.envelope, 20);
+}
+function descentPath(s) {
+  var prev = prevInPallet(s), hmax = 0;
+  prev.forEach(function (o) { hmax = Math.max(hmax, o.z + o.dz); });
+  var c = finalCenter(s), zStart = Math.max(hmax, s.z) + S.opts.liftMm + s.dz / 2;
+  var D = S.opts.durS * 1000;
+  var a = S.opts.approach ? approachFor(s) : null;
+  if (a && S.opts.apprMm > 0) {
+    var off = new THREE.Vector3(a.dir[0] * S.opts.apprMm, a.dir[1] * S.opts.apprMm, 0);
+    return { pts: [new THREE.Vector3(c.x + off.x, c.y + off.y, zStart), new THREE.Vector3(c.x + off.x, c.y + off.y, c.z), c], dur: [D, 0.35 * D] };
+  }
+  return { pts: [new THREE.Vector3(c.x, c.y, zStart), c], dur: [D] };
+}
+function startAnim(s, dir) {
+  if (robotOn() && startRobotAnim(s, dir)) return;
+  var e = ensureMesh(s), p = descentPath(s);
+  var pts = dir > 0 ? p.pts : p.pts.slice().reverse(), dur = dir > 0 ? p.dur : p.dur.slice().reverse();
+  e.mesh.visible = true;
+  e.mesh.position.copy(pts[0]);
+  S.anim = { e: e, pts: pts, dur: dur, total: dur.reduce(function (a, b) { return a + b; }, 0), t0: performance.now(), dir: dir };
+}
+function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+function stepAnim(now) {
+  var a = S.anim; if (!a) return;
+  var t = now - a.t0;
+  if (t >= a.total) { finishAnim(); return; }
+  if (a.type === 'robot') { stepRobotAnim(a, t); return; }
+  for (var i = 0; i < a.dur.length; i++) {
+    if (t <= a.dur[i]) { a.e.mesh.position.lerpVectors(a.pts[i], a.pts[i + 1], ease(t / a.dur[i])); return; }
+    t -= a.dur[i];
+  }
+}
+/* Termina la animación en curso al instante y vuelve a fijar el estado determinista. */
+function finishAnim() { if (!S.anim) return; S.anim = null; applyState(); }
+
+// ------------------------------------------------------------------ navegación
+function setK(k, animate) {
+  finishAnim();
+  k = Math.max(0, Math.min(S.seq.length, k | 0));
+  var old = S.k;
+  if (k === old) { applyState(); return; }
+  S.k = k;
+  applyState();
+  if (!animate || S.opts.durS <= 0) return;
+  if (k === old + 1) startAnim(S.run.steps[S.seq[k - 1]], +1);
+  else if (k === old - 1) {
+    var leaving = S.run.steps[S.seq[old - 1]], cur = currentStep();
+    if (cur && cur.pallet === leaving.pallet) startAnim(leaving, -1);
+  }
+}
+function next() { if (S.k < S.seq.length) setK(S.k + 1, true); else stopPlay(); }
+function prev() { setK(S.k - 1, true); }
+function palletBounds() {
+  var cur = currentStep(); if (!cur) return null;
+  var first = -1, last = -1;
+  S.seq.forEach(function (idx, i) { if (S.run.steps[idx].pallet === cur.pallet) { if (first < 0) first = i; last = i; } });
+  return { first: first + 1, last: last + 1 };
+}
+function goStart() {
+  if (S.pallet) { setK(0); return; }
+  var b = palletBounds(); if (!b) return;
+  if (S.k > b.first) setK(b.first);
+  else { setK(b.first - 1); var bb = palletBounds(); setK(bb ? bb.first : 0); }
+}
+function goEnd() {
+  if (S.pallet) { setK(S.seq.length); return; }
+  var b = palletBounds();
+  if (!b) { setK(1); b = palletBounds(); if (!b) return; }
+  if (S.k < b.last) setK(b.last);
+  else if (b.last < S.seq.length) { setK(b.last + 1); setK(palletBounds().last); }
+}
+function togglePlay() { S.playing ? stopPlay() : startPlay(); }
+function startPlay() { if (S.k >= S.seq.length) setK(0); S.playing = true; S.nextPlayAt = 0; $('bPlay').textContent = 'Pausa'; $('bPlay').classList.add('on'); }
+function stopPlay() { S.playing = false; $('bPlay').textContent = 'Play'; $('bPlay').classList.remove('on'); }
+function playTick(now) {
+  if (!S.playing || S.anim) return;
+  if (now < S.nextPlayAt) return;
+  if (S.k >= S.seq.length) { stopPlay(); return; }
+  var saved = S.opts.durS; S.opts.durS = saved / S.opts.playSpeed;
+  next();
+  S.opts.durS = saved;
+  var total = S.anim ? S.anim.total : 0;
+  S.anim && (S.anim.t0 = now);
+  S.nextPlayAt = now + total + 220 / S.opts.playSpeed;
+}
+function gotoStepNumber(stepNo) {
+  var i = S.seq.findIndex(function (idx) { return S.run.steps[idx].step === stepNo; });
+  if (i < 0) { setPallet(0); i = S.seq.findIndex(function (idx) { return S.run.steps[idx].step === stepNo; }); }
+  if (i >= 0) setK(i + 1);
+}
+function jumpWarning(dir) {
+  var list = S.checks.list; if (!list.length) return;
+  var cur = currentStep(), curStep = cur ? cur.step : 0, target = null;
+  var steps = Array.from(new Set(list.map(function (w) { return w.step; }))).sort(function (a, b) { return a - b; });
+  if (dir > 0) target = steps.find(function (s) { return s > curStep; }) || steps[0];
+  else target = steps.slice().reverse().find(function (s) { return s < curStep; }) || steps[steps.length - 1];
+  gotoStepNumber(target);
+}
+
+// ------------------------------------------------------------------ paneles
+function card(s, title) {
+  if (!s) return '<h2>' + title + '</h2><div class="muted">Palet vacío: pulsa ▶ (→) para colocar la primera caja.</div>';
+  var w = S.checks.perStep[s.step] || [];
+  var a = approachFor(s);
+  var fam = (s.orientation === 'HWL' || s.orientation === 'WHL') ? 'de canto' : 'plana';
+  var o = s.orig_lwh || [];
+  var h = '<h2>' + title + '</h2><div class="kv">' +
+    '<span class="k">Paso</span><span class="v"><b>' + s.step + '</b> · palet ' + s.pallet + ' (caja ' + s.idx_in_pallet + '/' + S.run.pallets[s.pallet - 1].n_boxes + ')</span>' +
+    '<span class="k">Caja</span><span class="v">id ' + esc(s.box_id) + (s.excel_row ? ' · fila Excel ' + s.excel_row : '') + '</span>' +
+    '<span class="k">Original L×W×H</span><span class="v">' + o.join(' × ') + ' mm</span>' +
+    '<span class="k">Orientación</span><span class="v">' + esc(s.orientation || '—') + ' (' + fam + ')</span>' +
+    '<span class="k">Posición x,y,z</span><span class="v">' + [s.x, s.y, s.z].join(', ') + ' mm</span>' +
+    '<span class="k">Colocada dx×dy×dz</span><span class="v">' + [s.dx, s.dy, s.dz].join(' × ') + ' mm</span>' +
+    '<span class="k">Lados libres</span><span class="v">' + s.free_sides + ' / 4' + (a ? ' · entrada por ' + a.name + (isFinite(a.clearance) ? ' (' + fmt(a.clearance) + ' mm)' : ' (libre)') : ' · solo cenital') + '</span>' +
+    '<span class="k">Base apoyada</span><span class="v">' + fmt(s.support_pct, 1) + ' %</span>' +
+    '<span class="k">Altura palet tras</span><span class="v">' + fmt(s.height_after) + ' mm</span>' +
+    '<span class="k">Compactación acum.</span><span class="v">' + pct(s.util_cum) + '</span>' +
+    (s.note ? '<span class="k">Nota</span><span class="v">' + esc(s.note) + '</span>' : '') +
+    '</div>';
+  if (w.length) h += '<div class="banner alert">' + w.map(function (x) { return '<div><span class="tag ' + x.severity + '">' + x.label + '</span>' + esc(x.msg) + '</div>'; }).join('') + '</div>';
+  return h;
+}
+function renderPanels() {
+  if (!S.run) return;
+  var cur = currentStep(), N = S.seq.length, run = S.run;
+  var p = cur ? run.pallets[cur.pallet - 1] : null;
+  var h = '<h2>Paso</h2><div class="big">' + S.k + ' / ' + N + '</div>' +
+    '<div class="muted">' + (S.pallet ? 'Palet ' + S.pallet + ' aislado' : 'Secuencia global (' + run.pallets.length + ' palets)') + '</div>';
+  if (cur) {
+    h += '<div class="kv" style="margin-top:6px"><span class="k">Palet</span><span class="v">' + cur.pallet + ' de ' + run.pallets.length +
+      ' · ' + cur.idx_in_pallet + '/' + p.n_boxes + ' cajas</span>' +
+      '<span class="k">Compactación palet</span><span class="v"><b>' + pct(cur.util_cum) + '</b> (envolvente 1240×840×2400)</span></div>';
+    (cur.events || []).forEach(function (ev) {
+      if (ev.type === 'open_pallet') h += '<div class="banner" style="border:1px solid var(--line)">Se abre el palet ' + ev.pallet + '</div>';
+      if (ev.type === 'close_pallet') h += '<div class="banner close"><b>Fin del palet ' + ev.pallet + '</b>: KPI del palet ' + pct(p.util) +
+        ' · motivo <b>' + esc(ev.reason) + '</b>' + (ev.closed ? '' : ' (END: no cuenta en el KPI)') + '</div>';
+    });
+  }
+  $('secStep').innerHTML = h;
+  $('secBox').innerHTML = card(cur, 'Caja actual');
+  renderRobotPanel(cur);
+  var selS = S.selected != null ? S.byStep[S.selected] : null;
+  $('secSel').hidden = !selS || (cur && selS.step === cur.step);
+  if (selS) $('secSel').innerHTML = card(selS, 'Caja seleccionada');
+  // Cinta.
+  if (cur && cur.conveyor && cur.conveyor.length) {
+    $('belt').innerHTML = '<table class="belt"><tr><th>#</th><th>id</th><th>L×W×H (mm)</th></tr>' + cur.conveyor.map(function (b, i) {
+      return '<tr class="' + (i === cur.chosen_index ? 'chosen' : '') + '"><td>' + (i + 1) + '</td><td>' + esc(b.box_id) + (i === cur.chosen_index ? ' ◀ elegida' : '') +
+        '</td><td>' + (b.lwh || []).join('×') + '</td></tr>';
+    }).join('') + '</table>';
+  } else $('belt').innerHTML = '<div class="muted">' + (cur ? 'Sin datos de cinta en este paso' : '—') + '</div>';
+  // Avisos.
+  var list = S.checks.list, nErr = list.filter(function (w) { return w.severity === 'error'; }).length;
+  var byCode = {};
+  list.forEach(function (w) { byCode[w.label] = (byCode[w.label] || 0) + 1; });
+  $('warnCounter').innerHTML = list.length ? '<span class="' + (nErr ? 'err' : 'warn') + '"><b>' + list.length + ' avisos</b> (' + nErr + ' errores)</span>' : '<span class="ok"><b>0 avisos</b></span>';
+  $('warnSummary').innerHTML = list.length ? Object.keys(byCode).map(function (k) { return k + ': <b>' + byCode[k] + '</b>'; }).join(' · ') :
+    '<span class="ok">Sin avisos con los umbrales actuales.</span>';
+  var curStep = cur ? cur.step : -1;
+  $('warnList').innerHTML = list.map(function (w, i) {
+    return '<li data-step="' + w.step + '" class="' + (w.step === curStep ? 'cur' : '') + '"><span class="tag ' + w.severity + '">' + w.label +
+      '</span>paso ' + w.step + ' · palet ' + w.pallet + ' · caja ' + esc(w.box_id) + '<br><span class="muted">' + esc(w.msg) + '</span></li>';
+  }).join('');
+  // Transporte.
+  $('slider').max = N; $('slider').value = S.k;
+  $('stepLabel').textContent = 'Paso ' + S.k + ' / ' + N + (cur ? ' · global ' + cur.step : '');
+  if (document.activeElement !== $('goto')) $('goto').value = S.k;
+  $('goto').max = N;
+}
+var SIDE_ES = { '-X': 'izquierda (−X)', '+X': 'derecha (+X)', '-Y': 'delante (−Y)', '+Y': 'detrás (+Y)' };
+function renderRobotPanel(cur) {
+  var sec = $('secRobot'), R = S.run.robot;
+  sec.hidden = !S.robot;
+  if (!S.robot) return;
+  var c = R.cell, cv = R.conveyor, rs = robotStep(cur);
+  var h = '<h2>Robot ' + esc(R.model) + '</h2><div class="kv">' +
+    '<span class="k">Base (J1)</span><span class="v">x ' + fmt(c.base_x) + ', y ' + fmt(c.base_y) + ' mm · ' + esc(c.side_label) + '</span>' +
+    '<span class="k">Distancia</span><span class="v">' + fmt(c.dist_from_envelope_mm) + ' mm del borde de la envolvente</span>' +
+    '<span class="k">Pedestal</span><span class="v">' + fmt(c.pedestal_mm) + ' mm (J2 a ' + fmt(c.pedestal_mm + 670) + ' mm del suelo)</span>' +
+    (cv ? '<span class="k">Cinta</span><span class="v">recogida a ' + fmt(cv.radius) + ' mm de J1, ' + fmt(cv.angle) + '° respecto al palet, superficie a ' +
+      fmt(cv.height_mm || (cv.z_conveyor + 144)) + ' mm; alcance a lo largo ±' + fmt(cv.reach_along_mm.downstream) + ' mm</span>' : '') +
+    '<span class="k">Colocaciones viables</span><span class="v ' + (R.n_ok === R.n ? 'ok' : 'warn') + '"><b>' + R.n_ok + ' / ' + R.n + '</b> (' + pct(R.n_ok / R.n, 1) + ')</span>' +
+    '</div>';
+  if (cur && rs) {
+    var fin = (rs.poses || []).find(function (p) { return p.kind === 'final'; });
+    var dir = rs.approach ? (rs.approach[0] < 0 ? '-X' : rs.approach[0] > 0 ? '+X' : rs.approach[1] < 0 ? '-Y' : '+Y') : null;
+    h += '<div class="kv" style="margin-top:6px">' +
+      '<span class="k">Esta caja</span><span class="v ' + (rs.ok ? 'ok' : 'err') + '"><b>' + (rs.ok ? 'viable' : 'NO viable') + '</b></span>' +
+      '<span class="k">Bajada</span><span class="v">' + (dir ? 'desplazada 20 mm por ' + SIDE_ES[dir] : 'cenital (sin lateral libre)') + '</span>' +
+      '<span class="k">Elevación de entrada</span><span class="v">' + fmt(rs.entry_lift_mm) + ' mm sobre la posición final</span>' +
+      (fin && fin.q ? '<span class="k">J1…J6 final</span><span class="v">' + fin.q.map(function (v) { return fmt(v, 0) + '°'; }).join(' ') + '</span>' : '') +
+      (rs.min_margin_deg != null ? '<span class="k">Margen a límites</span><span class="v">' + fmt(rs.min_margin_deg, 1) + '°</span>' : '') +
+      (cur.chosen_index != null ? '<span class="k">Cinta</span><span class="v">elegida la n.º ' + (cur.chosen_index + 1) + ' de la cola' + '</span>' : '') +
+      '</div>';
+  }
+  sec.innerHTML = h;
+}
+function updateShadowCamera() {
+  var sc = sun.shadow.camera, r = S.robot ? 3600 : 1700;
+  sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.far = S.robot ? 14000 : 9000;
+  if (S.robot) { sun.target.position.set((600 + S.robot.cell.base_x) / 2, (400 + S.robot.cell.base_y) / 2, 0); sun.position.set(sun.target.position.x - 2500, sun.target.position.y - 3500, 5200); }
+  sc.updateProjectionMatrix();
+}
+function renderRunInfo() {
+  var r = S.run, v = r.verify || {};
+  var h = '<h2>Ejecución</h2><div class="kv">' +
+    '<span class="k">Config</span><span class="v">' + esc(r.config) + (r.preset ? ' (preset ' + esc(r.preset) + ')' : '') + '</span>' +
+    '<span class="k">Seed</span><span class="v">' + (r.seed == null ? '—' : r.seed) + '</span>' +
+    '<span class="k">KPI congelado</span><span class="v"><b>' + pct(r.kpi.kpi, 3) + '</b></span>' +
+    '<span class="k">Palets</span><span class="v">' + r.kpi.n_pallets_total + (r.kpi.n_closed != null ? ' (' + r.kpi.n_closed + ' cerrados)' : '') + '</span>' +
+    '<span class="k">Cajas</span><span class="v">' + r.steps.length + (r.n_unplaced ? ' · ' + r.n_unplaced + ' sin colocar' : '') + '</span>' +
+    (r.n_violations != null ? '<span class="k">Validador oficial</span><span class="v">' + r.n_violations + ' violaciones</span>' : '') +
+    (r.deadline_cutoffs_count != null ? '<span class="k">Cortes deadline</span><span class="v">' + r.deadline_cutoffs_count + '</span>' : '') +
+    (v.bit_identical != null ? '<span class="k">Bit-idéntico</span><span class="v ' + (v.bit_identical ? 'ok' : 'err') + '">' + (v.bit_identical ? 'sí' : 'NO') + '</span>' : '') +
+    (v.reference_kpi != null ? '<span class="k">KPI oficial</span><span class="v ' + (v.matches_reference ? 'ok' : 'err') + '">' + pct(v.reference_kpi, 3) + (v.matches_reference ? ' (coincide)' : ' (DIFIERE)') + '</span>' : '') +
+    (r.git_head ? '<span class="k">Commit</span><span class="v">' + esc(r.git_head.slice(0, 10)) + (r.git_dirty ? ' (con cambios)' : '') + '</span>' : '') +
+    '</div>';
+  $('secRun').innerHTML = h;
+}
+function runChecks(i) {
+  var key = i + '|' + JSON.stringify(S.th) + '|' + S.opts.robotChecks;
+  if (!S.runChecksCache[key]) {
+    var r = S.data.runs[i], res = C.computeChecks(r.steps, r.envelope, S.th);
+    if (r.robot && S.opts.robotChecks) addRobotChecks(r, res);
+    S.runChecksCache[key] = res;
+  }
+  return S.runChecksCache[key];
+}
+var POSE_ES = { entrada: 'entrada sobre el pasillo', bajada: 'bajada', aproximacion: 'aproximación lateral', final: 'posición final' };
+/* Avisos del estudio del robot (alcance, límites y colisiones), en la misma lista. */
+function addRobotChecks(run, res) {
+  run.steps.forEach(function (s) {
+    var rs = run.robot.steps[s.step]; if (!rs) return;
+    var found = [];
+    if (!rs.ok && rs.reason) {
+      var m = /^(\w+):(alcance|colision):([\w_]+)(?:\(paso (\d+)\))?/.exec(rs.reason) || [];
+      var what = m[2] === 'colision' ? 'choca ' + ({ caja_transportada: 'la caja transportada', garra: 'la garra' }[m[3]] || 'el eslabón ' + (m[3] || '?').toUpperCase()) +
+        (m[4] ? ' con la caja del paso ' + m[4] : ' con el palet') : 'fuera de alcance (' + (m[3] || '?').replace(/_/g, ' ') + ')';
+      found.push({ code: 'robot', severity: 'error', label: 'Robot', msg: 'En la ' + (POSE_ES[m[1]] || m[1]) + ': ' + what, other: m[4] ? +m[4] : null });
+    }
+    if (rs.cycle && rs.cycle.pick_ok === false) found.push({ code: 'robot_pick', severity: 'error', label: 'Recogida', msg: 'El robot no alcanza la recogida en la cinta con esta orientación' });
+    if (rs.gripper_fits === false) found.push({ code: 'gripper_fit', severity: 'warn', label: 'Ventosas', msg: 'Las 4 ventosas no caben en la cara de agarre' });
+    found.forEach(function (w) { w.step = s.step; w.pallet = s.pallet; w.box_id = s.box_id; });
+    if (found.length) {
+      res.perStep[s.step] = (res.perStep[s.step] || []).concat(found);
+      res.list = res.list.concat(found);
+    }
+  });
+  res.list.sort(function (a, b) { return a.step - b.step; });
+}
+function renderRuns() {
+  var h = '<table class="runs"><tr><th>Ejecución</th><th>KPI</th><th>Palets</th><th>Cajas</th><th>Avisos</th></tr>';
+  S.data.runs.forEach(function (r, i) {
+    var c = runChecks(i), e = c.list.filter(function (w) { return w.severity === 'error'; }).length;
+    h += '<tr data-run="' + i + '" class="' + (i === S.runIdx ? 'cur' : '') + '"><td>' + esc(r.label || r.config) + '</td><td>' + pct(r.kpi.kpi, 2) +
+      '</td><td>' + r.kpi.n_pallets_total + '</td><td>' + r.steps.length + '</td><td class="' + (e ? 'err' : c.list.length ? 'warn' : 'ok') + '">' + c.list.length + (e ? ' (' + e + ' err)' : '') + '</td></tr>';
+  });
+  $('runsTable').innerHTML = h + '</table>';
+}
+
+// ------------------------------------------------------------------ carga
+function loadData(data) {
+  if (!data || !Array.isArray(data.runs) || !data.runs.length) { alert('JSON no válido: falta runs[]'); return; }
+  S.data = data; S.runChecksCache = {};
+  $('drop').classList.remove('show');
+  $('runSel').innerHTML = data.runs.map(function (r, i) { return '<option value="' + i + '">' + esc(r.label || r.config) + '</option>'; }).join('');
+  selectRun(0);
+  setCam('iso');
+}
+function selectRun(i) {
+  finishAnim(); stopPlay();
+  S.runIdx = i; S.run = S.data.runs[i]; S.selected = null;
+  S.byStep = {}; S.run.steps.forEach(function (s) { S.byStep[s.step] = s; });
+  clearMeshes();
+  S.colors = computeColors(S.run.steps);
+  S.checks = runChecks(i);
+  buildStatic(S.run.envelope, S.run.pallet_nominal || { length: 1200, width: 800 });
+  if (S.robot) { S.robot.dispose(scene); S.robot = null; }
+  if (S.run.robot && window.Sim3DRobot) S.robot = new Sim3DRobot.Robot(scene, S.run.robot, ROBOT_MESH);
+  $('robotOpts').hidden = !S.robot;
+  updateShadowCamera();
+  $('runSel').value = String(i);
+  $('palSel').innerHTML = '<option value="0">Secuencia global</option>' + S.run.pallets.map(function (p) {
+    return '<option value="' + p.index + '">Palet ' + p.index + ' · ' + p.n_boxes + ' cajas · ' + pct(p.util, 1) + ' · ' + esc(p.closure_reason) + '</option>';
+  }).join('');
+  renderRunInfo(); renderRuns(); renderLegend();
+  setPallet(0);
+}
+function setPallet(p) {
+  finishAnim();
+  S.pallet = p;
+  $('palSel').value = String(p);
+  S.seq = [];
+  S.run.steps.forEach(function (s, idx) { if (!p || s.pallet === p) S.seq.push(idx); });
+  S.k = 0;
+  applyState();
+}
+function recheck() {
+  S.checks = runChecks(S.runIdx);
+  renderRuns(); finishAnim(); applyState();
+}
+
+// ------------------------------------------------------------------ cámara
+var CAMS = { iso: [-1, -1.25, 0.95], top: [0, -0.0001, 1], front: [0, -1, 0.08], back: [0, 1, 0.08], left: [-1, 0, 0.08], right: [1, 0, 0.08] };
+function setCam(name) {
+  var env = S.run ? S.run.envelope : { x0: -20, y0: -20, x1: 1220, y1: 820, z1: 2400 };
+  var target = new THREE.Vector3((env.x0 + env.x1) / 2, (env.y0 + env.y1) / 2, name === 'top' ? 0 : 900);
+  var k = 1;
+  if (S.robot && S.opts.robot) {  // encuadra palet, robot y cinta
+    var c = S.robot.cell, cv = S.run.robot.conveyor;
+    var pts = [[env.x0, env.y0], [env.x1, env.y1], [c.base_x, c.base_y]].concat(cv ? [cv.point.slice(0, 2)] : []);
+    var xs = pts.map(function (p) { return p[0]; }), ys = pts.map(function (p) { return p[1]; });
+    target.x = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2;
+    target.y = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
+    k = Math.max(1, Math.hypot(Math.max.apply(null, xs) - Math.min.apply(null, xs), Math.max.apply(null, ys) - Math.min.apply(null, ys)) / 1500);
+  }
+  var d = new THREE.Vector3().fromArray(CAMS[name]).normalize();
+  var dist = k * (name === 'top' ? 4300 : name === 'iso' ? 5200 : 5000);
+  camera.position.copy(target).addScaledVector(d, dist);
+  controls.target.copy(target);
+  camera.lookAt(target);
+  controls.update();
+  document.querySelectorAll('#cams button').forEach(function (b) { b.classList.toggle('on', b.dataset.cam === name); });
+}
+
+// ------------------------------------------------------------------ ratón: ficha
+var ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), downAt = null, hoverPending = null;
+function pick(ev) {
+  var r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  var vis = []; S.meshes.forEach(function (e) { if (e.mesh.visible) vis.push(e.mesh); });
+  var hit = ray.intersectObjects(vis, false)[0];
+  return hit ? S.byStep[hit.object.userData.step] : null;
+}
+function tipHtml(s) {
+  var w = S.checks.perStep[s.step] || [];
+  return '<b>Paso ' + s.step + '</b> · palet ' + s.pallet + ' · id ' + esc(s.box_id) + '<br>' +
+    'L×W×H ' + (s.orig_lwh || []).join('×') + ' → ' + esc(s.orientation || '') + ' ' + s.dx + '×' + s.dy + '×' + s.dz + '<br>' +
+    'x,y,z ' + s.x + ', ' + s.y + ', ' + s.z + ' mm<br>' +
+    'lados libres ' + s.free_sides + ' · apoyo ' + fmt(s.support_pct, 1) + ' %' +
+    (w.length ? '<br>' + w.map(function (x) { return '<span class="tag ' + x.severity + '">' + x.label + '</span>'; }).join('') : '');
+}
+renderer.domElement.addEventListener('pointermove', function (ev) {
+  hoverPending = ev;
+});
+renderer.domElement.addEventListener('pointerleave', function () { $('tip').style.display = 'none'; hoverPending = null; });
+renderer.domElement.addEventListener('pointerdown', function (ev) { downAt = [ev.clientX, ev.clientY]; });
+renderer.domElement.addEventListener('pointerup', function (ev) {
+  if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 5) return;
+  var s = pick(ev);
+  S.selected = s ? s.step : null;
+  applyState();
+});
+function hoverTick() {
+  if (!hoverPending || !S.run || ev_buttons(hoverPending)) return;
+  var ev = hoverPending; hoverPending = null;
+  var s = pick(ev), tip = $('tip');
+  if (!s) { tip.style.display = 'none'; return; }
+  var r = view.getBoundingClientRect();
+  tip.innerHTML = tipHtml(s); tip.style.display = 'block';
+  var x = ev.clientX - r.left + 14, y = ev.clientY - r.top + 14;
+  if (x + tip.offsetWidth > r.width) x = ev.clientX - r.left - tip.offsetWidth - 14;
+  if (y + tip.offsetHeight > r.height) y = ev.clientY - r.top - tip.offsetHeight - 14;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+function ev_buttons(ev) { return ev.buttons && ev.buttons !== 0; }
+
+// ------------------------------------------------------------------ UI
+$('bNext').onclick = next; $('bPrev').onclick = prev; $('bPlay').onclick = togglePlay;
+$('bStart').onclick = function () { stopPlay(); goStart(); }; $('bEnd').onclick = function () { stopPlay(); goEnd(); };
+$('slider').oninput = function () { stopPlay(); setK(+this.value); };
+$('goto').onchange = function () { stopPlay(); setK(+this.value); };
+$('runSel').onchange = function () { selectRun(+this.value); };
+$('palSel').onchange = function () { stopPlay(); setPallet(+this.value); };
+$('wNext').onclick = function () { stopPlay(); jumpWarning(+1); }; $('wPrev').onclick = function () { stopPlay(); jumpWarning(-1); };
+$('warnList').onclick = function (ev) { var li = ev.target.closest('li'); if (li) { stopPlay(); gotoStepNumber(+li.dataset.step); } };
+$('runsTable').onclick = function (ev) { var tr = ev.target.closest('tr[data-run]'); if (tr) selectRun(+tr.dataset.run); };
+document.querySelectorAll('#cams button').forEach(function (b) { b.onclick = function () { setCam(b.dataset.cam); }; });
+// Sin foco tras el clic: así espacio y flechas siempre van al visor y no repiten el botón.
+document.querySelectorAll('button').forEach(function (b) { b.addEventListener('click', function () { b.blur(); }); });
+$('colorMode').onchange = function () { S.opts.colorMode = this.value; renderLegend(); finishAnim(); applyState(); };
+$('optLabels').onchange = function () { S.opts.labels = this.checked; finishAnim(); applyState(); };
+$('optTrans').onchange = function () { S.opts.translucent = this.checked; finishAnim(); applyState(); };
+$('optWarn').onchange = function () { S.opts.warn = this.checked; finishAnim(); applyState(); };
+$('optApproach').onchange = function () { S.opts.approach = this.checked; };
+$('optRobot').onchange = function () { S.opts.robot = this.checked; finishAnim(); applyState(); };
+$('optRobotAnim').onchange = function () { S.opts.robotAnim = this.checked; };
+$('optRobotChecks').onchange = function () { S.opts.robotChecks = this.checked; recheck(); };
+$('optShadows').onchange = function () { S.opts.shadows = this.checked; renderer.shadowMap.enabled = this.checked; sun.castShadow = this.checked;
+  scene.traverse(function (o) { if (o.material) o.material.needsUpdate = true; }); };
+$('optDur').onchange = function () { S.opts.durS = Math.max(0, +this.value || 0); };
+$('optLift').onchange = function () { S.opts.liftMm = Math.max(0, +this.value || 0); };
+$('optAppr').onchange = function () { S.opts.apprMm = Math.max(0, +this.value || 0); };
+$('playSpeed').oninput = function () { S.opts.playSpeed = +this.value; $('playSpeedLbl').textContent = this.value + '×'; };
+[['thSupport', 'minSupportPct'], ['thAccess', 'accessDeltaMm'], ['thTower', 'towerRatio'], ['thBrace', 'towerBraceGapMm'], ['thTol', 'tolMm']].forEach(function (p) {
+  $(p[0]).onchange = function () { S.th[p[1]] = Math.max(0, +this.value || 0); recheck(); };
+});
+document.addEventListener('keydown', function (ev) {
+  if (!S.run || ev.target.tagName === 'INPUT' || ev.target.tagName === 'SELECT') return;
+  if (ev.key === 'ArrowRight') { ev.preventDefault(); stopPlay(); next(); }
+  else if (ev.key === 'ArrowLeft') { ev.preventDefault(); stopPlay(); prev(); }
+  else if (ev.key === ' ') { ev.preventDefault(); togglePlay(); }
+  else if (ev.key === 'Home') { ev.preventDefault(); stopPlay(); goStart(); }
+  else if (ev.key === 'End') { ev.preventDefault(); stopPlay(); goEnd(); }
+});
+function readFile(f) { var r = new FileReader(); r.onload = function () { try { loadData(JSON.parse(r.result)); } catch (e) { alert('No se pudo leer el JSON: ' + e.message); } }; r.readAsText(f); }
+$('openBtn').onclick = function () { $('file').click(); };
+$('file').onchange = function () { if (this.files[0]) readFile(this.files[0]); this.value = ''; };
+['dragenter', 'dragover'].forEach(function (t) { window.addEventListener(t, function (ev) { ev.preventDefault(); $('drop').classList.add('show', 'drag'); }); });
+['dragleave', 'drop'].forEach(function (t) { window.addEventListener(t, function (ev) { ev.preventDefault(); $('drop').classList.remove('drag'); if (S.data) $('drop').classList.remove('show'); }); });
+window.addEventListener('drop', function (ev) { var f = ev.dataTransfer && ev.dataTransfer.files[0]; if (f) readFile(f); });
+
+// ------------------------------------------------------------------ bucle
+function resize() {
+  var w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+var frames = 0, fpsT = performance.now();
+S.fps = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  playTick(now);
+  stepAnim(now);
+  hoverTick();
+  controls.update();
+  renderer.render(scene, camera);
+  frames++;
+  if (now - fpsT >= 500) { S.fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; $('fps').textContent = S.fps.toFixed(0) + ' fps'; }
+}
+resize();
+setCam('iso');
+renderLegend();
+var ROBOT_MESH = null;
+try { ROBOT_MESH = JSON.parse($('robot-mesh').textContent); } catch (e) { ROBOT_MESH = null; }
+var embedded = null;
+try { embedded = JSON.parse($('sim-data').textContent); } catch (e) { embedded = null; }
+if (embedded) loadData(embedded);
+else { $('drop').classList.add('show'); buildStatic({ x0: -20, y0: -20, x1: 1220, y1: 820, z0: 0, z1: 2400 }, { length: 1200, width: 800 }); }
+requestAnimationFrame(loop);
+
+// API mínima para pruebas automáticas.
+S.api = { next: next, prev: prev, setK: setK, finishAnim: finishAnim, setPallet: setPallet, selectRun: selectRun,
+          gotoStepNumber: gotoStepNumber, loadData: loadData, visibleSteps: visibleSteps, setCam: setCam,
+          view: function (pos, target) { camera.position.fromArray(pos); controls.target.fromArray(target); controls.update(); },
+          // Avanza la animación con un reloj simulado (para pruebas con la pestaña en segundo plano).
+          tick: function (now) { stepAnim(now); },
+          // ms por frame de render síncrono (readPixels fuerza a esperar a la GPU).
+          bench: function (n) {
+            var gl = renderer.getContext(), px = new Uint8Array(4), t0 = performance.now();
+            for (var i = 0; i < n; i++) { controls.update(); renderer.render(scene, camera); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); }
+            return (performance.now() - t0) / n;
+          },
+          meshPos: function (step) { var e = S.meshes.get(step); return e ? e.mesh.position.toArray() : null; } };
+})();
+</script>
+</body>
+</html>
