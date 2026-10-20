@@ -1,0 +1,13 @@
+# Evaluación única de H3 (ganadora de h3_tune_v2/v3: n=100, d=3, w=8), ejecutada dos veces para demostrar determinismo. Director (D-011).
+- name: arm6_4orient
+  preset: arm6_4orient
+  role: official
+  overrides: {}
+- name: h1_w0.25_b600
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600}
+- name: h3_n100_d3_w8
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 100, micro_depth: 3, micro_width: 8, micro_topk: 15}

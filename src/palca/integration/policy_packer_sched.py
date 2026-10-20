@@ -72,6 +72,8 @@ class PolicyConfig:
     settle_max_iter: int = 0
     settle_timeout_ms: int = 0
     micro_plan_enabled: bool = False
+    micro_plan_node_budget: int = 0
+    micro_plan_hard_cap_ms: int = 10000
     micro_plan_depth: int = 3
     micro_plan_width: int = 8
     micro_plan_topk_per_step: int = 15
@@ -201,6 +203,8 @@ class PolicyPackerScheduler:
         settle_max_iter: int = 0,
         settle_timeout_ms: int = 0,
         micro_plan_enabled: bool = False,
+        micro_plan_node_budget: int = 0,
+        micro_plan_hard_cap_ms: int = 10000,
         micro_plan_depth: int = 3,
         micro_plan_width: int = 8,
         micro_plan_topk_per_step: int = 15,
@@ -211,6 +215,8 @@ class PolicyPackerScheduler:
         online_controller: bool = False,
         controller_debug: bool = False,
     ) -> "PolicyPackerScheduler":
+        if micro_plan_enabled and micro_plan_node_budget > 0 and settle_timeout_ms > 0:
+            raise ValueError("Deterministic microplan requires settle_timeout_ms=0")
         if lookahead_k not in SUPPORTED_LOOKAHEAD_K:
             raise ValueError(f"K no soportado: {lookahead_k}")
         pallet_spec = PalletSpec(overhang_mm=overhang_mm)
@@ -243,6 +249,8 @@ class PolicyPackerScheduler:
             max_seconds_per_item=max_seconds_per_item,
             heartbeat_sec=heartbeat_sec,
             micro_plan_enabled=micro_plan_enabled,
+            micro_plan_node_budget=micro_plan_node_budget,
+            micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
@@ -296,6 +304,8 @@ class PolicyPackerScheduler:
             settle_max_iter=settle_max_iter,
             settle_timeout_ms=settle_timeout_ms,
             micro_plan_enabled=micro_plan_enabled,
+            micro_plan_node_budget=micro_plan_node_budget,
+            micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
             micro_plan_depth=micro_plan_depth,
             micro_plan_width=micro_plan_width,
             micro_plan_topk_per_step=micro_plan_topk_per_step,
@@ -708,6 +718,21 @@ class PolicyPackerScheduler:
         kpis["micro_plan_time_ms_max"] = float(micro_max)
         kpis["micro_plan_nodes_expanded_total"] = int(
             getattr(self._scheduler, "micro_plan_nodes_expanded_total", 0) or 0
+        )
+        from numpy import percentile
+
+        nodes = self._scheduler.micro_plan_nodes_expanded
+        times = self._scheduler.micro_plan_times_ms
+        kpis["micro_plan_nodes_expanded"] = list(nodes)
+        kpis["micro_plan_nodes_expanded_mean"] = sum(nodes) / len(nodes) if nodes else 0.0
+        kpis["micro_plan_nodes_expanded_p95"] = float(percentile(nodes, 95)) if nodes else 0.0
+        kpis["micro_plan_nodes_expanded_max"] = max(nodes, default=0)
+        kpis["micro_plan_time_ms_p95"] = float(percentile(times, 95)) if times else 0.0
+        kpis["hard_cap_hits"] = self._scheduler.hard_cap_hits
+        kpis["micro_plan_deterministic"] = bool(
+            self._scheduler.config.micro_plan_enabled
+            and self._scheduler.config.micro_plan_node_budget > 0
+            and self._scheduler.hard_cap_hits == 0
         )
         depth_count = int(getattr(self._scheduler, "micro_plan_depth_effective_count", 0) or 0)
         depth_sum = float(getattr(self._scheduler, "micro_plan_depth_effective_sum", 0.0) or 0.0)

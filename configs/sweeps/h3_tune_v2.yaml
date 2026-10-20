@@ -1,0 +1,70 @@
+# Ajuste H3 (director, D-011): rejilla de la spec 08 con n=2000 sustituido por n=100 tras la medición de coste
+# (n=100: ~390 ms/decisión y KPI ~71 %; n>=500 no mejora y ronda 1 s de media). Seeds de ajuste 1001-1010.
+- name: h1_w0.25_b600
+  preset: arm6_4orient
+  role: official
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600}
+- name: h3_n100_d2_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 100, micro_depth: 2, micro_width: 8, micro_topk: 15}
+- name: h3_n100_d3_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 100, micro_depth: 3, micro_width: 8, micro_topk: 15}
+- name: h3_n100_d3_w16
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 100, micro_depth: 3, micro_width: 16, micro_topk: 15}
+- name: h3_n100_d4_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 100, micro_depth: 4, micro_width: 8, micro_topk: 15}
+- name: h3_n250_d2_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 250, micro_depth: 2, micro_width: 8, micro_topk: 15}
+- name: h3_n250_d3_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 250, micro_depth: 3, micro_width: 8, micro_topk: 15}
+- name: h3_n250_d3_w16
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 250, micro_depth: 3, micro_width: 16, micro_topk: 15}
+- name: h3_n250_d4_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 250, micro_depth: 4, micro_width: 8, micro_topk: 15}
+- name: h3_n500_d2_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 500, micro_depth: 2, micro_width: 8, micro_topk: 15}
+- name: h3_n500_d3_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 500, micro_depth: 3, micro_width: 8, micro_topk: 15}
+- name: h3_n500_d3_w16
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 500, micro_depth: 3, micro_width: 16, micro_topk: 15}
+- name: h3_n500_d4_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 500, micro_depth: 4, micro_width: 8, micro_topk: 15}
+- name: h3_n1000_d2_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 1000, micro_depth: 2, micro_width: 8, micro_topk: 15}
+- name: h3_n1000_d3_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 1000, micro_depth: 3, micro_width: 8, micro_topk: 15}
+- name: h3_n1000_d3_w16
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 1000, micro_depth: 3, micro_width: 16, micro_topk: 15}
+- name: h3_n1000_d4_w8
+  preset: arm6_4orient
+  role: contrast
+  overrides: {access_debt_mode: penalty, access_debt_weight: 0.25, access_debt_band_mm: 600, micro_plan: true, micro_plan_node_budget: 1000, micro_depth: 4, micro_width: 8, micro_topk: 15}
