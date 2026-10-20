@@ -158,18 +158,20 @@
     var g = new T.Group();
     var u = new T.Vector3().fromArray(c.direction), t = new T.Vector3().fromArray(c.tangent);
     var p = new T.Vector3().fromArray(c.point);
-    var len = 8500, width = 800, h = c.z_conveyor + 144;
+    // Longitud, ancho y tramo aguas abajo del punto de recogida: por defecto, los de la estación del brazo.
+    var len = c.length_mm || 8500, width = c.width_mm || 800, h = c.z_conveyor + 144;
+    var down = c.downstream_mm == null ? 600 : c.downstream_mm;
     var basis = new T.Matrix4().makeBasis(t, u, new T.Vector3(0, 0, 1));
     var frame = new T.Mesh(new T.BoxGeometry(len, width, 60), new T.MeshStandardMaterial({ color: 0x4a5560, roughness: 0.7 }));
-    frame.applyMatrix4(basis); frame.position.copy(p).addScaledVector(t, -len / 2 + 600).add(new T.Vector3(0, 0, -30));
+    frame.applyMatrix4(basis); frame.position.copy(p).addScaledVector(t, -len / 2 + down).add(new T.Vector3(0, 0, -30));
     frame.receiveShadow = true; g.add(frame);
     var rollerMat = new T.MeshStandardMaterial({ color: 0xc8ccd2, metalness: 0.7, roughness: 0.3 });
-    for (var s = -len + 600; s <= 600; s += 120) {
+    for (var s = -len + down; s <= down; s += 120) {
       var r = new T.Mesh(new T.CylinderGeometry(25, 25, width - 40, 10), rollerMat);
       r.applyMatrix4(basis); r.position.copy(p).addScaledVector(t, s).add(new T.Vector3(0, 0, -25)); g.add(r);
     }
     var legMat = new T.MeshStandardMaterial({ color: 0x3b4148 });
-    for (var s2 = -len + 800; s2 <= 600; s2 += 1500) {
+    for (var s2 = -len + down + 200; s2 <= down; s2 += 1500) {
       [-1, 1].forEach(function (k) {
         var leg = new T.Mesh(new T.BoxGeometry(60, 60, h - 60), legMat);
         leg.position.copy(p).addScaledVector(t, s2).addScaledVector(u, k * (width / 2 - 40)).add(new T.Vector3(0, 0, -60 - (h - 60) / 2));
@@ -180,8 +182,14 @@
     var mark = new T.Mesh(new T.RingGeometry(60, 80, 32), new T.MeshBasicMaterial({ color: 0x00c8ff, side: T.DoubleSide }));
     mark.position.copy(p).add(new T.Vector3(0, 0, 2)); g.add(mark);
     scene.add(g);
-    return { group: g, point: p, u: u, t: t, queue: [] };
+    return { group: g, point: p, u: u, t: t, queue: [],
+             headOffset: c.queue_head_offset_mm == null ? 450 : c.queue_head_offset_mm,
+             gap: c.queue_gap_mm == null ? 15 : c.queue_gap_mm };
   }
 
-  root.Sim3DRobot = { frames: frames, toolLocal: toolLocal, cellMatrix: cellMatrix, Robot: Robot };
+  Robot.prototype.kind = 'arm';
+  Robot.prototype.home = [0, 0, 0, 0, -90, 0];
+
+  root.Sim3DRobot = { frames: frames, toolLocal: toolLocal, cellMatrix: cellMatrix, Robot: Robot,
+                      buildGripper: buildGripper, buildConveyor: buildConveyor };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -87,6 +87,44 @@ librando el pasillo, baja desplazada 20 mm al lateral libre, se desliza a su sit
 Los fallos del robot (alcance, límites, colisión de J2/J3/J5, garra o caja transportada) entran en la
 lista de avisos y el eslabón que choca se pinta en rojo en la pose que falla.
 
+## Gantry XYZC (pórtico cartesiano) y comparación con el brazo
+
+Resultados, layout y supuestos: [docs/COMPARATIVA_BRAZO_GANTRY.md](../../docs/COMPARATIVA_BRAZO_GANTRY.md).
+El gantry es otro tipo de robot que usa la misma evaluación por caja que el brazo
+(`palca.robot.cell_study.evaluate_run` con `palca.robot.gantry.GantryModel`): entrada por el pasillo
+desde el punto de recogida, bajada desplazada 20 mm, colisiones de garra, cabezal C, columna Z y caja
+transportada. `palca.robot.gantry_study` añade la cinta con la cola K, el volteador de las cajas de canto,
+el dimensionado de carreras y estructura y el ciclo con tiempos por eje.
+
+```bash
+# 1) Trazas con la config equivalente para pórtico (preset gantry_4orient, sin la restricción de 400 mm)
+for s in 50021 1 42 100 777 5678 9999 12345 99999 314159; do
+  .venv/bin/python scripts/export_sim_trace.py --run h6_sin_gate_gantry --seeds $s \
+      --out out/sim3d/seeds_gantry/h6_sin_gate_gantry_$s.json
+done
+
+# 2) Barrido de layouts (lado y sentido de la cinta, altura) y celda elegida (~6 min);
+#    se pueden añadir las trazas de h6_sin_gate para evaluar el gantry también sobre los palets del brazo
+.venv/bin/python scripts/gantry_reach_study.py out/sim3d/seeds_gantry/*.json out/sim3d/seeds/*.json \
+    --out out/sim3d/gantry_study --workers 12
+
+# 3) Informe comparativo (Markdown + plano SVG) con el estudio del brazo
+.venv/bin/python scripts/robot_compare_report.py --arm out/sim3d/robot_cell/study.json \
+    --arm-mesh out/sim3d/robot_r2000ic165f.json --gantry out/sim3d/gantry_study/study.json \
+    --traces out/sim3d/seeds_gantry/*.json out/sim3d/seeds/*.json --out docs/COMPARATIVA_BRAZO_GANTRY.md
+
+# 4) Visor con el pórtico, la cinta con la cola, el volteador y el ciclo animado
+.venv/bin/python scripts/export_sim_trace.py --from-json out/sim3d/seeds_gantry/h6_sin_gate_gantry_50021.json \
+    --from-json out/sim3d/seeds/h6_sin_gate_50021.json --robot-study out/sim3d/gantry_study/study.json \
+    --html out/sim3d/sim3d_gantry_50021.html
+```
+
+Con el gantry, «Siguiente caja» anima el ciclo con sus tiempos reales escalados: el pórtico va a la caja
+elegida en la cola (cualquiera de las 15), la coge por arriba; si es de canto la deja tumbada en el
+volteador, la cuna la pone de pie y la vuelve a coger por H×W; entra por encima del pasillo, baja desplazada
+20 mm, se desliza, suelta y se retira. El panel del robot muestra planta, carreras, alturas, ciclo medio y el
+desglose de tiempos de cada caja; los choques pintan en rojo la garra, el cabezal C o la columna Z.
+
 ## Coordenadas (verificadas en `pallet_model.py`, `validate.py` y `PalletSpec`)
 
 mm; origen en la esquina del palet nominal 1200×800; z vertical, z=0 es la cara superior

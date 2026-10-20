@@ -90,6 +90,7 @@ footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
 <script src="vendor/OrbitControls.js"></script>
 <script src="checks.js"></script>
 <script src="robot.js"></script>
+<script src="gantry.js"></script>
 </head>
 <body>
 <div id="app">
@@ -137,7 +138,7 @@ footer .tr button { min-width: 38px; font-size: 15px; padding: 3px 8px; }
         <label><input type="checkbox" id="optApproach"> Bajada con aproximación lateral</label>
         <label><input type="checkbox" id="optShadows" checked> Sombras</label>
         <div id="robotOpts" hidden>
-          <label><input type="checkbox" id="optRobot" checked> Robot, pedestal y cinta</label>
+          <label><input type="checkbox" id="optRobot" checked> Robot (brazo o pórtico), estructura y cinta</label>
           <label><input type="checkbox" id="optRobotAnim" checked> Animar el ciclo completo del robot</label>
           <label><input type="checkbox" id="optRobotChecks" checked> Avisos de alcance y colisión del robot</label>
         </div>
@@ -461,13 +462,14 @@ function m4(rows) { var m = new THREE.Matrix4(); m.set.apply(m, [].concat.apply(
 function robotRest() {
   if (!S.robot) return;
   S.robot.setVisible(S.opts.robot);
-  var cur = currentStep(), rs = robotStep(cur), q = HOME_Q, bad = null;
+  var cur = currentStep(), rs = robotStep(cur), q = S.robot.home || HOME_Q, bad = null;
   if (rs) {
     var failing = (rs.poses || []).find(function (p) { return p.reason; });
     if (failing && failing.q) { q = failing.q; var m = /colision:(\w+)/.exec(failing.reason || ''); bad = m ? m[1] : null; }
     else if (rs.cycle && rs.cycle.waypoints.length) q = rs.cycle.waypoints[rs.cycle.waypoints.length - 1].q;
   }
   S.robot.setQ(q, bad);
+  if (S.robot.setTip) S.robot.setTip(0);
   renderQueue();
 }
 var queuePool = [];
@@ -476,13 +478,13 @@ var queuePool = [];
 function renderQueue() {
   queuePool.forEach(function (m) { m.visible = false; });
   if (!S.robot || !S.robot.conveyor || !S.opts.robot) return;
-  var animating = S.anim && S.anim.type === 'robot';
+  var animating = S.anim && (S.anim.type === 'robot' || S.anim.type === 'gantry');
   var nxt = animating ? S.anim.step : S.k < S.seq.length ? S.run.steps[S.seq[S.k]] : null;
   if (!nxt || !nxt.conveyor) return;
-  var cv = S.robot.conveyor, s = 450;
+  var cv = S.robot.conveyor, s = cv.headOffset;
   nxt.conveyor.forEach(function (b, i) {
     var L = b.lwh[0], W = b.lwh[1], H = b.lwh[2];
-    s += W / 2 + 15;
+    s += W / 2 + cv.gap;
     var m = queuePool[i];
     if (!m) {
       m = new THREE.Mesh(UNIT, new THREE.MeshStandardMaterial({ color: 0xd9c7a3, roughness: 0.9 }));
@@ -500,18 +502,19 @@ function renderQueue() {
   });
 }
 function startRobotAnim(s, dir) {
+  if (S.robot.kind === 'gantry') return startGantryAnim(s, dir);
   var rs = robotStep(s);
   if (!rs || !rs.cycle || !rs.cycle.waypoints.length || !rs.cycle.box_rel || !S.opts.robotAnim) return false;
   var wps = rs.cycle.waypoints, idx = S.seq.indexOf(S.run.steps.indexOf(s));
   var prevS = idx > 0 ? S.run.steps[S.seq[idx - 1]] : null, prs = robotStep(prevS);
-  var restPrev = prs && prs.cycle && prs.cycle.waypoints.length ? prs.cycle.waypoints[prs.cycle.waypoints.length - 1].q : HOME_Q;
+  var restPrev = prs && prs.cycle && prs.cycle.waypoints.length ? prs.cycle.waypoints[prs.cycle.waypoints.length - 1].q : S.robot.home || HOME_Q;
   var qs = [restPrev].concat(wps.map(function (w) { return w.q; }));
   var kinds = ['reposo'].concat(wps.map(function (w) { return w.kind; }));
   var att = [false].concat(wps.map(function (w) { return w.attached && w.kind !== 'final'; }));
   var speed = 140 * (0.8 / Math.max(0.1, S.opts.durS)); // grados/s de la articulación más lenta
   var dur = [];
   for (var i = 0; i + 1 < qs.length; i++) {
-    var d = 0; for (var j = 0; j < 6; j++) d = Math.max(d, Math.abs(qs[i + 1][j] - qs[i][j]));
+    var d = 0; for (var j = 0; j < qs[i].length; j++) d = Math.max(d, Math.abs(qs[i + 1][j] - qs[i][j]));
     dur.push(Math.max(140, 1000 * d / speed) * (/bajada|aproximacion|final/.test(kinds[i + 1]) ? 1.6 : 1));
   }
   var e = ensureMesh(s);
@@ -536,13 +539,64 @@ function stepRobotAnim(a, t) {
   var i = 0;
   while (i < a.dur.length - 1 && t > a.dur[i]) { t -= a.dur[i]; i++; }
   var u = ease(Math.max(0, Math.min(1, t / a.dur[i]))), q = [];
-  for (var j = 0; j < 6; j++) q.push(a.qs[i][j] + (a.qs[i + 1][j] - a.qs[i][j]) * u);
+  for (var j = 0; j < a.qs[i].length; j++) q.push(a.qs[i][j] + (a.qs[i + 1][j] - a.qs[i][j]) * u);
   S.robot.setQ(q);
   // Caja: en la cinta antes de cogerla, pegada a la garra después y en su sitio al soltarla.
   var released = a.kinds.slice(0, i + 1).indexOf('final') >= 0;
   if (a.att[i]) setBoxMatrix(a.e.mesh, S.robot.toolWorld(q).multiply(a.rel).multiply(a.X));
   else if (released) setBoxMatrix(a.e.mesh, a.mFinal);
   else setBoxMatrix(a.e.mesh, a.conv);
+}
+
+/* Gantry: tiempos reales del ciclo (escalados), estado de la caja por tramo y volteador. */
+function startGantryAnim(s, dir) {
+  var rs = robotStep(s);
+  if (!rs || !rs.cycle || !rs.cycle.waypoints.length || !rs.cycle.box_rel || !S.opts.robotAnim) return false;
+  var wps = rs.cycle.waypoints, idx = S.seq.indexOf(S.run.steps.indexOf(s));
+  var prevS = idx > 0 ? S.run.steps[S.seq[idx - 1]] : null, prs = robotStep(prevS);
+  var restPrev = prs && prs.cycle && prs.cycle.waypoints.length ? prs.cycle.waypoints[prs.cycle.waypoints.length - 1].q : S.robot.home;
+  var k = 0.4 * S.opts.durS / 0.8, tip = 0;  // 1 s real = 0,4 s de animación con la duración por defecto
+  var a = { type: 'gantry', step: s, e: ensureMesh(s), qs: [restPrev], dur: [], move: [], box: [], tip: [], dir: dir };
+  wps.forEach(function (w) {
+    var tt = w.t_move + w.t_dwell;
+    a.qs.push(w.q); a.dur.push(Math.max(60, 1000 * k * tt)); a.move.push(tt > 0 ? w.t_move / tt : 1);
+    a.box.push(w.box); if (w.tip != null) tip = w.tip; a.tip.push(tip);
+  });
+  var fin = wps.filter(function (w) { return w.kind === 'final'; })[0] || wps[wps.length - 1];
+  a.rel = m4(rs.cycle.box_rel);
+  a.relPick = rs.cycle.box_rel_pick ? m4(rs.cycle.box_rel_pick) : a.rel;
+  a.tipLocal = rs.cycle.box_tipper_local ? m4(rs.cycle.box_tipper_local) : null;
+  a.mFinal = new THREE.Matrix4().compose(finalCenter(s), new THREE.Quaternion(), new THREE.Vector3(s.dx, s.dy, s.dz));
+  a.X = S.robot.toolWorld(fin.q).multiply(a.rel).invert().multiply(a.mFinal);
+  a.conv = m4(rs.cycle.box_conveyor).multiply(a.X);
+  a.total = a.dur.reduce(function (x, y) { return x + y; }, 0);
+  a.t0 = performance.now();
+  S.anim = a;
+  a.e.mesh.visible = true;
+  renderQueue();
+  stepAnim(a.t0);
+  return true;
+}
+function gantryBoxMatrix(a, st, q, tipF) {
+  if (st === 'tool') return S.robot.toolWorld(q).multiply(a.rel).multiply(a.X);
+  if (st === 'tool_pick') return S.robot.toolWorld(q).multiply(a.relPick).multiply(a.X);
+  if (st === 'tipper' && a.tipLocal) return S.robot.tipperMatrix(tipF).multiply(a.tipLocal).multiply(a.X);
+  if (st === 'placed') return a.mFinal;
+  return a.conv;
+}
+function stepGantryAnim(a, t) {
+  if (a.dir < 0) t = a.total - t;
+  var i = 0;
+  while (i < a.dur.length - 1 && t > a.dur[i]) { t -= a.dur[i]; i++; }
+  var tm = a.dur[i] * a.move[i], moving = t < tm;
+  var u = tm > 0 ? ease(Math.max(0, Math.min(1, t / tm))) : 1, q0 = a.qs[i], q1 = a.qs[i + 1], q = [];
+  for (var j = 0; j < q0.length; j++) q.push(q0[j] + (q1[j] - q0[j]) * u);
+  S.robot.setQ(q);
+  var tip0 = i > 0 ? a.tip[i - 1] : 0, tipF = tip0 + (a.tip[i] - tip0) * u;
+  S.robot.setTip(tipF);
+  // Mientras se mueve hacia el waypoint i manda el estado del anterior; al llegar, el suyo.
+  var st = moving ? (i > 0 ? a.box[i - 1] : 'conveyor') : a.box[i];
+  setBoxMatrix(a.e.mesh, gantryBoxMatrix(a, st, q, tipF));
 }
 
 // ------------------------------------------------------------------ animación (solo visual)
@@ -580,6 +634,7 @@ function stepAnim(now) {
   var t = now - a.t0;
   if (t >= a.total) { finishAnim(); return; }
   if (a.type === 'robot') { stepRobotAnim(a, t); return; }
+  if (a.type === 'gantry') { stepGantryAnim(a, t); return; }
   for (var i = 0; i < a.dur.length; i++) {
     if (t <= a.dur[i]) { a.e.mesh.position.lerpVectors(a.pts[i], a.pts[i + 1], ease(t / a.dur[i])); return; }
     t -= a.dur[i];
@@ -727,6 +782,7 @@ function renderRobotPanel(cur) {
   var sec = $('secRobot'), R = S.run.robot;
   sec.hidden = !S.robot;
   if (!S.robot) return;
+  if (S.robot.kind === 'gantry') { sec.innerHTML = gantryPanel(R, cur); return; }
   var c = R.cell, cv = R.conveyor, rs = robotStep(cur);
   var h = '<h2>Robot ' + esc(R.model) + '</h2><div class="kv">' +
     '<span class="k">Base (J1)</span><span class="v">x ' + fmt(c.base_x) + ', y ' + fmt(c.base_y) + ' mm · ' + esc(c.side_label) + '</span>' +
@@ -750,9 +806,42 @@ function renderRobotPanel(cur) {
   }
   sec.innerHTML = h;
 }
+function gantryPanel(R, cur) {
+  var g = R.gantry, cv = R.conveyor, rs = robotStep(cur), fp = g.footprint, hs = g.heights, sm = R.summary || {};
+  var h = '<h2>' + esc(R.model) + '</h2><div class="kv">' +
+    '<span class="k">Pórtico</span><span class="v">' + fmt(fp.length) + ' × ' + fmt(fp.width) + ' mm (' + fmt(fp.area_m2, 1) + ' m²), ' +
+      g.posts.length + ' patas de ' + fmt(g.frame.post_mm) + '×' + fmt(g.frame.post_mm) + '</span>' +
+    '<span class="k">Carreras</span><span class="v">X ' + fmt(g.strokes.X) + ' · Y ' + fmt(g.strokes.Y) + ' · Z ' + fmt(g.strokes.Z) + ' mm · C ±180°</span>' +
+    '<span class="k">Altura</span><span class="v">bajo el puente ' + fmt(hs.bridge_underside) + ' mm; nave ' + fmt(hs.building_fixed) +
+      ' mm (columna fija) / ' + fmt(hs.building_telescopic) + ' mm (telescópica)</span>' +
+    (cv ? '<span class="k">Cinta</span><span class="v">' + esc(R.cell.side_label) + ', superficie a ' + fmt(cv.height_mm) + ' mm, avance ' +
+      (cv.tangent[0] > 0 ? '+X' : '−X') + '; volteador de 90° tras la cabeza de la cola</span>' : '') +
+    '<span class="k">Colocaciones viables</span><span class="v ' + (R.n_ok === R.n ? 'ok' : 'warn') + '"><b>' + R.n_ok + ' / ' + R.n + '</b> (' + pct(R.n_ok / R.n, 1) + ')</span>' +
+    (sm.cycle_mean_s ? '<span class="k">Ciclo medio</span><span class="v">' + fmt(sm.cycle_mean_s, 1) + ' s (' + fmt(sm.boxes_per_hour) + ' cajas/h); plana ' +
+      fmt(sm.cycle_plana_s, 1) + ' s, de canto ' + fmt(sm.cycle_canto_s, 1) + ' s</span>' : '') +
+    '</div>';
+  if (cur && rs) {
+    var fin = (rs.poses || []).find(function (p) { return p.kind === 'final'; });
+    var dir = rs.approach ? (rs.approach[0] < 0 ? '-X' : rs.approach[0] > 0 ? '+X' : rs.approach[1] < 0 ? '-Y' : '+Y') : null;
+    var cy = rs.cycle || {}, canto = cur.orientation === 'HWL' || cur.orientation === 'WHL';
+    h += '<div class="kv" style="margin-top:6px">' +
+      '<span class="k">Esta caja</span><span class="v ' + (rs.ok ? 'ok' : 'err') + '"><b>' + (rs.ok ? 'viable' : 'NO viable') + '</b></span>' +
+      '<span class="k">Recogida</span><span class="v">n.º ' + ((cy.queue_index || 0) + 1) + ' de la cola, a ' + fmt(cy.queue_offset_mm) + ' mm de la cabeza' +
+        (canto ? '; de canto: volteador y segunda toma por H×W' : '; plana, por arriba') + '</span>' +
+      '<span class="k">Bajada</span><span class="v">' + (dir ? 'desplazada 20 mm por ' + SIDE_ES[dir] : 'cenital (sin lateral libre)') + '</span>' +
+      '<span class="k">Elevación de entrada</span><span class="v">' + fmt(rs.entry_lift_mm) + ' mm sobre la posición final</span>' +
+      (fin && fin.q ? '<span class="k">X Y Z C final</span><span class="v">' + fin.q.slice(0, 3).map(function (v) { return fmt(v); }).join(', ') + ' mm · ' + fmt(fin.q[3]) + '°</span>' : '') +
+      (rs.min_margin_deg != null ? '<span class="k">Margen a fin de carrera</span><span class="v">' + fmt(rs.min_margin_deg) + ' mm</span>' : '') +
+      (cy.cycle_s != null ? '<span class="k">Ciclo de esta caja</span><span class="v"><b>' + fmt(cy.cycle_s, 1) + ' s</b>: ' + (cy.waypoints || []).map(function (w) {
+        return esc(w.kind.replace(/_/g, ' ')) + ' ' + fmt(w.t_move + w.t_dwell, 1);
+      }).join(' · ') + '</span>' : '') +
+      '</div>';
+  }
+  return h;
+}
 function updateShadowCamera() {
-  var sc = sun.shadow.camera, r = S.robot ? 3600 : 1700;
-  sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.far = S.robot ? 14000 : 9000;
+  var sc = sun.shadow.camera, r = S.robot ? (S.robot.kind === 'gantry' ? 6500 : 3600) : 1700;
+  sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r; sc.far = S.robot ? (S.robot.kind === 'gantry' ? 22000 : 14000) : 9000;
   if (S.robot) { sun.target.position.set((600 + S.robot.cell.base_x) / 2, (400 + S.robot.cell.base_y) / 2, 0); sun.position.set(sun.target.position.x - 2500, sun.target.position.y - 3500, 5200); }
   sc.updateProjectionMatrix();
 }
@@ -789,11 +878,11 @@ function addRobotChecks(run, res) {
     var found = [];
     if (!rs.ok && rs.reason) {
       var m = /^(\w+):(alcance|colision):([\w_]+)(?:\(paso (\d+)\))?/.exec(rs.reason) || [];
-      var what = m[2] === 'colision' ? 'choca ' + ({ caja_transportada: 'la caja transportada', garra: 'la garra' }[m[3]] || 'el eslabón ' + (m[3] || '?').toUpperCase()) +
+      var what = m[2] === 'colision' ? 'choca ' + ({ caja_transportada: 'la caja transportada', garra: 'la garra', cabezal_c: 'el cabezal del eje C', columna_z: 'la columna Z' }[m[3]] || 'el eslabón ' + (m[3] || '?').toUpperCase()) +
         (m[4] ? ' con la caja del paso ' + m[4] : ' con el palet') : 'fuera de alcance (' + (m[3] || '?').replace(/_/g, ' ') + ')';
       found.push({ code: 'robot', severity: 'error', label: 'Robot', msg: 'En la ' + (POSE_ES[m[1]] || m[1]) + ': ' + what, other: m[4] ? +m[4] : null });
     }
-    if (rs.cycle && rs.cycle.pick_ok === false) found.push({ code: 'robot_pick', severity: 'error', label: 'Recogida', msg: 'El robot no alcanza la recogida en la cinta con esta orientación' });
+    if (rs.cycle && rs.cycle.pick_ok === false) found.push({ code: 'robot_pick', severity: 'error', label: 'Recogida', msg: rs.cycle.pick_reason || 'El robot no alcanza la recogida en la cinta con esta orientación' });
     if (rs.gripper_fits === false) found.push({ code: 'gripper_fit', severity: 'warn', label: 'Ventosas', msg: 'Las 4 ventosas no caben en la cara de agarre' });
     found.forEach(function (w) { w.step = s.step; w.pallet = s.pallet; w.box_id = s.box_id; });
     if (found.length) {
@@ -828,10 +917,14 @@ function selectRun(i) {
   S.byStep = {}; S.run.steps.forEach(function (s) { S.byStep[s.step] = s; });
   clearMeshes();
   S.colors = computeColors(S.run.steps);
+  // Umbral de accesibilidad = el de la propia ejecución (400 mm brazo, 0 pórtico).
+  var ad = S.run.params && S.run.params.accessibility_delta_mm;
+  if (ad != null) { S.th.accessDeltaMm = ad; $('thAccess').value = ad; }
   S.checks = runChecks(i);
   buildStatic(S.run.envelope, S.run.pallet_nominal || { length: 1200, width: 800 });
   if (S.robot) { S.robot.dispose(scene); S.robot = null; }
-  if (S.run.robot && window.Sim3DRobot) S.robot = new Sim3DRobot.Robot(scene, S.run.robot, ROBOT_MESH);
+  if (S.run.robot && S.run.robot.type === 'gantry' && window.Sim3DGantry) S.robot = new Sim3DGantry.Gantry(scene, S.run.robot);
+  else if (S.run.robot && window.Sim3DRobot) S.robot = new Sim3DRobot.Robot(scene, S.run.robot, ROBOT_MESH);
   $('robotOpts').hidden = !S.robot;
   updateShadowCamera();
   $('runSel').value = String(i);
@@ -864,6 +957,8 @@ function setCam(name) {
   if (S.robot && S.opts.robot) {  // encuadra palet, robot y cinta
     var c = S.robot.cell, cv = S.run.robot.conveyor;
     var pts = [[env.x0, env.y0], [env.x1, env.y1], [c.base_x, c.base_y]].concat(cv ? [cv.point.slice(0, 2)] : []);
+    var fp = S.run.robot.gantry && S.run.robot.gantry.footprint;
+    if (fp) pts.push([fp.x0, fp.y0], [fp.x1, fp.y1]);
     var xs = pts.map(function (p) { return p[0]; }), ys = pts.map(function (p) { return p[1]; });
     target.x = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2;
     target.y = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;

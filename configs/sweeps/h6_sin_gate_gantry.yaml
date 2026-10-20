@@ -1,0 +1,21 @@
+# CONTRASTE (estudio gantry, sim3d): mismas técnicas que h6_sin_gate pero con el preset gantry_4orient
+# (accessibility_delta_mm = 0: un pórtico baja en vertical y no necesita la restricción de 400 mm).
+# Con delta = 0 la deuda de accesibilidad H1 queda inactiva por construcción (access_debt devuelve 0).
+- name: h6_sin_gate_gantry
+  preset: gantry_4orient
+  role: contrast
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 57
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout
+    micro_plan_rollout_leaves: 2
+    rollout_future_boxes: 6
+    rollout_future_samples: 1
+    rollout_prior: generic
+    stand_hw_height_margin_gate_mm: 2400
