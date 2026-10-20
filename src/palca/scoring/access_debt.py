@@ -51,12 +51,16 @@ def build_heightfield(
 def access_debt(
     heightfield: HeightField, footprint: tuple[float, float, float, float],
     top_mm: float, delta_mm: int, band_mm: int,
+    *, accessibility_tall_box_exemption: bool = False,
+    access_debt_exempt_delta_mm: int = 750,
 ) -> AccessDebt:
     """Return volume/area below top-delta in the outside band, without mutation.
 
     footprint = (x, y, length, width). delta=0 means the physical accessibility
     control is disabled and therefore always returns zero debt.
     """
+    if delta_mm > 0 and accessibility_tall_box_exemption:
+        delta_mm = max(delta_mm, access_debt_exempt_delta_mm)
     threshold = top_mm - delta_mm
     if delta_mm == 0 or threshold <= 0 or band_mm <= 0:
         return AccessDebt()

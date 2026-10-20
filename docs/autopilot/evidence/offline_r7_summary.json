@@ -1,0 +1,584 @@
+{
+  "schema_version": 1,
+  "decision": "D-026",
+  "date": "2026-10-20",
+  "rule": {
+    "accessibility_delta_mm": 400,
+    "accessibility_tall_box_exemption": true,
+    "accessibility_top_clearance_mm": 0,
+    "adjacency_gap_mm": 0
+  },
+  "metric": {
+    "envelope_mm": [
+      1240,
+      840,
+      2400
+    ],
+    "closed_pallets": "all except last END",
+    "frozen_version": "1.0.0"
+  },
+  "best_run": "r7_standard",
+  "best_witness": "offline_witness_r7.json",
+  "best_witness_sha256": "1bb85b22d6e8a8e2b6f746d69d24d697bb907750e5439fb204bb2c7a06cab777",
+  "reference_legacy_kpi": 0.8144947276625704,
+  "new_rule_best_kpi": 0.8144947276625704,
+  "difference_pp": 0.0,
+  "standard_placements_identical_to_legacy": false,
+  "total_search_process_cpu_seconds": 1691.62,
+  "search_cpu_limit_seconds": 3600,
+  "max_parallel_search_processes": 2,
+  "blas_threads_per_process": 1,
+  "source_fingerprint_matches_current": true,
+  "runs": [
+    {
+      "name": "legacy",
+      "config": {
+        "width": 8,
+        "templates": [
+          0,
+          1,
+          2
+        ],
+        "seed": 0,
+        "group_geometry": false,
+        "column_gap_mm": 0,
+        "column_mixed_families": false,
+        "tall_box_exemption": false,
+        "top_clearance_mm": 0
+      },
+      "command": [
+        "scripts/bound_offline.py",
+        "--method",
+        "columns",
+        "--column-gap-mm",
+        "0",
+        "--templates",
+        "0",
+        "1",
+        "2",
+        "--width",
+        "8",
+        "--cpu-seconds",
+        "900",
+        "--out",
+        "/tmp/palca-spec19-jXcW0U/legacy.json"
+      ],
+      "kpi": 0.8144947276625704,
+      "kpi_all_pallets": 0.7462260695795642,
+      "pallet_utils": [
+        0.9050872255824373,
+        0.8438106038786483,
+        0.8732264864951357,
+        0.7980841273841526,
+        0.7942997851862519,
+        0.7617684531810036,
+        0.7768588689676139,
+        0.76282227062532,
+        0.2000768049155146
+      ],
+      "n_pallets_total": 9,
+      "n_closed": 8,
+      "boxes_placed": 186,
+      "inventory_exactly_once": true,
+      "budget_hit": false,
+      "n_violations": 0,
+      "n_accessibility_violations_r7": 0,
+      "n_accessibility_violations_legacy": 0,
+      "process_timing": {
+        "user_seconds": 311.49,
+        "system_seconds": 3.69,
+        "wall_seconds": 333.9,
+        "exit_code": 0
+      },
+      "process_cpu_seconds": 315.18,
+      "search_cpu_seconds": 314.094936438,
+      "source_fingerprint": "9b80a273ac13442b0eee8c95611e7ec785d17959fe47c33242246ee65f5b1f0d",
+      "input_sha256": "3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab",
+      "witness_sha256": "cdfaf039435c25f63d3ade04d40a1267fe737891a219135c8ad523bdcc8791c3"
+    },
+    {
+      "name": "r7_standard",
+      "config": {
+        "width": 8,
+        "templates": [
+          0,
+          1,
+          2
+        ],
+        "seed": 0,
+        "group_geometry": false,
+        "column_gap_mm": 0,
+        "column_mixed_families": false,
+        "tall_box_exemption": true,
+        "top_clearance_mm": 0
+      },
+      "command": [
+        "scripts/bound_offline.py",
+        "--method",
+        "columns",
+        "--column-gap-mm",
+        "0",
+        "--templates",
+        "0",
+        "1",
+        "2",
+        "--width",
+        "8",
+        "--cpu-seconds",
+        "900",
+        "--tall-box-exemption",
+        "--out",
+        "/tmp/palca-spec19-jXcW0U/r7_standard.json"
+      ],
+      "kpi": 0.8144947276625704,
+      "kpi_all_pallets": 0.7462260695795642,
+      "pallet_utils": [
+        0.9050872255824373,
+        0.8438106038786483,
+        0.8732264864951357,
+        0.7980841273841526,
+        0.7942997851862519,
+        0.7617684531810036,
+        0.7768588689676139,
+        0.76282227062532,
+        0.2000768049155146
+      ],
+      "n_pallets_total": 9,
+      "n_closed": 8,
+      "boxes_placed": 186,
+      "inventory_exactly_once": true,
+      "budget_hit": false,
+      "n_violations": 0,
+      "n_accessibility_violations_r7": 0,
+      "n_accessibility_violations_legacy": 1,
+      "process_timing": {
+        "user_seconds": 265.59,
+        "system_seconds": 2.0,
+        "wall_seconds": 286.28,
+        "exit_code": 0
+      },
+      "process_cpu_seconds": 267.59,
+      "search_cpu_seconds": 266.286212831,
+      "source_fingerprint": "9b80a273ac13442b0eee8c95611e7ec785d17959fe47c33242246ee65f5b1f0d",
+      "input_sha256": "3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab",
+      "witness_sha256": "1bb85b22d6e8a8e2b6f746d69d24d697bb907750e5439fb204bb2c7a06cab777"
+    },
+    {
+      "name": "r7_mixed",
+      "config": {
+        "width": 8,
+        "templates": [
+          0,
+          1,
+          2
+        ],
+        "seed": 0,
+        "group_geometry": false,
+        "column_gap_mm": 0,
+        "column_mixed_families": true,
+        "tall_box_exemption": true,
+        "top_clearance_mm": 0
+      },
+      "command": [
+        "scripts/bound_offline.py",
+        "--method",
+        "columns",
+        "--column-gap-mm",
+        "0",
+        "--templates",
+        "0",
+        "1",
+        "2",
+        "--width",
+        "8",
+        "--cpu-seconds",
+        "900",
+        "--tall-box-exemption",
+        "--column-mixed-families",
+        "--out",
+        "/tmp/palca-spec19-jXcW0U/r7_mixed.json"
+      ],
+      "kpi": 0.8052801441792274,
+      "kpi_all_pallets": 0.7462260695795642,
+      "pallet_utils": [
+        0.9050872255824373,
+        0.8535621279761905,
+        0.8732264864951357,
+        0.7992191000224015,
+        0.7940725206413211,
+        0.7650576636904762,
+        0.7533931671626984,
+        0.6986228618631593,
+        0.2737934727822581
+      ],
+      "n_pallets_total": 9,
+      "n_closed": 8,
+      "boxes_placed": 186,
+      "inventory_exactly_once": true,
+      "budget_hit": false,
+      "n_violations": 0,
+      "n_accessibility_violations_r7": 0,
+      "n_accessibility_violations_legacy": 0,
+      "process_timing": {
+        "user_seconds": 515.77,
+        "system_seconds": 1.39,
+        "wall_seconds": 534.98,
+        "exit_code": 0
+      },
+      "process_cpu_seconds": 517.16,
+      "search_cpu_seconds": 516.077361654,
+      "source_fingerprint": "9b80a273ac13442b0eee8c95611e7ec785d17959fe47c33242246ee65f5b1f0d",
+      "input_sha256": "3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab",
+      "witness_sha256": "1066b43f433fe36afa045ec6f51f67ed02ac493527c626125c087a0ba32c0fa8"
+    },
+    {
+      "name": "r7_mixed_group_w16",
+      "config": {
+        "width": 16,
+        "templates": [
+          0,
+          1,
+          2
+        ],
+        "seed": 0,
+        "group_geometry": true,
+        "column_gap_mm": 0,
+        "column_mixed_families": true,
+        "tall_box_exemption": true,
+        "top_clearance_mm": 0
+      },
+      "command": [
+        "scripts/bound_offline.py",
+        "--method",
+        "columns",
+        "--column-gap-mm",
+        "0",
+        "--templates",
+        "0",
+        "1",
+        "2",
+        "--width",
+        "16",
+        "--cpu-seconds",
+        "900",
+        "--tall-box-exemption",
+        "--column-mixed-families",
+        "--group-geometry",
+        "--out",
+        "/tmp/palca-spec19-jXcW0U/r7_mixed_group_w16.json"
+      ],
+      "kpi": 0.806519285984303,
+      "kpi_all_pallets": 0.7462260695795642,
+      "pallet_utils": [
+        0.9380142829141065,
+        0.8696977106534818,
+        0.9046880500352023,
+        0.8017646629384281,
+        0.7745189692140297,
+        0.7615468389976958,
+        0.7543081257200461,
+        0.6476156474014337,
+        0.26388033834165386
+      ],
+      "n_pallets_total": 9,
+      "n_closed": 8,
+      "boxes_placed": 186,
+      "inventory_exactly_once": true,
+      "budget_hit": false,
+      "n_violations": 0,
+      "n_accessibility_violations_r7": 0,
+      "n_accessibility_violations_legacy": 0,
+      "process_timing": {
+        "user_seconds": 489.1,
+        "system_seconds": 2.92,
+        "wall_seconds": 507.86,
+        "exit_code": 0
+      },
+      "process_cpu_seconds": 492.02,
+      "search_cpu_seconds": 489.021154314,
+      "source_fingerprint": "9b80a273ac13442b0eee8c95611e7ec785d17959fe47c33242246ee65f5b1f0d",
+      "input_sha256": "3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab",
+      "witness_sha256": "b61e154bb0c716cd9edeb8c9919c1553d13d3fdc613962c7b82a64da93ccc992"
+    },
+    {
+      "name": "r7_group_w8",
+      "config": {
+        "width": 8,
+        "templates": [
+          0,
+          1,
+          2
+        ],
+        "seed": 0,
+        "group_geometry": true,
+        "column_gap_mm": 0,
+        "column_mixed_families": false,
+        "tall_box_exemption": true,
+        "top_clearance_mm": 0
+      },
+      "command": [
+        "scripts/bound_offline.py",
+        "--method",
+        "columns",
+        "--column-gap-mm",
+        "0",
+        "--templates",
+        "0",
+        "1",
+        "2",
+        "--width",
+        "8",
+        "--cpu-seconds",
+        "900",
+        "--tall-box-exemption",
+        "--group-geometry",
+        "--out",
+        "/tmp/palca-spec19-jXcW0U/r7_group_w8.json"
+      ],
+      "kpi": 0.8090606923843126,
+      "kpi_all_pallets": 0.7462260695795642,
+      "pallet_utils": [
+        0.9267849642377112,
+        0.8496534778225806,
+        0.8709110883096518,
+        0.8020498811923963,
+        0.7705796670986943,
+        0.778054445484511,
+        0.7517770137288786,
+        0.7226750012000768,
+        0.24354908714157705
+      ],
+      "n_pallets_total": 9,
+      "n_closed": 8,
+      "boxes_placed": 186,
+      "inventory_exactly_once": true,
+      "budget_hit": false,
+      "n_violations": 0,
+      "n_accessibility_violations_r7": 0,
+      "n_accessibility_violations_legacy": 0,
+      "process_timing": {
+        "user_seconds": 99.5,
+        "system_seconds": 0.17,
+        "wall_seconds": 100.08,
+        "exit_code": 0
+      },
+      "process_cpu_seconds": 99.67,
+      "search_cpu_seconds": 98.770312722,
+      "source_fingerprint": "9b80a273ac13442b0eee8c95611e7ec785d17959fe47c33242246ee65f5b1f0d",
+      "input_sha256": "3f1cf01269d17dd5b53e9a14023f31e10d777bd50e14dba16a0d183f15d1b7ab",
+      "witness_sha256": "9135c2763aaf1c17fbef3f31453669cfb943e5fe3c24131a63d0f6417b5a1cef"
+    }
+  ],
+  "verifications": [
+    {
+      "name": "historical_old",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "docs/autopilot/evidence/offline_witness_columns_80p40.json"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 29 cajas, utilizaci\u00f3n 91.77 %, violaciones 0, accesibilidad 0\npalet 2: 24 cajas, utilizaci\u00f3n 83.30 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.95 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 79.96 %, violaciones 0, accesibilidad 0\npalet 5: 20 cajas, utilizaci\u00f3n 76.56 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 75.78 %, violaciones 0, accesibilidad 0\npalet 7: 21 cajas, utilizaci\u00f3n 76.58 %, violaciones 0, accesibilidad 0\npalet 8: 19 cajas, utilizaci\u00f3n 71.29 %, violaciones 0, accesibilidad 0\npalet 9: 7 cajas, utilizaci\u00f3n 28.41 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 80.399 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=False, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "legacy",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "/tmp/palca-spec19-jXcW0U/legacy.json"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 28 cajas, utilizaci\u00f3n 90.51 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 84.38 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.32 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 79.81 %, violaciones 0, accesibilidad 0\npalet 5: 21 cajas, utilizaci\u00f3n 79.43 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 76.18 %, violaciones 0, accesibilidad 0\npalet 7: 21 cajas, utilizaci\u00f3n 77.69 %, violaciones 0, accesibilidad 0\npalet 8: 20 cajas, utilizaci\u00f3n 76.28 %, violaciones 0, accesibilidad 0\npalet 9: 5 cajas, utilizaci\u00f3n 20.01 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 81.449 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=False, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "r7_standard",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "/tmp/palca-spec19-jXcW0U/r7_standard.json",
+        "--tall-box-exemption"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 28 cajas, utilizaci\u00f3n 90.51 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 84.38 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.32 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 79.81 %, violaciones 0, accesibilidad 0\npalet 5: 21 cajas, utilizaci\u00f3n 79.43 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 76.18 %, violaciones 0, accesibilidad 0\npalet 7: 21 cajas, utilizaci\u00f3n 77.69 %, violaciones 0, accesibilidad 0\npalet 8: 20 cajas, utilizaci\u00f3n 76.28 %, violaciones 0, accesibilidad 0\npalet 9: 5 cajas, utilizaci\u00f3n 20.01 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 81.449 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=True, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "r7_mixed",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "/tmp/palca-spec19-jXcW0U/r7_mixed.json",
+        "--tall-box-exemption"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 28 cajas, utilizaci\u00f3n 90.51 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 85.36 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.32 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 79.92 %, violaciones 0, accesibilidad 0\npalet 5: 21 cajas, utilizaci\u00f3n 79.41 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 76.51 %, violaciones 0, accesibilidad 0\npalet 7: 20 cajas, utilizaci\u00f3n 75.34 %, violaciones 0, accesibilidad 0\npalet 8: 19 cajas, utilizaci\u00f3n 69.86 %, violaciones 0, accesibilidad 0\npalet 9: 7 cajas, utilizaci\u00f3n 27.38 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 80.528 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=True, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "r7_mixed_group_w16",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "/tmp/palca-spec19-jXcW0U/r7_mixed_group_w16.json",
+        "--tall-box-exemption"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 29 cajas, utilizaci\u00f3n 93.80 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 86.97 %, violaciones 0, accesibilidad 0\npalet 3: 26 cajas, utilizaci\u00f3n 90.47 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 80.18 %, violaciones 0, accesibilidad 0\npalet 5: 20 cajas, utilizaci\u00f3n 77.45 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 76.15 %, violaciones 0, accesibilidad 0\npalet 7: 20 cajas, utilizaci\u00f3n 75.43 %, violaciones 0, accesibilidad 0\npalet 8: 18 cajas, utilizaci\u00f3n 64.76 %, violaciones 0, accesibilidad 0\npalet 9: 7 cajas, utilizaci\u00f3n 26.39 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 80.652 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=True, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "r7_group_w8",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "/tmp/palca-spec19-jXcW0U/r7_group_w8.json",
+        "--tall-box-exemption"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 29 cajas, utilizaci\u00f3n 92.68 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 84.97 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.09 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 80.20 %, violaciones 0, accesibilidad 0\npalet 5: 20 cajas, utilizaci\u00f3n 77.06 %, violaciones 0, accesibilidad 0\npalet 6: 21 cajas, utilizaci\u00f3n 77.81 %, violaciones 0, accesibilidad 0\npalet 7: 20 cajas, utilizaci\u00f3n 75.18 %, violaciones 0, accesibilidad 0\npalet 8: 19 cajas, utilizaci\u00f3n 72.27 %, violaciones 0, accesibilidad 0\npalet 9: 6 cajas, utilizaci\u00f3n 24.35 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 80.906 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=True, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "saved_r7",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "docs/autopilot/evidence/offline_witness_r7.json",
+        "--tall-box-exemption",
+        "--top-clearance-mm",
+        "0"
+      ],
+      "returncode": 0,
+      "stdout": "palet 1: 28 cajas, utilizaci\u00f3n 90.51 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 84.38 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.32 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 79.81 %, violaciones 0, accesibilidad 0\npalet 5: 21 cajas, utilizaci\u00f3n 79.43 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 76.18 %, violaciones 0, accesibilidad 0\npalet 7: 21 cajas, utilizaci\u00f3n 77.69 %, violaciones 0, accesibilidad 0\npalet 8: 20 cajas, utilizaci\u00f3n 76.28 %, violaciones 0, accesibilidad 0\npalet 9: 5 cajas, utilizaci\u00f3n 20.01 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 81.449 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 0\nregla: tall-box-exemption=True, top-clearance-mm=0\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "saved_production_replay",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "scripts/bound_offline.py",
+        "--method",
+        "columns",
+        "--tall-box-exemption",
+        "--top-clearance-mm",
+        "0",
+        "--validate",
+        "docs/autopilot/evidence/offline_witness_r7.json"
+      ],
+      "returncode": 0,
+      "stdout": "{\"kpi\": 0.8144947276625704, \"n_pallets_total\": 9, \"n_violations\": 0, \"n_production_violations\": 0}\n",
+      "expected_returncode": 0
+    },
+    {
+      "name": "saved_r7_legacy_diagnostic",
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python",
+        "scripts/autopilot/verify_offline_witness.py",
+        "docs/autopilot/evidence/offline_witness_r7.json"
+      ],
+      "returncode": 1,
+      "expected_returncode": 1,
+      "stdout": "palet 1: 28 cajas, utilizaci\u00f3n 90.51 %, violaciones 0, accesibilidad 0\npalet 2: 25 cajas, utilizaci\u00f3n 84.38 %, violaciones 0, accesibilidad 0\npalet 3: 25 cajas, utilizaci\u00f3n 87.32 %, violaciones 0, accesibilidad 0\npalet 4: 21 cajas, utilizaci\u00f3n 79.81 %, violaciones 0, accesibilidad 0\npalet 5: 21 cajas, utilizaci\u00f3n 79.43 %, violaciones 0, accesibilidad 0\npalet 6: 20 cajas, utilizaci\u00f3n 76.18 %, violaciones 0, accesibilidad 0\npalet 7: 21 cajas, utilizaci\u00f3n 77.69 %, violaciones 0, accesibilidad 0\npalet 8: 20 cajas, utilizaci\u00f3n 76.28 %, violaciones 0, accesibilidad 1\npalet 9: 5 cajas, utilizaci\u00f3n 20.01 %, violaciones 0, accesibilidad 0\nmulticonjunto de dimensiones == Excel: True\nKPI oficial (palets cerrados): 81.449 %  |  \u03a3vol/(n\u00b7V): 74.623 %  |  palets: 9\nviolaciones validador: 0  |  violaciones accesibilidad (delta 400, adjacency-gap 0): 1\nregla: tall-box-exemption=False, top-clearance-mm=0\n"
+    }
+  ],
+  "directed_tests": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "57",
+      "time": "4.539",
+      "timestamp": "2026-10-20T13:57:21.890118+02:00",
+      "hostname": "WorkstationJSP"
+    }
+  ],
+  "smoke": {
+    "status": "full_suite_not_green",
+    "full_attempt": {
+      "command": "./scripts/smoke_offline.sh",
+      "exit_code": 130,
+      "outcome": "H6 seed 1 failed; next slow H6 episode interrupted to contain CPU consumption",
+      "failed_test": "tests/test_h6_perf.py::test_official_h6_complete_dump_and_kpi[1]",
+      "actual": {
+        "kpi": 0.770574973048275,
+        "n_violations": 0,
+        "hard_cap_hits": 11,
+        "deadline_cutoffs_count": 0,
+        "wall_time_s": 832.8887615920394
+      },
+      "expected": {
+        "kpi": 0.7659301132772497,
+        "n_violations": 0,
+        "hard_cap_hits": 0,
+        "deadline_cutoffs_count": 0
+      },
+      "first_placement_difference": {
+        "path": "pallets.1[47].box_id",
+        "actual": 58,
+        "expected": 54
+      },
+      "actual_dump_sha256": "83db743d0fe49184c54e6f1b4878ed9f4b876b3a61d0869da8e0f5b2993c1fb0",
+      "fixture_dump_sha256": "1816a668cd1f8ba7cf4c22d26ed84ee73554cfec2cd62dd642a2f5529e04bf48",
+      "stdout": "[smoke] repo_root=/home/ingen/code/Paletizador/09_Software/paletizado-autopilot\n[smoke] python=/home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python\nPython 3.12.3\n[smoke] running: /home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python -m pytest -q\nreadline: ~/.inputrc: line 1: mouse: unknown variable name\n........................................................................ [ 12%]\n........................................................................ [ 24%]\n.......................................................................F [ 36%]\n"
+    },
+    "non_slow_attempt": {
+      "selector": "-m \"not slow\"",
+      "exit_code": 130,
+      "outcome": "baseline seed 42 failed; interrupted at the unisolated summarize_sweep.py subprocess",
+      "baseline_failure": "tests/test_bound_information.py::test_n1_k15_exact_official_baseline[42]",
+      "stdout": "[smoke] repo_root=/home/ingen/code/Paletizador/09_Software/paletizado-autopilot\n[smoke] python=/home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python\nPython 3.12.3\n[smoke] running: /home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python -m pytest -q\nreadline: ~/.inputrc: line 1: mouse: unknown variable name\n............................................F........................... [ 12%]\n........................................................................ [ 25%]\n........................................................................ [ 37%]\n........................................................................ [ 50%]\n........................................................................ [ 62%]\n............................"
+    },
+    "remaining": {
+      "status": "passed_filtered",
+      "exit_code": 0,
+      "selector": "-m \"not slow\" -k \"not test_n1_k15_exact_official_baseline\"",
+      "excluded": "slow-marked tests and ten timed baseline regression cases",
+      "tests": [
+        {
+          "name": "pytest",
+          "errors": "0",
+          "failures": "0",
+          "skipped": "0",
+          "tests": "563",
+          "time": "59.069",
+          "timestamp": "2026-10-20T14:29:38.891804+02:00",
+          "hostname": "WorkstationJSP"
+        }
+      ],
+      "height_slack_scenario": "passed",
+      "stdout": "[smoke] repo_root=/home/ingen/code/Paletizador/09_Software/paletizado-autopilot\n[smoke] python=/home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python\nPython 3.12.3\n[smoke] running: /home/ingen/code/Paletizador/09_Software/paletizado-autopilot/.venv/bin/python -m pytest -q\nreadline: ~/.inputrc: line 1: mouse: unknown variable name\n........................................................................ [ 12%]\n........................................................................ [ 25%]\n........................................................................ [ 38%]\n........................................................................ [ 51%]\n........................................................................ [ 63%]\n........................................................................ [ 76%]\n........................................................................ [ 89%]\n...........................................................              [100%]\n[smoke] running height-slack scenario (output=/tmp/palca-smoke-height-slack-fb78NT.json)\n<frozen runpy>:128: RuntimeWarning: 'sim.run' found in sys.modules after import of package 'sim', but prior to execution of 'sim.run'; this may result in unpredictable behaviour\n[smoke] OK\n"
+    },
+    "baseline_isolated_retest": {
+      "previous_failure": "tests/test_bound_information.py::test_n1_k15_exact_official_baseline[42]",
+      "non_slow_selected": 573,
+      "command": [
+        "/home/ingen/code/Paletizador/09_Software/paletizado-caotico-V2/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        "-q",
+        "tests/test_bound_information.py::test_n1_k15_exact_official_baseline[42]",
+        "--junitxml=/tmp/palca-spec19-jXcW0U/baseline_isolated.xml"
+      ],
+      "returncode": 0,
+      "stdout": ".                                                                        [100%]\n1 passed in 11.44s\nreadline: ~/.inputrc: line 1: mouse: unknown variable name\n"
+    },
+    "isolation": {
+      "initial_hook": "pytest plugin (did not propagate to summarize_sweep.py subprocess)",
+      "global_sweep_lock_acquisition_attempted": true,
+      "global_sweep_lock_deleted_or_replaced": false,
+      "global_sweep_lock_contents_written": false,
+      "correction": "sitecustomize inherited by Python subprocesses; explicit test lock paths preserved",
+      "private_lock": "/tmp/palca-spec19-jXcW0U/smoke-inherited-private.lock",
+      "inherited_hook_source": "\"\"\"Isolate the sweep lock in this test run and inherited Python subprocesses.\"\"\"\nimport os\nfrom pathlib import Path\n\nif os.environ.get('PALCA_SPEC19_PRIVATE_LOCK'):\n    from scripts import run_sweep as sweep\n    original_sweep_lock = sweep.sweep_lock\n\n    def private_lock(path=Path(os.environ['PALCA_SPEC19_PRIVATE_LOCK']), retry_seconds=0):\n        return original_sweep_lock(path, retry_seconds)\n\n    sweep.sweep_lock = private_lock\n"
+    }
+  },
+  "diff_check": {
+    "command": "git --no-pager diff --check",
+    "returncode": 0
+  }
+}

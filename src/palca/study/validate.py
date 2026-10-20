@@ -77,12 +77,14 @@ def _union_area(rectangles: list[tuple[float, float, float, float]]) -> float:
 
 def validate_pallet(items: list[dict], original_dims_by_box_id: Mapping,
                     min_support: float = 0.85,
-                    forbidden_faces: Iterable[str] = FORBIDDEN_FACES_ARM6) -> list[Violation]:
+                    forbidden_faces: Iterable[str] = FORBIDDEN_FACES_ARM6,
+                    *, run_params: Mapping | None = None) -> list[Violation]:
     """Comprueba estado final: envolvente, dimensiones/cara, solape y soporte.
 
     Tolerancia de envolvente/solape: 0,5 mm; de contacto vertical: ±1 mm.
     Suelo: |z| <= 0,5 mm. Soporte: unión de intersecciones con caras superiores.
-    No verifica accesibilidad, cargas, estabilidad dinámica ni trayectoria.
+    Con run_params verifica también accesibilidad en orden de colocación.
+    No verifica cargas, estabilidad dinámica ni trayectoria.
     """
     if not isfinite(min_support) or not 0 <= min_support <= 1:
         raise ValueError("min_support debe estar en [0, 1]")
@@ -156,4 +158,43 @@ def validate_pallet(items: list[dict], original_dims_by_box_id: Mapping,
         support = _union_area(supporting) / (length * width)
         if support + 1e-12 < min_support:
             violations.append(Violation(box_id, "support", f"support_fraction={support:.9f} < {min_support}"))
+    if run_params is not None:
+        violations.extend(validate_accessibility(items, run_params))
+    return violations
+
+
+def validate_accessibility(items: list[dict], run_params: Mapping, *, gap_mm: int = 0) -> list[Violation]:
+    """Independent chronological replay of the rule recorded in run.json.
+
+    Invalid geometry is reported by validate_pallet and skipped here. Missing
+    new parameters identify legacy runs, which retain the base rule.
+    """
+    delta = int(run_params.get("accessibility_delta_mm", 0))
+    if delta <= 0:
+        return []
+    exempt = run_params.get("accessibility_tall_box_exemption", False)
+    clearance = int(run_params.get("accessibility_top_clearance_mm", 0))
+    previous = []
+    violations = []
+    for item in items:
+        try:
+            x, y, z, length, width, height = (
+                float(item[k]) for k in ("x_mm", "y_mm", "z_mm", "length_mm", "width_mm", "height_mm"))
+            if not all(isfinite(v) for v in (x, y, z, length, width, height)) or min(length, width, height) <= 0:
+                continue
+        except (KeyError, ValueError, TypeError):
+            continue
+        local_z = max((pz + ph for _, px, py, pz, pl, pw, ph in previous
+                       if min(px + pl, x + length) > max(px, x)
+                       and min(py + pw, y + width) > max(py, y)), default=0)
+        effective_delta = max(delta, height + clearance) if exempt else delta
+        for other_id, px, py, pz, pl, pw, ph in previous:
+            if (max(px, x) - min(px + pl, x + length) <= gap_mm
+                    and max(py, y) - min(py + pw, y + width) <= gap_mm
+                    and pz + ph > local_z + effective_delta):
+                violations.append(Violation(item.get("box_id"), "ROBOT_ACCESS",
+                    f"blocking_top_mm={pz + ph:g}, local_z_mm={local_z:g}, delta_mm={effective_delta:g}",
+                    other_id))
+                break  # Count placements, not blocking neighbours.
+        previous.append((item.get("box_id"), x, y, z, length, width, height))
     return violations
