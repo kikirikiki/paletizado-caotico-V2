@@ -385,3 +385,15 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   dimensiones del flujo evaluado (anchos, alturas o familias concretas); los pesos y presupuestos ajustados en seeds de ajuste siguen
   permitidos, pero cualquier parámetro geométrico debe deducirse de las 15 cajas visibles o del prior genérico.
 - Contador anti-estancamiento: 7 (H4 no cuenta como técnica general).
+- **H10 (columnas adaptativas con solo las 15 visibles, commit 64b9fb7):** ajuste determinista (h10_tune) −0,42…−2,09 pp en las seis
+  variantes (s0 f75 significativa) y peores laterales libres → **descartada**. Contador: 8. Sin conocer las medidas de antemano, la
+  plantilla de columnas no compensa.
+
+## D-033 · R13: función de valor aprendida con flujos sintéticos del prior genérico (2026-10-20)
+- Contexto: 8 técnicas seguidas < 0,5 pp. Lo que falta (pozos a media altura, D-030/R12) se crea muchas cajas antes de que se note; los
+  rollouts de H5/H6 miran 2 hojas × 6 cajas. La única vía de software restante con margen es una estimación del valor de un estado de
+  palet a largo plazo.
+- Opción: Codex entrena un modelo ligero V(estado del palet) → utilización final esperada del palet, con episodios simulados sobre
+  flujos SINTÉTICOS del prior genérico (sin información del flujo evaluado, D-032), y lo usa como valor de las hojas de H5/H6. Se ajusta
+  en seeds 1001–1010 y se evalúa con el protocolo preregistrado (referencia + réplica 20 seeds). Límite de tiempo D-007.
+- Si R13 no aporta: se documenta el límite práctico de la célula en el INFORME (sin escribir `PARADA:`, que exige T3 refutado).

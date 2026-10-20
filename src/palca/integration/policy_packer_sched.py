@@ -78,6 +78,7 @@ class PolicyConfig:
     micro_plan_hard_cap_ms: int = 10000
     micro_plan_value: str = "score"
     micro_plan_value_weight: float = 1.0
+    learned_value_weight: float = 1.0
     micro_plan_rollout_leaves: int = 4
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
@@ -226,6 +227,7 @@ class PolicyPackerScheduler:
         micro_plan_hard_cap_ms: int = 10000,
         micro_plan_value: str = "score",
         micro_plan_value_weight: float = 1.0,
+        learned_value_weight: float = 1.0,
         micro_plan_rollout_leaves: int = 4,
         rollout_future_boxes: int = 0,
         rollout_future_samples: int = 1,
@@ -289,6 +291,7 @@ class PolicyPackerScheduler:
             micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
+            learned_value_weight=learned_value_weight,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -354,6 +357,7 @@ class PolicyPackerScheduler:
             micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
+            learned_value_weight=learned_value_weight,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -778,6 +782,10 @@ class PolicyPackerScheduler:
         nodes = self._scheduler.micro_plan_nodes_expanded
         times = self._scheduler.micro_plan_times_ms
         kpis["micro_plan_nodes_expanded"] = list(nodes)
+        if self._scheduler.config.micro_plan_value in ("learned", "rollout+learned"):
+            kpis["micro_plan_learned"] = dict(
+                model="r13_generic_v1", source="synthetic_generic_only",
+                weight=self._scheduler.config.learned_value_weight)
         if self.config.scheduler.rollout_future_boxes:
             kpis["micro_plan_future_nodes"] = list(self._scheduler.micro_plan_future_nodes)
             kpis["micro_plan_future_samples_completed"] = list(
