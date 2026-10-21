@@ -498,3 +498,27 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   Windows (`03_Software`): `disableClaudeAiConnectors: true`, `syncClaudeAiPlugins: false`, `syncClaudeAiSkills: false` y
   `frontend-design` y `claude-mem` desactivados. Se mantiene `headroom` (compresión de contexto). Surte efecto en sesiones nuevas.
   Si algún día hace falta un conector (p. ej. Docs), se reactiva quitando la clave.
+
+## D-039 · Investigación larga con GPU: fases, presupuestos y cortes (2026-10-21, ANTES de programar)
+- Contexto: el usuario elige la investigación larga (D-035) sin prisa, con la GPU y gestión estricta de cuotas (D-038). Catálogo
+  de ideas G0–G9 en RESEARCH §4. Rama `feat/investigacion-larga` sobre `feat/pulmon-staging` (wt2), PR borrador apilado sobre #164.
+- Reglas que no cambian: oficial `h6_sin_gate` (77,06 %) hasta que una candidata preregistrada pase D-016; D-022 (test de fuga),
+  D-032 (solo flujos sintéticos de un prior genérico o más amplio; nunca el Excel ni `out/` para entrenar), D-028 (determinismo;
+  sweeps con `micro_plan_hard_cap_ms: 600000`), D-007 (media ≤ 1 s, p95 ≤ 3 s en 1 proceso). El tiempo se mide **en CPU y en GPU**:
+  si solo cumple con GPU, se informa como **palanca de hardware** (GPU en la célula), aparte de la técnica de software.
+- Determinismo con redes: semillas fijas, `torch.use_deterministic_algorithms(True)`, cuDNN sin benchmark; la evaluación oficial
+  usa inferencia en CPU (float32, 1 hilo); la de GPU se compara con ella en 2 seeds y se informa si alguna decisión diverge.
+- Cuotas (D-038): Claude ≤ 50 % semanal para el estudio y pausa al 80 %; Codex ≤ 60 % semanal y ventana de 5 h ≤ 70 %
+  (`codex_job.sh` lo comprueba), `gpt-6.1-sol` esfuerzo `medium` (`high` solo núcleo algorítmico), nunca astra, un módulo por encargo.
+  Datos, entrenamientos, sweeps y smoke van en scripts de fondo con aviso al terminar. Gasto y logros en PROGRESS por fase.
+
+| Fase | Contenido | Presupuesto (Codex sem. / Claude sem. / máquina) | Criterio de corte |
+|---|---|---|---|
+| **A** | PyTorch+CUDA en `.venv` (hecho); G0 diagnóstico de margen (cómputo y oráculo de futuro, cotas CON FUGA, nunca candidatas); generador masivo de estados sintéticos con codificación para la red (G1b: on-policy con `h6_sin_gate` + prior jerárquico de familias) | ≤ 15 pp / ≤ 8 % / CPU 1–2 días | A termina con: datos ≥ 1 M estados, deterministas, tests D-022/D-032 en verde y throughput medido. Si el oráculo de G0(b) da < +1 pp sobre `h6_sin_gate` en 1001–1010 Y el cómputo de G0(a) < +0,5 pp, se replantea antes de B (el margen de un mejor valor dentro de esta búsqueda sería pequeño) |
+| **B** | G1 red de valor CNN entrenada en GPU + G2 inferencia por lotes en H5/H6 | ≤ 20 pp / ≤ 12 % / GPU ≤ 2 días | **≥ +1 pp** pareado sobre `h6_sin_gate` en 1001–1010 (0 cortes) cumpliendo D-007 en CPU o GPU. Si no: un único rediseño (etiquetas/arquitectura) y, si tampoco, se pasa a C solo si G0(b) mostró margen; si no, cierre con informe |
+| **C** | G6 destilación del profesor con futuro real y/o G4 expert iteration (G3 política/PUCT) | ≤ 25 pp / ≤ 15 % / GPU ≤ 5 días | cada iteración debe mejorar el KPI en flujos sintéticos reservados; se para tras 2 iteraciones sin mejora o al agotar el presupuesto; salida = ≥ +1 pp en 1001–1010 |
+| **D** | candidata preregistrada; referencia 10 seeds + réplica 20 (D-016); tiempo real CPU y GPU | ≤ 5 pp / ≤ 5 % / CPU ~2 h | se adopta solo si la pareada en la réplica es significativa (IC95 > 0) con 0 cortes |
+
+- G5 (simulador vectorizado en GPU) solo se abre si G0(a) muestra ≥ +1 pp con más cómputo, o para hacer implantable `ventana18`;
+  G8/G9 solo en CPU ociosa. Los presupuestos son por semana de cuota; si una fase cruza semanas, se reanuda desde CURRENT.md.
+- Contador anti-estancamiento: sigue en 9 (D-034); esta investigación no lo reinicia salvo adopción.

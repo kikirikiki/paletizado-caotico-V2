@@ -143,3 +143,37 @@ nunca se probó sobre la oficial sin gate (spec 20).
 3. Generación de candidatos EMS / extreme points frente al heightfield actual.
 4. Multipalet: N palets abiertos y asignación caja→palet (palanca operativa: requiere más posiciones de palet).
 5. Estabilidad por polígono de apoyo / COM (palanca: relaja la regla 0,85, se reporta aparte).
+
+## 4. Investigación larga con GPU: catálogo de ideas (D-039, 2026-10-21)
+Contexto: 77,06 % oficial (`h6_sin_gate`), techo offline 81,45 %, T2 79,49 %. La pérdida recuperable está en pozos a media altura
+(~3,7 pp online − offline, R12) creados por cajas que aún no se ven; el hueco trasero es estructural y lo comparte el techo.
+R13 (ridge, 88 características) falló: R² 0,33, etiquetas de una política greedy distinta de la que busca, y flujos sintéticos
+i.i.d. uniformes, muy distintos de un flujo real con familias repetidas (85 de 186 cajas son una familia). GPU: Quadro RTX 4000,
+8 GB, Turing sm_75; PyTorch 2.11+cu128. CPU: Xeon W-2145, 16 hilos (los sweeps usan 15).
+
+Reglas comunes a todas: solo las 15 cajas visibles en la decisión (D-022, test de fuga obligatorio); entrenamiento SOLO con flujos
+sintéticos de un prior genérico o más amplio, nunca el Excel ni `out/` (D-032; test que bloquea la apertura de ficheros);
+determinismo (D-028: semillas fijas, `torch.use_deterministic_algorithms(True)`, evaluación oficial con inferencia en CPU y
+comprobación de que una evaluación repetida da el mismo dump); tiempo real D-007 medido en CPU y en GPU por separado.
+
+| # | Idea | Mecanismo | Uso de GPU | Coste (Codex / Claude / máquina) | Riesgo | Ganancia esperada |
+|---|---|---|---|---|---|---|
+| G0 | **Diagnóstico de margen** (cotas, no candidatas) | (a) escalado de cómputo: H6 con 57/150/400 nodos y 2/4/8 hojas, sin límite de tiempo; (b) **oráculo de futuro**: rollouts de H6 con las cajas REALES siguientes (6 y 30) en lugar de muestras sintéticas. Mide cuánto margen hay en "más búsqueda" y en "mejor estimación del futuro" | ninguno | 1 encargo pequeño (prior `oracle`, marcado CON FUGA) + 2 sweeps de CPU | bajo | 0 (decide el orden de B/C) |
+| G1 | **Red de valor CNN** V(mapa de alturas, 15 visibles) | CNN sobre el mapa de alturas 64 × 44 (20 mm, incluye el vuelo) + codificador de conjunto (DeepSets) de las cajas visibles restantes → utilización final del palet; objetivos auxiliares (volumen de pozos al cierre, cajas hasta el cierre). Sustituye o mezcla `_learned_tail_value` en las hojas de H5/H6 | entrenamiento (minutos–horas); inferencia por lotes | 2–3 encargos (datos, red, integración) / medio | medio (R13 falló; ruido irreducible de la etiqueta) | 0–2 pp |
+| G1b | **Datos on-policy y prior amplio** (parte de G1) | etiquetas generadas con la propia `h6_sin_gate` (no con H1 greedy) y flujos sintéticos de un **prior jerárquico de familias** (nº de familias, frecuencias tipo Zipf y medidas aleatorias amplias, fijados a priori, sin mirar el flujo evaluado) mezclado con el genérico i.i.d. | — | incluido en el encargo de datos; CPU 1–2 días | bajo (es diseño de datos) | condición necesaria de G1 |
+| G2 | **Inferencia por lotes de las hojas** | recoger todas las hojas del haz y evaluarlas en una llamada; si la red sustituye los rollouts, libera tiempo para más nodos o más hojas dentro de D-007 | sí (o CPU por lotes) | incluido en la integración de G1 | bajo | solo vale si G0(a) muestra margen |
+| G3 | **Red de política / PUCT** (AlphaZero) | prior sobre las colocaciones candidatas (cabeza de política sobre el mismo tronco) para podar el haz y ordenar la expansión | entrenamiento + inferencia | 1–2 encargos / medio | medio | +0–1 pp sobre G1 |
+| G4 | **Expert iteration / self-play** | búsqueda con la red → nuevos datos → reentrenar, en bucle durante días de GPU; validación en flujos sintéticos reservados | días de GPU y CPU | 1 encargo (orquestador) / bajo por iteración | medio-alto (inestabilidad, sobreajuste al prior) | +0–2 pp si G1 funciona |
+| G5 | **Simulador vectorizado en GPU** (torch) | factibilidad, apoyo (ratio + esquinas + asentamiento), voladizo y accesibilidad de 400 mm con R7, evaluados en paralelo sobre el mapa de alturas; miles de rollouts por decisión | sí, intensivo | 2–3 encargos con `high` / alto (equivalencia exacta con `pallet_model`) | alto (divergencias con el validador) | depende de G0(a); también podría bajar `ventana18` a ≤ 1 s |
+| G6 | **Destilación de un profesor privilegiado** (DAgger) | el profesor busca con el futuro REAL (oráculo de G0(b)) o con el planificador offline de columnas sobre flujos sintéticos; el alumno (red de valor/política) solo ve lo visible y aprende a imitar sus valores/decisiones en los estados que visita | entrenamiento | 1–2 encargos / medio | medio (el planificador offline no planifica desde estados arbitrarios: se usa el oráculo de búsqueda) | 0–2 pp; la cota es G0(b) |
+| G7 | **Literatura**: PCT (Zhao et al., ICLR 2022; arXiv 2504.04421), MCTS con lookahead (arXiv 2601.02649), máscara de acciones (2404.04772), buffer (2502.13443) | 2601.02649 mezcla una política RL con una aleatoria en la selección de MCTS y descuenta el espacio desperdiciado en el backup; PCT genera hojas por EMS. Se usan como diseño de G1/G3, no como reimplementación (PCT entrenado desde cero con nuestras reglas de acceso y apoyo costaría más que G1–G4) | — | 0 | — | inspiración |
+| G8 | **Optuna** sobre mandos existentes + `ventana18` | búsqueda bayesiana determinista de pesos y presupuestos en 1001–1010; combinada con la palanca de 18 visibles | no (CPU) | 1 script / bajo | sobreajuste a 10 seeds (antecedentes: paisajes planos o ruidosos) | 0–0,5 pp |
+| G9 | Prior de rollouts condicionado a lo visible | las futuras de H6 copian con probabilidad p una caja visible y si no, el genérico (lo visible está permitido, D-032) | no | 1 encargo pequeño | bajo | baja: con el catálogo real como prior H6 no mejoró (D-017) |
+
+**Orden por ganancia esperada por unidad de cuota:** G0 (barato y decide todo lo demás) → G1+G1b+G2 (fase B) → G6/G3/G4 (fase C,
+solo si B pasa su corte) → G5 (solo si G0(a) muestra que más cómputo da ≥ +1 pp, o para hacer implantable `ventana18`) → G8/G9
+(relleno de CPU ociosa).
+
+Fuentes de la búsqueda de 2026-10-21: arXiv 2601.02649 (MCTS con paquetes de lookahead; crítico para el bootstrap de hojas),
+arXiv 2504.04421 (PCT deliberado), arXiv 2507.09123 (estabilidad rápida), Jumanji (entornos JAX vectorizados; su BinPack no usa
+mapa de alturas, no se reutiliza).
