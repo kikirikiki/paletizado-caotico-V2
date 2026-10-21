@@ -1,6 +1,6 @@
 # Informe de compactidad — paletizado caótico con robot de 6 ejes
 
-> **Borrador en curso** (autopiloto, actualizado el 2026-10-20). Cada cifra tiene su comando de reproducción en
+> **Borrador en curso** (autopiloto, actualizado el 2026-10-21). Cada cifra tiene su comando de reproducción en
 > `docs/autopilot/PROGRESS.md`; las decisiones están en `docs/autopilot/DECISIONS.md`.
 
 ## 1. Resumen ejecutivo
@@ -15,6 +15,9 @@
   → T1 alcanzado sin condiciones.** Réplica en 20 seeds nuevas: 76,21 %. Tiempo real: 0,957 s/decisión de media, p95 2,36 s.
 - **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
   de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
+- **Palancas de hardware nuevas (D-037):** un pulmón de 1–3 posiciones junto al palet **no mejora** (réplica +0,12 n.s.); en cambio,
+  **ver 18 cajas en la cinta en vez de 15 sí: +1,57 pp en la réplica (significativo), 77,7 % en 30 seeds**, aunque hoy tarda
+  ~1,2× más por decisión y hay que optimizarlo para cumplir el tiempo real.
 - **T3 (+50 %) no se alcanza.** Las cotas formales relajadas no lo descartan, y el techo alcanzable queda 11,4 pp por debajo
   (refutación empírica, D-010).
 
@@ -74,13 +77,16 @@ miden sin cortes de reloj (D-028). Tiempo por decisión de la mejor configuraci�
 |---|---|---|---|
 | Columnas online con ancho fijado por catálogo (H4, 455 mm) | 77,30 % (30 seeds) | +0,81 (réplica +1,38 [0,48; 2,29]) | exige conocer de antemano la familia dominante; **no implantable**: no hay catálogo previo (D-032); sin ese dato empeora (−2,6) |
 | Garra de canto | 77,76 % | +0,70 | cambio de garra; ~1,6 s/decisión; no justifica la inversión |
-| Buffer ×2 / ×5 | +0,87 / +0,53 n.s. | — | no compensa más rampa |
+| **Cinta con 18 cajas visibles (+3, D-037)** | **77,68 % (ref.); 77,74 % (30 seeds)** | +0,61 n.s. ref.; **réplica +1,57 [0,67; 2,46]** | **única palanca de la célula brazo confirmada**; ~1,23× tiempo por decisión: hay que optimizar para cumplir ≤ 1 s |
+| Pulmón físico de 1–3 posiciones junto al palet (D-036/D-037) | 76,67 % (ref.) | −0,39 n.s.; réplica +0,12 n.s. | no compensa: reservar cajas estrechas no rellena el hueco trasero |
+| Buffer ×2 / ×5 (medido sobre H1+H3+H5, sin réplica) | +0,87 / +0,53 n.s. | — | superado por la medición de la cinta de 18 sobre la oficial |
 | Secuenciación aguas arriba | −0,81 n.s. | — | no compensa pedirla al almacén |
 | Palets por familia (2 posiciones) | −0,74 n.s. | — | no compensa una segunda posición |
 | Gantry 4 orient. (contraste) | 79,29 % | +2,23 | otra cinemática |
 | Gantry 6 orient. (contraste) | 82,00 % | +4,94 | otra cinemática y garra |
 
-La única palanca que supera T2 es cambiar de cinemática (gantry), que no es la célula objetivo.
+La única palanca que supera T2 es cambiar de cinemática (gantry), que no es la célula objetivo. Con el brazo, la cinta de 18 visibles
+recorta el gap a T2 de 2,4 a ~1,8 pp (77,7 %), sin alcanzarlo.
 
 ## 7. Riesgos y preguntas abiertas
 - **D-015:** la regla de accesibilidad solo considera vecinas las cajas que se tocan. El responsable confirma que las cajas pueden ir
@@ -91,9 +97,11 @@ La única palanca que supera T2 es cambiar de cinemática (gantry), que no es la
 ## 8. Recomendación de implantación (provisional)
 1. Implantar **H1+H3+H5+H6 sin gate** (77,06 %, +15,2 pp sobre el baseline; 9,0 palets por flujo de 186 cajas frente a 11,1, un 19 %
    menos), validando con ROBOGUIDE las trayectorias junto a vecinas pegadas.
-2. No invertir en garra de canto, en más buffer, en secuenciación aguas arriba ni en una segunda posición de palet: con la búsqueda no
-   aportan.
-3. Lo que queda hasta T2 (~3,5 pp de pozos a media altura, RESEARCH R12) se crea con información que el robot aún no ve. Ver más cajas
-   no ayuda (buffer ×2/×5 n.s.), y tampoco una función de valor ligera entrenada con flujos sintéticos (R13). Con software y esta
+2. No invertir en garra de canto, en un pulmón junto al palet, en secuenciación aguas arriba ni en una segunda posición de palet: con
+   la búsqueda no aportan. Sí merece estudio una cinta/visión con 18 cajas visibles (+1,57 pp confirmados), si se optimiza la búsqueda
+   para mantener ≤ 1 s por decisión.
+3. Lo que queda hasta T2 (~3,5 pp de pozos a media altura, RESEARCH R12) se crea con información que el robot aún no ve. Ver algunas cajas
+   más sí ayuda (cinta de 18 visibles: +1,57 pp en la réplica, D-037), pero no basta para T2 y exige optimizar el tiempo; guardar
+   cajas en un pulmón no ayuda (D-037), y tampoco una función de valor ligera entrenada con flujos sintéticos (R13). Con software y esta
    célula, 77,06 % es el límite práctico medido. Superar T2 exige otra cinemática (gantry: 82,0 % medido) o una investigación larga
    (RL / MCTS con valor entrenado a gran escala) sin garantía de resultado.

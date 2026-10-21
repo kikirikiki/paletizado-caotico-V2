@@ -319,6 +319,12 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   (quedan reanudables por thread id).
 - Al llegar al 60 %: el director sigue solo con trabajo sin Codex (sweeps de configuraciones ya implementadas, revisión, informes)
   y avisa al usuario. Usar `gpt-6.1-sol`; `gpt-6-astra` solo si es imprescindible (consume la cuota muy deprisa).
+- **Enmienda (2026-10-21):** `codex_quota.sh` devolvía 0 % porque desde hoy Codex también registra eventos `rate_limits` con
+  `limit_id: "premium"` y ventanas `null` (y las sesiones fallidas no traen lectura). Ahora: busca hacia atrás la última lectura con
+  ventana semanal; si después hubo sesiones que consumieron tokens sin lectura, el estado es **desconocido** (nunca 0 %; `check` sale
+  con 5 y `codex_job.sh` no lanza salvo `CODEX_QUOTA_ASSUME_OK=1` decidido por el director); si el último job terminó con
+  "usage limit", estado **bloqueado** (sale con 4) hasta que se reinicie la ventana de 5 h. Lectura real a las 10:4x: semanal 41 %,
+  5 h 100 % (límite de 5 h agotado por el job 23, no el semanal).
 
 ## D-028 · Sweeps de evaluación deterministas: corte de reloj de la búsqueda a 600 s (2026-10-20)
 - Contexto: la búsqueda (micro_plan/H3–H6) tiene un corte de reloj `micro_plan_hard_cap_ms = 10000` además del presupuesto de nodos.
@@ -416,3 +422,61 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   (T3 no está refutado con cotas formales), así que no se escribe `PARADA:`. Las vías que quedan son de otro orden: cinemática gantry
   (82,0 % medido), o una investigación larga (RL / MCTS con valor entrenado a gran escala) sin garantía de llegar a T2.
 - Se pregunta al usuario si continuar con esa investigación larga o cerrar el estudio con el informe.
+
+## D-036 · Pulmón físico (staging) de 1–3 posiciones junto al palet: modelo (2026-10-21, ANTES de implementar)
+- Contexto: el hueco trasero estructural (RESEARCH §1quinquies) solo lo llenan cajas estrechas, que la búsqueda suele gastar pronto
+  en otros sitios o que no están entre las 15 visibles cuando el hueco aún es accesible. XYZ Robotics (reto ICRA 2023) ganó ~+1 pp con
+  un pulmón de 3 posiciones. **Es una PALANCA DE HARDWARE** (posiciones de suelo extra junto al palet): se reporta aparte de las técnicas
+  de software y no cambia la oficial salvo decisión del usuario.
+- Lo que ya existe: `src/sim/des.py` tiene `RampState.staging` + acciones STAGE/UNSTAGE (`t_stage` 6 s, `t_unstage` 10 s), pero solo
+  para el modelo M2 y para esperar cambios de palet, y solo en el camino sin política; la política palca solo lo cuenta en
+  `remaining_total`. No se reutiliza su semántica (M2 sigue igual); se añade un pulmón nuevo de M1.
+- Modelo fijado:
+  1. `pallet_staging_slots` = K ∈ {0, 1, 2, 3}; **0 por defecto** (desactivado, dumps idénticos a `h6_sin_gate`). Cada posición es
+     suelo junto al palet y admite **una caja** de cualquier tamaño del flujo, sin apilar.
+  2. Acción **APARCAR**: el robot coge una caja de la cinta (cualquier índice de las 15) y la deja en una posición libre: 6 s
+     (= `t_stage` del DES). **Recoger** del pulmón y colocar en el palet: 10 s (= `t_unstage`) en lugar de los 14 s de cinta→palet.
+     Aparcar no coloca volumen: el KPI congelado no cambia de definición; se informa además del número de aparcamientos y del makespan.
+  3. **Las cajas aparcadas son visibles**: candidatas en cada decisión junto a las de la cinta (15 + K como máximo). Al aparcar, la
+     cinta se rellena por FIFO desde aguas arriba como al coger cualquier caja (llegada física, no información anticipada).
+  4. **Nunca se usa información de cajas no llegadas** (D-022, D-032): la decisión de aparcar y la de recoger solo usan la cinta, el
+     pulmón, el palet y el prior genérico de H6; ningún parámetro geométrico codifica medidas del flujo (los umbrales son relativos a
+     las cajas visibles o al palet). Test de fuga obligatorio, que incluye las acciones de aparcar.
+  5. Las cajas del pulmón sobreviven al cierre de palet (sirven para el siguiente). Sin deadlock nuevo: si nada más cabe, las del pulmón
+     se colocan como cualquier candidata.
+  6. Cumplimiento D-007 con la variante más cara (media ≤ 1 s, p95 ≤ 3 s, 1 proceso) y sweeps con `micro_plan_hard_cap_ms: 600000` (D-028).
+- Control obligatorio: ventana de 15 + K cajas sin pulmón (`ramp_cap`/`lookahead_k` = 18), para separar el efecto "ver más" (que ya
+  sabemos que no ayuda) del efecto "reservar estrechas".
+- Criterio (igual que D-016/D-029/D-031): ajuste en 1001–1010; candidata preregistrada aquí antes de evaluar; referencia 10 seeds +
+  réplica 20 seeds; se adopta como palanca si la pareada en la réplica es significativa (IC95 > 0) con `hard_cap_hits = 0`.
+
+## D-037 · Pulmón: candidata preregistrada y control "ventana 18" (2026-10-21, ANTES de evaluar)
+- Ajuste (`pulmon_tune`, seeds 1001–1010, 0 cortes; código local SHA256 14eab026…): con `staging_narrow_frac` 0,60 no se aparca
+  nunca y los 10 KPI son **idénticos** a `h6_sin_gate` en las 6 variantes (confirma que la geometría rápida del pulmón no cambia
+  decisiones). Con 0,80 (2–9 aparcamientos/seed): k1_free +0,27, **k1_hole +0,72 [−0,76; 2,20]**, k2_free +0,54, k2_hole −0,22,
+  k3_free +0,36, k3_hole +0,34, todas n.s.; por seed el efecto oscila ±3 pp (cada aparcamiento cambia la trayectoria), sin tendencia con K.
+  Control `ventana18` (cinta de 18 visibles, sin pulmón): **+2,15 [1,06; 3,23], significativo**, 9/10 seeds mejoran.
+- **Candidata del pulmón (palanca de hardware): `pulmon_k1_hole_f80`** (1 posición, recoger solo en hueco con ≤ 1 lateral libre,
+  estrecha si lado menor ≤ 0,80 × mediana de las visibles). Expectativa previa: débil (n.s. en ajuste).
+- **Segunda palanca preregistrada, aparte: `ventana18`** (cinta con 18 cajas visibles en lugar de 15: hardware de cinta/visión, no
+  pulmón). Contradice "ver más cajas no ayuda" (k30/k75 n.s. sobre H1+H3+H5, otra configuración), por eso se somete a la misma regla.
+  Si se confirma, falta además medir D-007 en 1 proceso (en el ajuste tarda ~1,47× la oficial bajo carga).
+- Regla (D-016/D-029/D-031/D-034): `pulmon_eval.yaml` = oficial + ambas; referencia 10 seeds + réplica 20 seeds (índices 10–29),
+  deterministas (`micro_plan_hard_cap_ms: 600000`); cada palanca se adopta **como palanca** si la pareada en la réplica es significativa
+  (IC95 > 0) con 0 cortes. La oficial de software (`h6_sin_gate`) no cambia en ningún caso.
+- Nota de reproducibilidad: el ajuste y la evaluación corren con el código revisado sin commitear (SHA 14eab026…); el arreglo
+  pendiente (spec 23b: `getattr(plan, "kind", "PICK")` para planes simulados de tests) no cambia decisiones: comprobado con el código
+  final (`pulmon_recheck_final`): `ventana18` y `pulmon_k1_hole_f80` en las seeds 50021 y 1 dan KPI idénticos a `pulmon_ref`.
+- **Resultado (2026-10-21, 0 cortes; `pulmon_ref` y `pulmon_replica`, wt2):**
+  | Config | Referencia (10) | Réplica (20) | KPI ref / réplica |
+  |---|---|---|---|
+  | `pulmon_k1_hole_f80` | −0,39 [−1,17; 0,38] | +0,12 [−0,83; 1,08] | 76,67 % / 76,33 % (≈ 4,2 aparcamientos/seed) |
+  | `ventana18` | +0,61 [−0,40; 1,63] | **+1,57 [0,67; 2,46]** | 77,68 % / 77,78 % |
+  | `h6_sin_gate` (oficial) | — | — | 77,06 % / 76,21 % (idénticas a las oficiales) |
+  → **Pulmón: NO se adopta** (ni como palanca): reservar cajas estrechas en 1–3 posiciones de suelo no mejora; cada aparcamiento
+  cambia la trayectoria (±3 pp por seed) sin ganancia media. **`ventana18`: palanca de hardware CONFIRMADA en KPI** (30 seeds:
+  77,74 % frente a 76,49 %, +1,25 pp), pero **no cumple D-007 tal cual**: en 1 proceso (seeds 1 y 42, misma sesión) tarda 1,23×
+  la oficial de media y 1,35× en p95 → ≈ 1,18 s / p95 ≈ 3,2 s estimados sobre la medida oficial (0,957 s / 2,36 s). Para implantarla
+  hay que optimizar o recortar el presupuesto de búsqueda y volver a medir. Corrige la conclusión "ver más cajas no ayuda" del INFORME
+  (venía de k30/k75 sobre H1+H3+H5, sin réplica). La oficial de software sigue siendo `h6_sin_gate` (77,06 %).
+

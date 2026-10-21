@@ -1,6 +1,6 @@
 # PROGRESS — autopiloto de compactidad (fuente única de verdad del estado)
 
-Última actualización: 2026-10-21 ~00:30 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
+Última actualización: 2026-10-21 ~13:00 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
 
 > **REGLA DEL USUARIO (2026-10-17, D-020; umbral subido al 80 % el 2026-10-20): si el uso semanal de Claude ("Weekly · all models",
 > herramienta `mcp__ccd_session_mgmt__get_usage`) llega al 80 %, PAUSAR el autopiloto hasta que el usuario diga que continúe.** Comprobarlo al
@@ -33,6 +33,9 @@
 - **2026-10-21 — LÍMITE PRÁCTICO (D-035):** desde el 77,06 % se han cerrado sin ganancia R7, H8, H1 fuerte, fase de suelo, H4 (solo
   con ancho por catálogo, no implantable por D-032), H10 y R13; tres ciclos laterales. La oficial sigue siendo `h6_sin_gate`.
   Pendiente del usuario: continuar con una investigación larga (RL/MCTS con valor entrenado a gran escala) o cerrar con el INFORME.
+- **2026-10-21 — PULMÓN y VENTANA 18 (D-036/D-037, palancas de hardware):** pulmón de 1–3 posiciones junto al palet **no adoptado**
+  (réplica +0,12 n.s.). Control **cinta con 18 visibles: +1,57 [0,67; 2,46] en la réplica (sig.), 77,74 % en 30 seeds**, pero
+  ≈ 1,23× más lento (no cumple D-007 sin optimizar). Rama `feat/pulmon-staging` (wt2, TOPE).
 - **Reglas de cuota:** Claude semanal ≤ 80 % (D-020); Codex semanal ≤ 60 % (D-027, guardián codex_quota.sh). Sweeps deterministas (D-028).
 - **Laterales libres (D-024): NO adoptado** (desempate exacto −1,33 pp significativo en referencia); la oficial ya tiene 94,7 % de
   cajas con 3–4 laterales libres y 0 % con 0. Rama feat/laterales-libres (borrador).
@@ -117,7 +120,14 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 - `stand_hl` (PR #139) duplica `stand_hw` (D-004). Gate stand_hw no es palanca. Simulador determinista.
 - H1: banda 200 mm empeora; banda ≥ 445 mejora; paisaje plano con ruido ~2 pp/seed.
 
-## Siguiente acción (vigente, 2026-10-20)
+## Siguiente acción (vigente, 2026-10-21 tarde)
+1. (hecho) D-036 modelo del pulmón; Codex 23 (+23b regresión de tests) lo implementa (desactivado por defecto, dumps idénticos,
+   test de fuga, 0,96 s/decisión con K=3). `codex_quota.sh` corregido (D-027, enmienda).
+2. (hecho) Ajuste `pulmon_tune`, preregistro D-037, `pulmon_ref` + `pulmon_replica`: pulmón no adoptado; ventana18 confirmada en KPI.
+3. **Siguiente:** decisión del usuario: (a) ¿interesa una cinta/visión con 18 cajas visibles? Si sí, optimizar la búsqueda para
+   cumplir D-007 con 18 visibles (Codex) y medir 15→18→21 visibles; (b) la decisión pendiente de D-035 (investigación larga o cierre).
+
+## Siguiente acción (anterior, 2026-10-20)
 1. (hecho) R7 confirmada (D-026), implementada (Codex 18/19), medida: sin ganancia; techo igual. Reajuste H1 invalidado (D-028).
 2. (hecho) Commit d0ce744, PR #160. H8, H1 fuerte (D-029) y fase de suelo descartadas. INFORME actualizado (77,06 %).
 3. (hecho) Ciclo lateral n.º 3 (D-030): el hueco trasero es estructural (también en el techo offline).
@@ -159,6 +169,8 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 | PALANCA garra de canto (cara H×L) y CONTRASTE gantry 6 orientaciones reales | canto: 68,67 % sin técnicas (+6,78 vs baseline); **72,54 % con H1+H3+H5 (+0,50 [−0,97; 1,96] n.s.)**; gantry 6 orient.: 76,39 % / **77,74 % con H1+H3+H5** (+5,70 [4,50; 6,91]) | `run_sweep.py --configs configs/sweeps/lever_canto.yaml --name lever_canto --seeds 10 --workers 15 --baseline arm6_4orient_H1H3H5` (wt2). Con la búsqueda, la garra de canto deja de aportar; la cinemática gantry sí (+5,7) |
 | Palancas buffer sobre H1+H3+H5 (k30, k75) | k30 +0,87 [−0,40; 2,13]; k75 +0,53 [−0,27; 1,34], n.s.; N=2 incompatible con micro_plan (open_pallets>1 lo prohíbe) | informativo (sweep levers_h5 en /tmp/wt_ro_h5): con búsqueda, más buffer apenas aporta |
 | Palanca gate stand_hw sobre H1+H3 sin columnas | gate 2400: −0,40 [−2,09; 1,30]; gate 800: +0,27 [−0,90; 1,43], n.s. (sweep lever_gate_h3 en /tmp/wt_ro_h3) | el gate solo importa combinado con columnas (H4) |
+| Pulmón físico 1–3 posiciones (D-036; reservar estrechas, recoger libre/en hueco) | ajuste: f60 sin aparcar (idéntico); f80 −0,22…+0,72 n.s.; candidata k1_hole_f80: referencia −0,39 n.s., réplica +0,12 n.s. | **no adoptado (D-037)**; rama feat/pulmon-staging |
+| PALANCA cinta con 18 visibles (`ventana18`, control de D-036) | ajuste +2,15 [1,06; 3,23]; referencia +0,61 n.s.; **réplica +1,57 [0,67; 2,46]**; 30 seeds 77,74 % | **palanca confirmada en KPI**; ~1,23× tiempo → incumple D-007 sin optimizar (D-037) |
 | R13 valor aprendido (ridge, 360 flujos sintéticos del prior genérico; mezcla w0,5) | ajuste +1,20 n.s. (solo aprendido −5,02 sig.); referencia −0,02 [−0,84; 0,80]; réplica +0,78 [−0,13; 1,69] n.s. | **no adoptada (D-034)**. Contador: 9 → límite práctico (D-035) |
 | H10 columnas adaptativas (solo 15 visibles; slack 0/10/20 × fill 0,75/0,85; ajuste determinista) | −0,42…−2,09 pp (s0 f75 sig.); laterales libres peores (h10_tune, wt2) | **descartada**. Contador: 8 |
 | H4 columnas online sobre h6_sin_gate (D-031; ancho 455, f85) | ajuste +1,07 n.s. (auto −2,61 sig.); referencia −0,33 [−0,98; 0,31]; **réplica +1,38 [0,48; 2,29] sig.**; 30 seeds +0,81 | **PALANCA "por catálogo"** (ancho ajustado a la familia dominante); oficial sin cambios. Pregunta al usuario. Rama feat/h4-sobre-h6 (wt2) |
