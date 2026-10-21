@@ -13,12 +13,13 @@ from ..packer.controls import AccessibilityConfig, BalanceConfig, ControlConfig,
 from ..packer.pallet_model import PalletModel
 from ..packer.scoring import ScoringWeights
 from ..scheduler.scheduler_v1 import PickPlan, SchedulerConfig, SchedulerRampState, SchedulerSimState, SchedulerV1
+from ..scheduler.staging import STAGING_RAMP_ID, narrow_candidates, validate_staging
 from ..control.controller import OnlineController
 from ..control.types import ControllerEvent, ControllerMode, DecisionContext, Overrides
 from .kpi_hooks import aggregate_pallet_kpis
 
 
-SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15, 30, 75, 186)
+SUPPORTED_LOOKAHEAD_K = (1, 3, 5, 10, 15, 18, 30, 75, 186)
 RESCUE_RETRY_REASONS = {"STABILITY", "NO_FEASIBLE"}
 
 
@@ -90,6 +91,14 @@ class PolicyConfig:
     micro_plan_topk_per_step: int = 15
     online_controller: bool = False
     controller_debug: bool = False
+    pallet_staging_slots: int = 0
+    staging_policy: str = "reserve_narrow"
+    staging_release: str = "free"
+    staging_narrow_frac: float = 0.75
+
+    def __post_init__(self) -> None:
+        validate_staging(self.pallet_staging_slots, self.staging_policy,
+                         self.staging_release, self.staging_narrow_frac)
 
 
 class PolicyPackerScheduler:
@@ -243,6 +252,10 @@ class PolicyPackerScheduler:
         batchfill_greedy_topk: int = 12,
         online_controller: bool = False,
         controller_debug: bool = False,
+        pallet_staging_slots: int = 0,
+        staging_policy: str = "reserve_narrow",
+        staging_release: str = "free",
+        staging_narrow_frac: float = 0.75,
     ) -> "PolicyPackerScheduler":
         if column_template != "off" and (stacking_mode != "heightfield" or overhang_mm != 20):
             raise ValueError("Columns require heightfield and the 1240 x 840 mm envelope (overhang=20)")
@@ -253,6 +266,7 @@ class PolicyPackerScheduler:
         pallet_spec = PalletSpec(overhang_mm=overhang_mm)
         scheduler = SchedulerConfig(
             lookahead_k=lookahead_k,
+            micro_plan_window_total=18 if lookahead_k == 18 else 15,
             t_select_base=t_select_base,
             t_select_step=t_select_step,
             time_penalty_weight=time_penalty_weight,
@@ -307,6 +321,10 @@ class PolicyPackerScheduler:
             batchfill_greedy_topk=batchfill_greedy_topk,
         )
         config = PolicyConfig(
+            pallet_staging_slots=pallet_staging_slots,
+            staging_policy=staging_policy,
+            staging_release=staging_release,
+            staging_narrow_frac=staging_narrow_frac,
             pallet_spec=pallet_spec,
             heuristic=heuristic,
             stacking_mode=str(stacking_mode),
@@ -378,10 +396,12 @@ class PolicyPackerScheduler:
         ramps: Mapping[int, Any],
         destinations: Mapping[int, Any],
         now: float,
+        pallet_staging: Any | None = None,
     ) -> PickPlan | None:
         started = perf_counter()
         try:
-            return self._choose_action(ramps=ramps, destinations=destinations, now=now)
+            return self._choose_action(ramps=ramps, destinations=destinations, now=now,
+                                       pallet_staging=pallet_staging)
         finally:
             self._decision_durations_ms.append((perf_counter() - started) * 1000.0)
 
@@ -405,12 +425,36 @@ class PolicyPackerScheduler:
         ramps: Mapping[int, Any],
         destinations: Mapping[int, Any],
         now: float,
+        pallet_staging: Any | None = None,
     ) -> PickPlan | None:
         self.stop_reason = None
         self.stop_details = {}
         pallets = self._collect_pallets(ramps)
         ramp_boxes = self._collect_ramp_boxes(ramps)
         ramp_states = self._collect_ramp_states(ramps)
+        if pallet_staging is not None:
+            # Use precisely the belt window seen at the root, also when two
+            # physical ramps share the scheduler's total visibility budget.
+            allocation = self._scheduler._allocate_micro_window({rid: len(r.queue) for rid, r in ramp_states.items()})
+            ramp_boxes = {rid: list(r.queue[:allocation[rid]]) for rid, r in ramp_states.items()}
+            pallets = {b.destination: self._pallets[b.destination] for q in ramp_boxes.values() for b in q}
+        occupied = pallet_staging.occupied if pallet_staging is not None else []
+        belt_boxes = dict(ramp_boxes)
+        visible = [box for queue in belt_boxes.values() for box in queue]
+        if occupied:
+            staged_boxes = [self._to_box(box) for _, box in occupied]
+            visible += staged_boxes
+            ramp_boxes[STAGING_RAMP_ID] = staged_boxes
+            ramp_states[STAGING_RAMP_ID] = SchedulerRampState(
+                tuple(staged_boxes), (), len(staged_boxes), always_visible=True)
+            for box in staged_boxes:
+                if box.destination not in self._pallets:
+                    self._pallets[box.destination] = self._new_pallet()
+                pallets[box.destination] = self._pallets[box.destination]
+        narrow = (narrow_candidates(belt_boxes, visible,
+                    orientation_mode=self.config.orientation_mode, fraction=self.config.staging_narrow_frac)
+                  if pallet_staging is not None else [])
+        staging_full = pallet_staging is not None and len(occupied) == len(pallet_staging.slots)
         blocked = {
             dest_id
             for dest_id, state in destinations.items()
@@ -426,6 +470,7 @@ class PolicyPackerScheduler:
             count = len(queue) + len(upstream) + len(staging)
             ramp_sizes[int(ramp_id)] = count
             remaining_total += count
+        remaining_total += len(occupied)
 
         sim_state = SchedulerSimState(
             now=float(now),
@@ -435,6 +480,8 @@ class PolicyPackerScheduler:
             pallet_blocked=blocked,
             ramp_sizes=ramp_sizes,
             remaining_total=int(remaining_total),
+            staging_hole=(pallet_staging is not None and self.config.staging_release == "hole"
+                          and not (staging_full and not narrow)),
         )
 
         overrides = Overrides()
@@ -547,6 +594,11 @@ class PolicyPackerScheduler:
                     stop_reason = retry_stop_reason
                     stop_details = retry_stop_details
 
+        if pallet_staging is not None:
+            plan = self._staging_action(plan, ramps, belt_boxes, visible, pallet_staging, occupied)
+            if plan is not None and getattr(plan, "kind", "PICK") == "PARK":
+                pending_closures, stop_reason, stop_details = {}, None, {}
+
         self._pending_closures = dict(pending_closures)
         self.stop_reason = stop_reason
         self.stop_details = dict(stop_details)
@@ -559,7 +611,7 @@ class PolicyPackerScheduler:
             )
 
         # KPI: medir non-head picks + dt_extra
-        if plan is not None:
+        if plan is not None and getattr(plan, "kind", "PICK") != "PARK":
             self.total_picks += 1
             idx = int(getattr(plan, "buffer_index", 0) or 0)
             self.sum_pick_index += idx
@@ -578,6 +630,25 @@ class PolicyPackerScheduler:
             override_attempts=override_attempts,
             controller_events=controller_events,
         )
+        return plan
+
+    def _staging_action(self, plan: PickPlan | None, ramps: Mapping[int, Any],
+                        belt_boxes: Mapping[int, list[Box]], visible: list[Box],
+                        staging: Any, occupied: list[tuple[int, Any]]) -> PickPlan | None:
+        free_slot = next((i for i, box in enumerate(staging.slots) if box is None), None)
+        if free_slot is not None:
+            candidates = narrow_candidates(belt_boxes, visible,
+                orientation_mode=self.config.orientation_mode, fraction=self.config.staging_narrow_frac,
+                excluded_id=plan.box_id if plan is not None else None)
+            for rid, idx, box in candidates:
+                ramp = ramps[rid]
+                if len(ramp.queue) == ramp.capacity and bool(ramp.upstream):
+                    return PickPlan(rid, idx, box.box_id, box.destination, None,
+                                    0.0, 0.0, kind="PARK", staging_slot=free_slot)
+        if plan is not None and plan.ramp_id == STAGING_RAMP_ID:
+            slot, box = occupied[plan.buffer_index]
+            return replace(plan, ramp_id=box.ramp_id, buffer_index=0, dt_extra=0.0,
+                           kind="UNPARK", staging_slot=slot)
         return plan
 
     def commit_plan(self, plan: PickPlan, time: float | None = None) -> None:
@@ -1225,7 +1296,8 @@ class PolicyPackerScheduler:
         snapshots: dict[int, SchedulerRampState] = {}
         for ramp_id, ramp in ramps.items():
             queue = tuple(self._to_box(item) for item in list(getattr(ramp, "queue", [])))
-            upstream = tuple(self._to_box(item) for item in list(getattr(ramp, "upstream", [])))
+            upstream = (() if self.config.pallet_staging_slots
+                        else tuple(self._to_box(item) for item in list(getattr(ramp, "upstream", []))))
             capacity = int(getattr(ramp, "capacity", len(queue)) or len(queue))
             snapshots[int(ramp_id)] = SchedulerRampState(
                 queue=queue,
@@ -1296,6 +1368,7 @@ class PolicyPackerScheduler:
             ),
         )
         return PalletModel(
+            fast_preview_geometry=self.config.pallet_staging_slots > 0,
             spec=self.config.pallet_spec,
             heuristic=self.config.heuristic,
             scoring_weights=self.config.scoring_weights,

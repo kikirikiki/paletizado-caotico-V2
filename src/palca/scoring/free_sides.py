@@ -10,8 +10,11 @@ from ..domain.placement import Placement
 T = TypeVar("T")
 
 
-def free_sides(candidate: Placement, placements: Iterable[Placement], gap_mm: float = 20) -> int:
-    """Count unoccupied ±x/±y faces; pallet edges are deliberately irrelevant.
+def free_sides(candidate: Placement, placements: Iterable[Placement], gap_mm: float = 20,
+               *, bounds: tuple[float, float, float, float] | None = None) -> int:
+    """Count unoccupied ±x/±y faces; by default pallet edges are free (D-024).
+
+    Optional (xmin, ymin, xmax, ymax) envelope bounds act as walls for D-036.
 
     Tangential and vertical overlap must have positive length. A normal gap
     of exactly gap_mm is free; contact is occupied even when gap_mm is zero.
@@ -22,6 +25,16 @@ def free_sides(candidate: Placement, placements: Iterable[Placement], gap_mm: fl
     x, y, z = candidate.x_mm, candidate.y_mm, candidate.z_mm
     xx, yy, zz = x + candidate.length_mm, y + candidate.width_mm, z + candidate.height_mm
     occupied = 0
+    if bounds is not None:
+        xmin, ymin, xmax, ymax = bounds
+        if x - xmin < gap_mm or x <= xmin:
+            occupied |= 1
+        if xmax - xx < gap_mm or xx >= xmax:
+            occupied |= 2
+        if y - ymin < gap_mm or y <= ymin:
+            occupied |= 4
+        if ymax - yy < gap_mm or yy >= ymax:
+            occupied |= 8
     for p in placements:
         if p.z_mm >= zz or p.z_mm + p.height_mm <= z:
             continue

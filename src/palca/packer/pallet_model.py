@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -12,6 +12,7 @@ from ..domain.placement import Placement, PlacementPreview
 from .controls import (
     BalancePlacementControl, ControlConfig, ControlStack, LoadBearPlacementControl,
     RobotAccessibilityControl, StabilityPlacementControl, build_control_stack,
+    PlacementControlResult,
 )
 from ..scoring.free_sides import free_sides, rank_free_sides, validate_tolerance
 from .layer import LayerState
@@ -50,9 +51,10 @@ class _HeightfieldPreviewCache:
         self.xy: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {}
         self.projections: dict[tuple[int, ...], tuple[int, float]] = {}
         self.robot: dict[tuple[int, ...], Any] = {}
+        self.robot_tops: dict[tuple[int, ...], tuple[int, ...]] = {}
         self.bounds: np.ndarray | None = None
 
-    def fill_heights(self, xy, length, width, offset, placements) -> None:
+    def fill_heights(self, xy, length, width, offset, placements, *, robot_neighbors=False) -> None:
         """Batch the original strict integer overlap test, in candidate order.
 
         Out-of-int64 geometry retains the scalar implementation. No physical
@@ -64,6 +66,8 @@ class _HeightfieldPreviewCache:
             return
         if not placements:
             self.heights.update((footprint, 0) for footprint in footprints)
+            if robot_neighbors:
+                self.robot_tops.update((footprint, ()) for footprint in footprints)
             return
         try:
             if self.bounds is None:
@@ -80,6 +84,28 @@ class _HeightfieldPreviewCache:
                     & (queries[:, 3, None] > b[:, 1]) & (b[:, 3] > queries[:, 1, None]))
         heights = np.maximum(0, np.max(np.where(overlaps, b[:, 4], 0), axis=1))
         self.heights.update((footprint, int(z)) for footprint, z in zip(footprints, heights))
+        if robot_neighbors:
+            touching = ((queries[:, 2, None] >= b[:, 0]) & (b[:, 2] >= queries[:, 0, None])
+                        & (queries[:, 3, None] >= b[:, 1]) & (b[:, 3] >= queries[:, 1, None]))
+            for footprint, mask in zip(footprints, touching):
+                # Preserve placement order, including the first blocking top
+                # reported in RobotAccessibilityControl.debug.
+                self.robot_tops[footprint] = tuple(int(top) for top in b[mask, 4])
+
+    def robot_result(self, control, placement):
+        if control.config.accessibility_delta_mm == 0:
+            return PlacementControlResult(True, placement)
+        footprint = (placement.x_mm, placement.y_mm, placement.length_mm, placement.width_mm)
+        tops = self.robot_tops.get(footprint)
+        if tops is None:
+            return None  # Scalar fallback for unbounded Python integers.
+        local_z = self.heights[footprint]
+        delta = control.config.effective_delta_mm(placement.height_mm)
+        for top in tops:
+            if top > local_z + delta:
+                return PlacementControlResult(False, placement, reason="ROBOT_ACCESS",
+                    debug=dict(blocking_top_mm=top, local_z_mm=local_z, delta_mm=delta))
+        return PlacementControlResult(True, placement)
 
     def __deepcopy__(self, memo):
         # A beam/rollout immediately commits to its own copy. Copying derived
@@ -343,8 +369,10 @@ class PalletModel:
         coverage_weight: float = 0.0,
         dominant_free_rect_weight: float = 0.0,
         dominant_free_rect_ratio_gate: float = 0.35,
+        fast_preview_geometry: bool = False,
     ) -> None:
         self.spec = spec or PalletSpec()
+        self.fast_preview_geometry = fast_preview_geometry
         self.heuristic = heuristic
         self.scoring_weights = _normalize_scoring_weights(scoring_weights)
         self.stacking_mode = normalize_stacking_mode(stacking_mode)
@@ -401,6 +429,7 @@ class PalletModel:
         max_seconds_per_item: float | None = None,
         free_sides_tiebreak: bool = False,
         free_sides_tolerance: float = 0.0,
+        placement_filter: Callable[[Placement], bool] | None = None,
     ) -> PlacementPreview:
         validate_tolerance(free_sides_tolerance)
         length_mm = int(box.length_mm)
@@ -470,7 +499,7 @@ class PalletModel:
         if self.stacking_mode == STACKING_MODE_HEIGHTFIELD:
             return self._preview_place_heightfield(
                 box, budget=budget, free_sides_tiebreak=free_sides_tiebreak,
-                free_sides_tolerance=free_sides_tolerance)
+                free_sides_tolerance=free_sides_tolerance, placement_filter=placement_filter)
 
         rejected_by_controls = 0
         evaluated_candidates: list[tuple[float, dict[str, Any]]] = []
@@ -559,6 +588,7 @@ class PalletModel:
                 orientation_variants,
                 is_new_layer=False,
                 budget=budget,
+                placement_filter=placement_filter,
             )
             rejected_by_controls += layer_rejected
             evaluated_candidates.extend(layer_evaluated)
@@ -580,6 +610,7 @@ class PalletModel:
                 orientation_variants,
                 is_new_layer=True,
                 budget=budget,
+                placement_filter=placement_filter,
             )
             rejected_by_controls += layer_rejected
             evaluated_candidates.extend(layer_evaluated)
@@ -864,6 +895,7 @@ class PalletModel:
         *,
         is_new_layer: bool,
         budget: _PreviewBudget | None = None,
+        placement_filter: Callable[[Placement], bool] | None = None,
     ) -> tuple[list[_LayerCandidate], int, list[tuple[float, dict[str, Any]]], bool]:
         candidates: list[_LayerCandidate] = []
         rejected_by_controls = 0
@@ -1062,6 +1094,8 @@ class PalletModel:
                 if not feasible:
                     continue
 
+                if placement_filter is not None and not placement_filter(adjusted):
+                    continue
                 candidates.append(
                     _LayerCandidate(
                         layer_id=layer.layer_id,
@@ -1210,6 +1244,7 @@ class PalletModel:
         column: tuple[int, int, int, int] | None = None,
         column_min_fill: float = 0.85,
         collected: list[PlacementPreview] | None = None,
+        placement_filter: Callable[[Placement], bool] | None = None,
     ) -> PlacementPreview:
         length_mm = int(box.length_mm)
         width_mm = int(box.width_mm)
@@ -1343,7 +1378,8 @@ class PalletModel:
                     if cache is not None:
                         cache.xy[l_mm, w_mm] = xy_candidates
                 if cache is not None and budget is None:
-                    cache.fill_heights(xy_candidates, l_mm, w_mm, offset, self.placements)
+                    cache.fill_heights(xy_candidates, l_mm, w_mm, offset, self.placements,
+                                       robot_neighbors=self.fast_preview_geometry)
             else:
                 cx, cy, cl, cw = column
                 if l_mm > cl or w_mm > cw or l_mm * w_mm < column_min_fill * cl * cw:
@@ -1433,7 +1469,14 @@ class PalletModel:
                         if cached is not None:
                             result = replace(cached, placement=adjusted)
                     if result is None:
-                        result = control.evaluate(pallet=self, box=box, placement=adjusted)
+                        if robot_key is not None and self.fast_preview_geometry:
+                            result = cache.robot_result(control, adjusted)
+                        if (result is None and self.fast_preview_geometry and cache is not None
+                                and type(control) is StabilityPlacementControl
+                                and adjusted == base_placement):
+                            result = control.evaluate(pallet=self, box=box, placement=adjusted, known_settled=True)
+                        if result is None:
+                            result = control.evaluate(pallet=self, box=box, placement=adjusted)
                         if robot_key is not None:
                             cache.robot[robot_key] = result
                     debug.update(result.debug)
@@ -1527,6 +1570,8 @@ class PalletModel:
                         continue
                     debug.update(column=column, column_fill=l_mm * w_mm / (column[2] * column[3]),
                                  column_roof_mm=adjusted.z_mm + adjusted.height_mm)
+                if placement_filter is not None and not placement_filter(adjusted):
+                    continue
                 height_after = max(
                     int(self.current_height_mm()),
                     int(adjusted.z_mm) + int(adjusted.height_mm),
