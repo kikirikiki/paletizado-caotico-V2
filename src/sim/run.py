@@ -250,8 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--micro-plan", action="store_true", help="Habilita micro-planner beam search (solo palca)")
     parser.add_argument("--micro-plan-node-budget", type=int, default=0, help="Intentos de expansión; 0 conserva corte temporal")
     parser.add_argument("--micro-plan-hard-cap-ms", type=int, default=10000, help="Salvaguarda H3; cualquier hit invalida determinismo")
-    parser.add_argument("--micro-plan-value", choices=("score", "potential", "rollout"), default="score")
+    parser.add_argument("--micro-plan-value", choices=("score", "potential", "rollout", "learned", "rollout+learned"), default="score")
     parser.add_argument("--micro-plan-value-weight", type=float, default=1.0)
+    parser.add_argument("--learned-value-weight", type=float, default=1.0)
     parser.add_argument("--micro-plan-rollout-leaves", type=int, default=4)
     parser.add_argument("--rollout-future-boxes", type=int, default=0)
     parser.add_argument("--rollout-future-samples", type=int, default=1)
@@ -509,6 +510,7 @@ def run_simulation(
     micro_plan_hard_cap_ms: int = 10000,
     micro_plan_value: str = "score",
     micro_plan_value_weight: float = 1.0,
+    learned_value_weight: float = 1.0,
     micro_plan_rollout_leaves: int = 4,
     rollout_future_boxes: int = 0,
     rollout_future_samples: int = 1,
@@ -696,6 +698,7 @@ def run_simulation(
             micro_plan_hard_cap_ms=micro_plan_hard_cap_ms,
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
+            learned_value_weight=learned_value_weight,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -898,6 +901,8 @@ def run_simulation(
             "micro_plan_hard_cap_ms": micro_plan_hard_cap_ms,
             "micro_plan_value": micro_plan_value,
             "micro_plan_value_weight": micro_plan_value_weight,
+            **({"learned_value_weight": learned_value_weight, "learned_model": "r13_generic_v1"}
+               if micro_plan_value in ("learned", "rollout+learned") else {}),
             "micro_plan_rollout_leaves": micro_plan_rollout_leaves,
             "rollout_future_boxes": rollout_future_boxes,
             "rollout_future_samples": rollout_future_samples,
@@ -1019,6 +1024,7 @@ def main() -> None:
         micro_plan_hard_cap_ms=args.micro_plan_hard_cap_ms,
         micro_plan_value=args.micro_plan_value,
         micro_plan_value_weight=args.micro_plan_value_weight,
+        learned_value_weight=args.learned_value_weight,
         micro_plan_rollout_leaves=args.micro_plan_rollout_leaves,
         rollout_future_boxes=args.rollout_future_boxes,
         rollout_future_samples=args.rollout_future_samples,

@@ -385,3 +385,34 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   dimensiones del flujo evaluado (anchos, alturas o familias concretas); los pesos y presupuestos ajustados en seeds de ajuste siguen
   permitidos, pero cualquier parámetro geométrico debe deducirse de las 15 cajas visibles o del prior genérico.
 - Contador anti-estancamiento: 7 (H4 no cuenta como técnica general).
+- **H10 (columnas adaptativas con solo las 15 visibles, commit 64b9fb7):** ajuste determinista (h10_tune) −0,42…−2,09 pp en las seis
+  variantes (s0 f75 significativa) y peores laterales libres → **descartada**. Contador: 8. Sin conocer las medidas de antemano, la
+  plantilla de columnas no compensa.
+
+## D-033 · R13: función de valor aprendida con flujos sintéticos del prior genérico (2026-10-20)
+- Contexto: 8 técnicas seguidas < 0,5 pp. Lo que falta (pozos a media altura, D-030/R12) se crea muchas cajas antes de que se note; los
+  rollouts de H5/H6 miran 2 hojas × 6 cajas. La única vía de software restante con margen es una estimación del valor de un estado de
+  palet a largo plazo.
+- Opción: Codex entrena un modelo ligero V(estado del palet) → utilización final esperada del palet, con episodios simulados sobre
+  flujos SINTÉTICOS del prior genérico (sin información del flujo evaluado, D-032), y lo usa como valor de las hojas de H5/H6. Se ajusta
+  en seeds 1001–1010 y se evalúa con el protocolo preregistrado (referencia + réplica 20 seeds). Límite de tiempo D-007.
+- Si R13 no aporta: se documenta el límite práctico de la célula en el INFORME (sin escribir `PARADA:`, que exige T3 refutado).
+- Implementación (commit 87e083e): ridge de 88 características, 360 flujos sintéticos (68.613 estados), R² 0,33, MAE 4,2 pp; defaults
+  idénticos; fugas D-022/D-032 OK; 0,749 s/decisión.
+- Ajuste determinista (r13_tune, seeds 1001–1010): solo aprendido −5,02 (sig.); mezcla w0,5 +1,20 [−0,20; 2,61]; w1 −0,69; w2 −0,26.
+
+## D-034 · R13 mezcla w0,5 como candidata preregistrada (2026-10-21, ANTES de evaluar)
+- Candidata = `r13_mix_w05`; misma regla que D-029/D-031: referencia 10 seeds + réplica 20 seeds (D-016), deterministas; se adopta si
+  la pareada en la réplica es significativa. Advertencia previa: el ajuste no es monótono en el peso (0,5 bien, 1 y 2 mal), patrón
+  parecido al de H1 fuerte (D-029), que no se confirmó.
+- **Resultado (2026-10-21, 0 cortes):** referencia −0,02 [−0,84; 0,80]; réplica +0,78 [−0,13; 1,69] n.s. → **NO se adopta.**
+  Contador anti-estancamiento: 9. Con D-033: se documenta el límite práctico de la célula en el INFORME.
+
+## D-035 · Límite práctico de arm6_4orient con 15 cajas visibles (2026-10-21)
+- Desde el 77,06 % se han cerrado sin ganancia: R7, H8, H1 fuerte, fase de suelo, H4 (solo con ancho por catálogo, no implantable,
+  D-032), H10 y R13. Tres ciclos de pensamiento lateral (D-019, D-025, D-030). El techo offline con información completa es 81,45 %
+  y comparte el hueco trasero estructural; lo que falta son pozos a media altura que se crean con información que el robot aún no ve.
+- Conclusión: 77,06 % es el límite práctico medido con software para esta célula (T1 sí, T2 no). No es una condición de parada §9
+  (T3 no está refutado con cotas formales), así que no se escribe `PARADA:`. Las vías que quedan son de otro orden: cinemática gantry
+  (82,0 % medido), o una investigación larga (RL / MCTS con valor entrenado a gran escala) sin garantía de llegar a T2.
+- Se pregunta al usuario si continuar con esa investigación larga o cerrar el estudio con el informe.

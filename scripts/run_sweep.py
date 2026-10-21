@@ -103,6 +103,7 @@ def digest(value) -> str:
 
 def source_hash() -> str:
     files = sorted([*ROOT.joinpath("src").rglob("*.py"), *ROOT.joinpath("scripts").rglob("*.py"),
+                    *ROOT.joinpath("src/palca/scoring/models").glob("*.json"),
                     ROOT / "pyproject.toml", ROOT / "requirements.txt"])
     return digest({str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files})
 

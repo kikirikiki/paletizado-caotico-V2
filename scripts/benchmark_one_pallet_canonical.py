@@ -44,6 +44,7 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "access_debt_exempt_delta_mm",  # Spec 18 is exercised through sweeps.
     "dead_headroom_weight",
     "dead_headroom_min_mm",
+    "learned_value_weight",  # R13 is exercised through sweeps; frozen profile unchanged.
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
     "free_sides_tiebreak",  # Perfil congelado: conserva False / 0.0; D-024 usa sweeps.
     "free_sides_tolerance",

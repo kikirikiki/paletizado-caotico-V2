@@ -1,6 +1,6 @@
 # PROGRESS — autopiloto de compactidad (fuente única de verdad del estado)
 
-Última actualización: 2026-10-20 ~13:30 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
+Última actualización: 2026-10-21 ~00:30 CEST · Director: Claude Code · Ejecutor: Codex (`codex exec` en WSL, DECISIONS D-001/D-008)
 
 > **REGLA DEL USUARIO (2026-10-17, D-020; umbral subido al 80 % el 2026-10-20): si el uso semanal de Claude ("Weekly · all models",
 > herramienta `mcp__ccd_session_mgmt__get_usage`) llega al 80 %, PAUSAR el autopiloto hasta que el usuario diga que continúe.** Comprobarlo al
@@ -30,11 +30,10 @@
 - **T1 ALCANZADO sin condiciones** (H5/H6 solo usan información visible).
 - **MEJOR ACTUAL: H1+H3+H5+H6 sin gate = 77,06 % ± 0,90 (10 seeds de referencia; +3,03 [1,72; 4,35] vs H6 con gate); réplica 20 seeds
   +2,62 [1,52; 3,71] → 77,6 % del gap.** Faltan 2,4 pp para T2 (79,49).
-- **2026-10-20: Codex vuelve a tener cuota. Ciclo lateral n.º 2 (D-025):** el 72 % de la pérdida (14,8 pp de la envolvente) son
-  pozos profundos de acceso; la regla de 400 mm se mide desde la base de la caja e ignora su altura. En marcha: (a) reajuste de H1
-  sobre h6_sin_gate (sweep `h1_retune_h6`, wt2 en detached b05704c, seeds de ajuste 1001–1010); (b) Codex job `18_pozos`
-  (spec autopilot_logs/18_spec.md, wt1, rama `feat/pozos-acceso`): palanca R7 `accessibility_tall_box_exemption` + técnica H8
-  altura muerta. Pregunta al usuario pendiente sobre R7 [REVISAR].
+- **2026-10-21 — LÍMITE PRÁCTICO (D-035):** desde el 77,06 % se han cerrado sin ganancia R7, H8, H1 fuerte, fase de suelo, H4 (solo
+  con ancho por catálogo, no implantable por D-032), H10 y R13; tres ciclos laterales. La oficial sigue siendo `h6_sin_gate`.
+  Pendiente del usuario: continuar con una investigación larga (RL/MCTS con valor entrenado a gran escala) o cerrar con el INFORME.
+- **Reglas de cuota:** Claude semanal ≤ 80 % (D-020); Codex semanal ≤ 60 % (D-027, guardián codex_quota.sh). Sweeps deterministas (D-028).
 - **Laterales libres (D-024): NO adoptado** (desempate exacto −1,33 pp significativo en referencia); la oficial ya tiene 94,7 % de
   cajas con 3–4 laterales libres y 0 % con 0. Rama feat/laterales-libres (borrador).
 - **Tiempo resuelto (feat/h6-rapido):** optimización sin cambiar decisiones (KPI y dumps idénticos 10/10): media 1,156 → 0,957 s,
@@ -125,10 +124,11 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 4. (hecho) R12 (RESEARCH, tras §1quinquies): la diferencia online − offline son pozos a media altura (3,9 % vs 0,4 %).
 5. (hecho) H4 integrada (rama `feat/h4-sobre-h6`, wt2, TOPE) y evaluada (D-031): palanca "por catálogo", +0,81 pp en 30 seeds.
 6. (hecho) Usuario (D-032): no hay catálogo previo, solo las 15 cajas de la cinta → H4 queda como palanca informativa.
-7. (en curso) Codex `21_h10` (spec autopilot_logs/21_spec.md) en wt2, rama `feat/h10-columnas-adaptativas` (TOPE, desde
-   feat/h4-sobre-h6; D-032 en DECISIONS sin commitear): H10 plantilla de columnas adaptativa con solo las 15 visibles. Después:
-   revisar, equivalencia, test de fuga, commit, ajuste determinista → referencia + réplica preregistradas.
-8. Si H10 no aporta: R13 (función de valor aprendida) o documentar el límite práctico de la célula.
+7. (hecho) H10 columnas adaptativas (commit 64b9fb7, rama TOPE `feat/h10-columnas-adaptativas`, wt2): −0,4…−2,1 pp → descartada.
+8. (hecho) R13 valor aprendido (commit 87e083e, rama TOPE `feat/r13-valor-aprendido`, wt2): D-034 referencia −0,02, réplica +0,78
+   n.s. → no adoptada. Contador 9.
+9. (hecho) Límite práctico documentado (D-035, INFORME). PRs borrador de h10 y r13.
+10. **Siguiente: esperar la decisión del usuario** (investigación larga o cierre). Sin `PARADA:` (T3 no refutado formalmente).
 
 ## Siguiente acción (anterior, 2026-10-17)
 1. (hecho 00:05–00:40) H4 → descartada, PR borrador #147.
@@ -159,6 +159,8 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 | PALANCA garra de canto (cara H×L) y CONTRASTE gantry 6 orientaciones reales | canto: 68,67 % sin técnicas (+6,78 vs baseline); **72,54 % con H1+H3+H5 (+0,50 [−0,97; 1,96] n.s.)**; gantry 6 orient.: 76,39 % / **77,74 % con H1+H3+H5** (+5,70 [4,50; 6,91]) | `run_sweep.py --configs configs/sweeps/lever_canto.yaml --name lever_canto --seeds 10 --workers 15 --baseline arm6_4orient_H1H3H5` (wt2). Con la búsqueda, la garra de canto deja de aportar; la cinemática gantry sí (+5,7) |
 | Palancas buffer sobre H1+H3+H5 (k30, k75) | k30 +0,87 [−0,40; 2,13]; k75 +0,53 [−0,27; 1,34], n.s.; N=2 incompatible con micro_plan (open_pallets>1 lo prohíbe) | informativo (sweep levers_h5 en /tmp/wt_ro_h5): con búsqueda, más buffer apenas aporta |
 | Palanca gate stand_hw sobre H1+H3 sin columnas | gate 2400: −0,40 [−2,09; 1,30]; gate 800: +0,27 [−0,90; 1,43], n.s. (sweep lever_gate_h3 en /tmp/wt_ro_h3) | el gate solo importa combinado con columnas (H4) |
+| R13 valor aprendido (ridge, 360 flujos sintéticos del prior genérico; mezcla w0,5) | ajuste +1,20 n.s. (solo aprendido −5,02 sig.); referencia −0,02 [−0,84; 0,80]; réplica +0,78 [−0,13; 1,69] n.s. | **no adoptada (D-034)**. Contador: 9 → límite práctico (D-035) |
+| H10 columnas adaptativas (solo 15 visibles; slack 0/10/20 × fill 0,75/0,85; ajuste determinista) | −0,42…−2,09 pp (s0 f75 sig.); laterales libres peores (h10_tune, wt2) | **descartada**. Contador: 8 |
 | H4 columnas online sobre h6_sin_gate (D-031; ancho 455, f85) | ajuste +1,07 n.s. (auto −2,61 sig.); referencia −0,33 [−0,98; 0,31]; **réplica +1,38 [0,48; 2,29] sig.**; 30 seeds +0,81 | **PALANCA "por catálogo"** (ancho ajustado a la familia dominante); oficial sin cambios. Pregunta al usuario. Rama feat/h4-sobre-h6 (wt2) |
 | H9 fase de suelo (`hard_floor_phase_end_step` 8/12/20 × premio de pie 0/0,5; ajuste determinista) | −1,0…−2,5 sin premio; −8,1…−8,4 con premio (h9_floor_tune, wt1) | **descartada**. Contador: 6 → ciclo lateral n.º 3 (D-030) |
 | H8 altura muerta (peso 0,1–1,0, mín 250/350; ajuste determinista) | +0,01…+0,62 n.s. sin tendencia (h8_det_tune, wt1) | **descartada**. Contador anti-estancamiento: 4 |

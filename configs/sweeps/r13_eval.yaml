@@ -1,0 +1,40 @@
+# D-034: candidata preregistrada r13_mix_w05 vs oficial; referencia + réplica D-016; determinista D-028
+- name: h6_sin_gate
+  preset: arm6_4orient
+  role: official
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 57
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout
+    micro_plan_rollout_leaves: 2
+    rollout_future_boxes: 6
+    rollout_future_samples: 1
+    rollout_prior: generic
+    stand_hw_height_margin_gate_mm: 2400
+    micro_plan_hard_cap_ms: 600000
+- name: r13_mix_w05
+  preset: arm6_4orient
+  role: contrast
+  overrides:
+    access_debt_mode: penalty
+    access_debt_weight: 0.25
+    access_debt_band_mm: 600
+    micro_plan: true
+    micro_plan_node_budget: 27
+    micro_depth: 3
+    micro_width: 8
+    micro_topk: 15
+    micro_plan_value: rollout+learned
+    micro_plan_rollout_leaves: 2
+    rollout_future_boxes: 6
+    rollout_future_samples: 1
+    rollout_prior: generic
+    stand_hw_height_margin_gate_mm: 2400
+    micro_plan_hard_cap_ms: 600000
+    learned_value_weight: 0.5
