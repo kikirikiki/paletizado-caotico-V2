@@ -13,7 +13,8 @@
   Metas: **T1 ≥ 71,67 %**, **T2 ≥ 79,49 %**, **T3 ≥ 92,84 %**.
 - **Mejor resultado online: 77,06 % ± 0,90** (H1+H3+H5+H6, sin gate de cajas de pie): **+15,2 pp sobre el baseline, 77,6 % del gap
   → T1 alcanzado sin condiciones.** Réplica en 20 seeds nuevas: 76,21 %. Tiempo real: 0,957 s/decisión de media, p95 2,36 s.
-- **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado seis líneas más (sección 5).
+- **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
+  de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
 - **T3 (+50 %) no se alcanza.** Las cotas formales relajadas no lo descartan, y el techo alcanzable queda 11,4 pp por debajo
   (refutación empírica, D-010).
 
@@ -61,6 +62,8 @@ más de 400 mm (regla R7, D-026).
 | H8 altura muerta bajo el techo | +0,01…+0,62 n.s. (ajuste) | — | — | descartada |
 | H1 fuerte (peso 2, banda 900) | réplica +0,53 [−0,41; 1,45] n.s. | — | — | descartada (D-029) |
 | Fase de suelo (primero llenar el suelo) | −1,0…−8,4 (ajuste) | — | — | descartada |
+| H10 columnas adaptativas (solo 15 visibles) | −0,4…−2,1 (ajuste) | — | — | descartada |
+| R13 valor de estado aprendido (flujos sintéticos) | réplica +0,78 [−0,13; 1,69] n.s. | — | — | descartada (D-034) |
 | Re-ajuste de mandos existentes / gate solo | 0 / n.s. | — | — | descartadas |
 
 La ventaja de la búsqueda solo usa las 15 cajas visibles (test de fuga, D-022). Es determinista: todas las cifras de evaluación se
@@ -69,7 +72,7 @@ miden sin cortes de reloj (D-028). Tiempo por decisión de la mejor configuraci�
 ## 6. Palancas operativas y de hardware (sobre la mejor configuración salvo indicación)
 | Palanca | KPI | Δ | Implicación |
 |---|---|---|---|
-| Columnas online con ancho fijado por catálogo (H4, 455 mm) | 77,30 % (30 seeds) | +0,81 (réplica +1,38 [0,48; 2,29]) | solo software, pero exige configurar el ancho con la familia dominante del catálogo; sin ese dato empeora (−2,6) |
+| Columnas online con ancho fijado por catálogo (H4, 455 mm) | 77,30 % (30 seeds) | +0,81 (réplica +1,38 [0,48; 2,29]) | exige conocer de antemano la familia dominante; **no implantable**: no hay catálogo previo (D-032); sin ese dato empeora (−2,6) |
 | Garra de canto | 77,76 % | +0,70 | cambio de garra; ~1,6 s/decisión; no justifica la inversión |
 | Buffer ×2 / ×5 | +0,87 / +0,53 n.s. | — | no compensa más rampa |
 | Secuenciación aguas arriba | −0,81 n.s. | — | no compensa pedirla al almacén |
@@ -90,5 +93,7 @@ La única palanca que supera T2 es cambiar de cinemática (gantry), que no es la
    menos), validando con ROBOGUIDE las trayectorias junto a vecinas pegadas.
 2. No invertir en garra de canto, en más buffer, en secuenciación aguas arriba ni en una segunda posición de palet: con la búsqueda no
    aportan.
-3. Lo que queda hasta T2 está en pozos que crea ver solo 15 cajas. Las vías abiertas son de mayor coste: una función de valor
-   aprendida para planificar más allá de la ventana visible, o más información (ver más cajas de la cinta).
+3. Lo que queda hasta T2 (~3,5 pp de pozos a media altura, RESEARCH R12) se crea con información que el robot aún no ve. Ver más cajas
+   no ayuda (buffer ×2/×5 n.s.), y tampoco una función de valor ligera entrenada con flujos sintéticos (R13). Con software y esta
+   célula, 77,06 % es el límite práctico medido. Superar T2 exige otra cinemática (gantry: 82,0 % medido) o una investigación larga
+   (RL / MCTS con valor entrenado a gran escala) sin garantía de resultado.

@@ -405,3 +405,14 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Candidata = `r13_mix_w05`; misma regla que D-029/D-031: referencia 10 seeds + réplica 20 seeds (D-016), deterministas; se adopta si
   la pareada en la réplica es significativa. Advertencia previa: el ajuste no es monótono en el peso (0,5 bien, 1 y 2 mal), patrón
   parecido al de H1 fuerte (D-029), que no se confirmó.
+- **Resultado (2026-10-21, 0 cortes):** referencia −0,02 [−0,84; 0,80]; réplica +0,78 [−0,13; 1,69] n.s. → **NO se adopta.**
+  Contador anti-estancamiento: 9. Con D-033: se documenta el límite práctico de la célula en el INFORME.
+
+## D-035 · Límite práctico de arm6_4orient con 15 cajas visibles (2026-10-21)
+- Desde el 77,06 % se han cerrado sin ganancia: R7, H8, H1 fuerte, fase de suelo, H4 (solo con ancho por catálogo, no implantable,
+  D-032), H10 y R13. Tres ciclos de pensamiento lateral (D-019, D-025, D-030). El techo offline con información completa es 81,45 %
+  y comparte el hueco trasero estructural; lo que falta son pozos a media altura que se crean con información que el robot aún no ve.
+- Conclusión: 77,06 % es el límite práctico medido con software para esta célula (T1 sí, T2 no). No es una condición de parada §9
+  (T3 no está refutado con cotas formales), así que no se escribe `PARADA:`. Las vías que quedan son de otro orden: cinemática gantry
+  (82,0 % medido), o una investigación larga (RL / MCTS con valor entrenado a gran escala) sin garantía de llegar a T2.
+- Se pregunta al usuario si continuar con esa investigación larga o cerrar el estudio con el informe.
