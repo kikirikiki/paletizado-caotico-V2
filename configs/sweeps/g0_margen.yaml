@@ -1,5 +1,5 @@
 # G0(a) D-039: margen por cómputo (cotas, no candidatas). Determinista (D-028). Ajuste 1001–1010.
-# Spec 24a añade aquí los miembros oraculo_* (CON FUGA).
+# Los miembros oraculo_* son cotas CON FUGA deliberada; nunca candidatas.
 - name: h6_sin_gate
   preset: arm6_4orient
   role: official
@@ -41,3 +41,20 @@
     micro_plan_node_budget: 400
     micro_depth: 4
     micro_plan_rollout_leaves: 8
+- name: oraculo_f6
+  preset: arm6_4orient
+  role: bound
+  overrides:
+    <<: *h6
+    rollout_prior: oracle
+    allow_oracle_leak: true
+- name: oraculo_f30_b400_l4
+  preset: arm6_4orient
+  role: bound
+  overrides:
+    <<: *h6
+    rollout_prior: oracle
+    allow_oracle_leak: true
+    rollout_future_boxes: 30
+    micro_plan_node_budget: 400
+    micro_plan_rollout_leaves: 4

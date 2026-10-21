@@ -264,7 +264,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-future-samples", type=int, default=1)
     parser.add_argument("--free-sides-tiebreak", action="store_true")
     parser.add_argument("--free-sides-tolerance", type=float, default=0.0)
-    parser.add_argument("--rollout-prior", choices=("catalog", "uniform_types", "generic"), default="catalog")
+    parser.add_argument("--allow-oracle-leak", action="store_true",
+                        help="Allow deliberate future leakage for the oracle research bound")
+    parser.add_argument("--rollout-prior", choices=("catalog", "uniform_types", "generic", "oracle"), default="catalog")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
     parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
     parser.add_argument("--column-template", choices=("off", "w445", "w450", "w455", "auto", "adaptive"), default="off")
@@ -527,6 +529,7 @@ def run_simulation(
     rollout_future_boxes: int = 0,
     rollout_future_samples: int = 1,
     rollout_prior: str = "catalog",
+    allow_oracle_leak: bool = False,
     free_sides_tiebreak: bool = False,
     free_sides_tolerance: float = 0.0,
     micro_depth: int = 3,
@@ -728,6 +731,7 @@ def run_simulation(
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            allow_oracle_leak=allow_oracle_leak,
             free_sides_tiebreak=free_sides_tiebreak,
             free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=int(micro_depth),
@@ -932,6 +936,8 @@ def run_simulation(
             "rollout_future_boxes": rollout_future_boxes,
             "rollout_future_samples": rollout_future_samples,
             "rollout_prior": rollout_prior,
+            **({"allow_oracle_leak": True, "oracle_leak": True}
+               if rollout_prior == "oracle" else {}),
             "free_sides_tiebreak": free_sides_tiebreak,
             "free_sides_tolerance": free_sides_tolerance,
             "micro_depth": int(micro_depth),
@@ -1068,6 +1074,7 @@ def main() -> None:
         rollout_future_boxes=args.rollout_future_boxes,
         rollout_future_samples=args.rollout_future_samples,
         rollout_prior=args.rollout_prior,
+        allow_oracle_leak=args.allow_oracle_leak,
         free_sides_tiebreak=args.free_sides_tiebreak,
         free_sides_tolerance=args.free_sides_tolerance,
         micro_depth=int(args.micro_depth),
@@ -1157,6 +1164,7 @@ def _build_placements_dump(*, decision_policy: Any | None, params: dict[str, Any
         except Exception:
             pallets = {}
     return {
+        **({"oracle_leak": True} if params.get("rollout_prior") == "oracle" else {}),
         "schema_version": 1,
         "git_head": _git_head(),
         "params": dict(params),

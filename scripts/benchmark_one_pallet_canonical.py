@@ -53,6 +53,7 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "staging_narrow_frac",
     "staging_park_s",
     "staging_unpark_s",
+    "allow_oracle_leak",  # D-039 G0(b): cota con fuga, solo en sweeps.
     "free_sides_tiebreak",  # Perfil congelado: conserva False / 0.0; D-024 usa sweeps.
     "free_sides_tolerance",
 })

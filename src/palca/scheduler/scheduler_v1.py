@@ -78,6 +78,7 @@ class SchedulerConfig:
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
     rollout_prior: str = "catalog"
+    allow_oracle_leak: bool = False
     free_sides_tiebreak: bool = False
     free_sides_tolerance: float = 0.0
     micro_plan_depth: int = 3
@@ -107,8 +108,12 @@ class SchedulerConfig:
             raise ValueError("rollout_future_boxes must be a nonnegative int")
         if type(self.rollout_future_samples) is not int or self.rollout_future_samples < 1:
             raise ValueError("rollout_future_samples must be a positive int")
-        if self.rollout_prior not in ("catalog", "uniform_types", "generic"):
-            raise ValueError("rollout_prior must be catalog, uniform_types or generic")
+        if self.rollout_prior not in ("catalog", "uniform_types", "generic", "oracle"):
+            raise ValueError("rollout_prior must be catalog, uniform_types, generic or oracle")
+        if type(self.allow_oracle_leak) is not bool:
+            raise ValueError("allow_oracle_leak must be a bool")
+        if self.rollout_prior == "oracle" and not self.allow_oracle_leak:
+            raise ValueError("rollout_prior oracle requires allow_oracle_leak=true (deliberate future leak)")
         if self.rollout_future_boxes and (self.micro_plan_value not in ("rollout", "rollout+learned")
                                          or self.micro_plan_node_budget <= 0):
             raise ValueError("Future rollouts require rollout value and a positive node budget")
@@ -1184,6 +1189,9 @@ class SchedulerV1:
                          rollout_future_samples=self.config.rollout_future_samples,
                          rollout_prior=self.config.rollout_prior)
 
+        if self.config.rollout_prior == "oracle":
+            stats["oracle_leak"] = True
+
         if self.config.micro_plan_value in ("learned", "rollout+learned"):
             stats["learned_value_weight"] = self.config.learned_value_weight
             stats["learned_model"] = "r13_generic_v1"
@@ -1242,9 +1250,9 @@ class SchedulerV1:
         return self._learned_tail_value(pallets), consumed, completed or not any(ramps.values())
 
     def _stochastic_rollout_value(self, leaf, sim_state, quota, deadline, seed):
-        """Complete visible greedy once, then average independent continuations.
+        """Complete visible greedy once, then average prior continuations.
 
-        Each scan costs one node, including failed synthetic arrivals. Samples
+        Each scan costs one node, including failed future arrivals. Samples
         get equal integer quotas; unplaceable arrivals are skipped in order.
         No new pallets are opened in this value estimate.
         """
@@ -1278,19 +1286,32 @@ class SchedulerV1:
 
         # Known operational simplification: equal prior on active destinations;
         # the canonical experiment forces a single destination. Never infer it
-        # from upstream. Blocked visible boxes need not prevent later arrivals.
+        # from upstream for synthetic priors. Blocked visible boxes need not prevent later arrivals.
         destinations = tuple(pid for pid in pallets if pid not in sim_state.pallet_blocked)
         if not destinations:
             return self._learned_tail_value(pallets), consumed, True, 0, self.config.rollout_future_samples
-        future_quota = min(self.config.rollout_future_boxes,
+        # D-039 bound only: use the root's real hidden arrivals, never the
+        # leaf's depleted queues. Order ramps deterministically; preserve FIFO
+        # within each ramp (the canonical experiment has one ramp).
+        oracle_arrivals = None
+        if self.config.rollout_prior == "oracle":
+            oracle_arrivals = tuple(islice(
+                (box for rid in sorted(sim_state.ramp_states)
+                 if not sim_state.ramp_states[rid].always_visible
+                 for box in sim_state.ramp_states[rid].upstream),
+                self.config.rollout_future_boxes))
+        arrival_count = (len(oracle_arrivals) if oracle_arrivals is not None
+                         else self.config.rollout_future_boxes)
+        future_quota = min(arrival_count,
                            (quota-consumed) // self.config.rollout_future_samples)
         total_volume = 0.0
         future_nodes = 0
         samples_completed = 0
         for sample in range(self.config.rollout_future_samples):
             continuation = copy.deepcopy(pallets)
-            arrivals = sample_catalog(seed, sample, self.config.rollout_future_boxes, destinations,
-                                      prior=self.config.rollout_prior)
+            arrivals = (oracle_arrivals if oracle_arrivals is not None else
+                        sample_catalog(seed, sample, self.config.rollout_future_boxes, destinations,
+                                       prior=self.config.rollout_prior))
             attempts = 0
             for box in arrivals[:future_quota]:
                 _, scanned = scan(continuation, {0: [box]}, 1)
@@ -1298,7 +1319,7 @@ class SchedulerV1:
                     break
                 attempts += 1
                 future_nodes += 1
-            samples_completed += int(attempts == self.config.rollout_future_boxes)
+            samples_completed += int(attempts == arrival_count)
             total_volume += self._learned_tail_value(continuation)
         return (total_volume / self.config.rollout_future_samples, consumed,
                 samples_completed == self.config.rollout_future_samples,

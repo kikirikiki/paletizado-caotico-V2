@@ -84,6 +84,7 @@ class PolicyConfig:
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
     rollout_prior: str = "catalog"
+    allow_oracle_leak: bool = False
     free_sides_tiebreak: bool = False
     free_sides_tolerance: float = 0.0
     micro_plan_depth: int = 3
@@ -241,6 +242,7 @@ class PolicyPackerScheduler:
         rollout_future_boxes: int = 0,
         rollout_future_samples: int = 1,
         rollout_prior: str = "catalog",
+        allow_oracle_leak: bool = False,
         free_sides_tiebreak: bool = False,
         free_sides_tolerance: float = 0.0,
         micro_plan_depth: int = 3,
@@ -310,6 +312,7 @@ class PolicyPackerScheduler:
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            allow_oracle_leak=allow_oracle_leak,
             free_sides_tiebreak=free_sides_tiebreak,
             free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=micro_plan_depth,
@@ -380,6 +383,7 @@ class PolicyPackerScheduler:
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            allow_oracle_leak=allow_oracle_leak,
             free_sides_tiebreak=free_sides_tiebreak,
             free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=micro_plan_depth,
@@ -857,6 +861,8 @@ class PolicyPackerScheduler:
             kpis["micro_plan_learned"] = dict(
                 model="r13_generic_v1", source="synthetic_generic_only",
                 weight=self._scheduler.config.learned_value_weight)
+        if self._scheduler.config.rollout_prior == "oracle":
+            kpis["oracle_leak"] = True
         if self.config.scheduler.rollout_future_boxes:
             kpis["micro_plan_future_nodes"] = list(self._scheduler.micro_plan_future_nodes)
             kpis["micro_plan_future_samples_completed"] = list(
@@ -1296,7 +1302,8 @@ class PolicyPackerScheduler:
         snapshots: dict[int, SchedulerRampState] = {}
         for ramp_id, ramp in ramps.items():
             queue = tuple(self._to_box(item) for item in list(getattr(ramp, "queue", [])))
-            upstream = (() if self.config.pallet_staging_slots
+            upstream = (() if (self.config.pallet_staging_slots
+                               and self._scheduler.config.rollout_prior != "oracle")
                         else tuple(self._to_box(item) for item in list(getattr(ramp, "upstream", []))))
             capacity = int(getattr(ramp, "capacity", len(queue)) or len(queue))
             snapshots[int(ramp_id)] = SchedulerRampState(
