@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--open-pallets", type=int, default=1,
                         help="Posiciones de palet por destino (bound operativo; defecto 1)")
     parser.add_argument("--staging_cap", type=int, default=0)
+    parser.add_argument("--pallet-staging-slots", type=int, default=0)
+    parser.add_argument("--staging-policy", choices=["reserve_narrow"], default="reserve_narrow")
+    parser.add_argument("--staging-release", choices=["free", "hole"], default="free")
+    parser.add_argument("--staging-narrow-frac", type=float, default=0.75)
+    parser.add_argument("--staging-park-s", type=float, default=6.0)
+    parser.add_argument("--staging-unpark-s", type=float, default=10.0)
     parser.add_argument("--time_scale", type=float, default=1.0, help="Escala de tiempo (1,2,3,4,...)")
     parser.add_argument(
         "--force-destination",
@@ -439,6 +445,12 @@ def run_simulation(
     t_stage: float = 6.0,
     t_unstage: float = 10.0,
     ramp_cap: int = 15,
+    pallet_staging_slots: int = 0,
+    staging_policy: str = "reserve_narrow",
+    staging_release: str = "free",
+    staging_narrow_frac: float = 0.75,
+    staging_park_s: float = 6.0,
+    staging_unpark_s: float = 10.0,
     open_pallets: int = 1,
     policy: str = "legacy",
     lookahead_k: int = 1,
@@ -546,6 +558,12 @@ def run_simulation(
     viz_debug: bool = False,
     viz_dest: int = 0,
 ) -> dict[str, Any]:
+    from palca.scheduler.staging import validate_staging
+
+    validate_staging(pallet_staging_slots, staging_policy, staging_release, staging_narrow_frac,
+                     staging_park_s, staging_unpark_s)
+    if pallet_staging_slots and (model.upper() != "M1" or policy != "palca" or open_pallets != 1):
+        raise ValueError("Pallet staging requires M1, policy=palca and open_pallets=1")
     if out_path is None and out_json is not None:
         out_path = out_json
 
@@ -665,6 +683,9 @@ def run_simulation(
         os.environ["PALCA_VIZ_DEBUG"] = "1"
 
     config = SimConfig(
+        pallet_staging_slots=pallet_staging_slots,
+        staging_park_s=staging_park_s,
+        staging_unpark_s=staging_unpark_s,
         model=model,
         ramp_capacity=ramp_cap,
         staging_capacity=staging_cap,
@@ -683,6 +704,10 @@ def run_simulation(
             raise ValueError(f"K no soportado: {lookahead_k}")
 
         decision_policy = PolicyPackerScheduler.from_defaults(
+            pallet_staging_slots=pallet_staging_slots,
+            staging_policy=staging_policy,
+            staging_release=staging_release,
+            staging_narrow_frac=staging_narrow_frac,
             lookahead_k=lookahead_k,
             overhang_mm=overhang_mm,
             heuristic=heuristic,
@@ -931,9 +956,17 @@ def run_simulation(
         "metrics": metrics_payload,
     }
 
+    if pallet_staging_slots:
+        payload["params"].update(pallet_staging_slots=pallet_staging_slots,
+            staging_policy=staging_policy, staging_release=staging_release,
+            staging_narrow_frac=staging_narrow_frac, staging_park_s=staging_park_s,
+            staging_unpark_s=staging_unpark_s)
+
     if dump_placements_path:
         resolved_dump = resolve_repo_path(dump_placements_path)
         dump_payload = _build_placements_dump(decision_policy=decision_policy, params=payload.get("params", {}))
+        if pallet_staging_slots:
+            dump_payload["pallet_staging"] = result.pallet_staging
         _write_json(resolved_dump, dump_payload)
 
     if out_path:
@@ -961,6 +994,12 @@ def main() -> None:
         t_stage=args.t_stage,
         t_unstage=args.t_unstage,
         ramp_cap=args.ramp_cap,
+        pallet_staging_slots=args.pallet_staging_slots,
+        staging_policy=args.staging_policy,
+        staging_release=args.staging_release,
+        staging_narrow_frac=args.staging_narrow_frac,
+        staging_park_s=args.staging_park_s,
+        staging_unpark_s=args.staging_unpark_s,
         open_pallets=args.open_pallets,
         policy=args.policy,
         lookahead_k=args.k,

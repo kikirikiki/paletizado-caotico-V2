@@ -30,8 +30,10 @@ def pallets():
 
 
 @pytest.mark.parametrize('limits', [{}, {'max_candidates': 7}, {'max_tries_per_item': 35}])
-def test_repeated_geometry_preserves_full_preview_and_statistics(limits):
+@pytest.mark.parametrize('fast', [False, True])
+def test_repeated_geometry_preserves_full_preview_and_statistics(limits, fast):
     cached, uncached = pallets()
+    cached.fast_preview_geometry = fast
     for index, height in enumerate([100, 150, 100, 200, 100]):
         box = Box(f'new-{index}', 200, 150, height, 0, destination=1,
                   weight_kg=index + .25, priority=index, loadbear=index + 1)
@@ -120,3 +122,37 @@ def test_vectorized_heights_fall_back_for_unbounded_python_integers():
     cache = _HeightfieldPreviewCache(())
     cache.fill_heights([(0, 0)], 10, 10, 0, [placement])
     assert cache.heights == {}
+
+
+@pytest.mark.parametrize('delta', [0, 20, 400, 1000])
+def test_fast_robot_neighbors_preserve_scalar_result_and_first_blocker(delta):
+    from palca.domain.placement import Placement
+    from palca.packer.controls import RobotAccessibilityControl
+    from palca.packer.pallet_model import _HeightfieldPreviewCache
+    pallet = PalletModel(stacking_mode='heightfield')
+    pallet.placements = [Placement(x, y, z, False, 0, l, w, h)
+        for x,y,z,l,w,h in [(-20,-20,0,100,200,300), (80,40,300,200,100,400),
+                           (280,140,0,150,100,500), (0,0,-100,10,10,50)]]
+    xy = [(x, y) for x in [-30,-20,0,80,100,280,430,500]
+                 for y in [-30,-20,0,40,140,180,240,500]]
+    cache = _HeightfieldPreviewCache(())
+    cache.fill_heights(xy, 100, 200, 0, pallet.placements, robot_neighbors=True)
+    control = RobotAccessibilityControl(AccessibilityConfig(delta))
+    for x, y in xy:
+        p = Placement(x, y, cache.heights[x,y,100,200], False, 0, 100, 200, 100)
+        assert cache.robot_result(control, p) == control.evaluate(pallet=pallet, box=Box('x',100,200,100,0), placement=p)
+
+
+@pytest.mark.parametrize('settings', [dict(settle_snap_grid=True, grid_mm=7),
+    dict(settle_max_iter=1), dict(eps_mm=.1)])
+def test_fast_preview_settle_preserves_nondefault_controls(settings):
+    cached, uncached = pallets()
+    cached.fast_preview_geometry = True
+    for pallet in (cached, uncached):
+        controls = list(pallet.controls.placement_controls)
+        controls[1] = replace(controls[1], config=replace(controls[1].config, **settings))
+        pallet.controls = replace(pallet.controls, placement_controls=controls)
+    for i in range(4):
+        b = Box(i, 150, 200, 100, 0)
+        assert cached.preview_place(b) == uncached.preview_place(b)
+        assert cached.stats == uncached.stats

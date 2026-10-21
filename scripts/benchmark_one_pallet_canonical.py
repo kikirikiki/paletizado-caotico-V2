@@ -46,6 +46,13 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "dead_headroom_min_mm",
     "learned_value_weight",  # R13 is exercised through sweeps; frozen profile unchanged.
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
+    # D-036 hardware is evaluated through sweeps; frozen profile keeps K=0.
+    "pallet_staging_slots",
+    "staging_policy",
+    "staging_release",
+    "staging_narrow_frac",
+    "staging_park_s",
+    "staging_unpark_s",
     "free_sides_tiebreak",  # Perfil congelado: conserva False / 0.0; D-024 usa sweeps.
     "free_sides_tolerance",
 })

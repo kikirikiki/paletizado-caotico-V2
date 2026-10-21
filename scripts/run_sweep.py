@@ -207,6 +207,8 @@ def run_task(task: dict) -> dict:
                   deadline_cutoffs_count=payload["metrics"]["pallet_kpis"]["deadline_cutoffs_count"],
                   wall_time_s=perf_counter() - started, worker_pid=os.getpid(),
                   thread_env={key: os.environ.get(key) for key in THREAD_ENV})
+    if "pallet_staging" in payload["metrics"]:
+        result["pallet_staging"] = payload["metrics"]["pallet_staging"]
     write_json(directory / "kpi.json", result)
     return result
 
@@ -264,6 +266,10 @@ def generate_summary(folder: Path) -> dict:
                        violation_codes={},
                        undefined_kpi_seeds=[row["seed"] for row in rows if row["kpi"] is None])
         observed = [row["free_sides"] for row in rows if "free_sides" in row]
+        staging = [row["pallet_staging"] for row in rows if "pallet_staging" in row]
+        if staging:
+            metrics["pallet_staging"] = {key: stats([r[key] for r in staging]) for key in (
+                "staging_parks", "staging_unparks", "staging_max_occupancy", "staging_remaining", "makespan")}
         if observed:
             counts = {str(n): sum(row["counts"][str(n)] for row in observed) for n in (4, 3, 2, 1, 0)}
             total = sum(counts.values())

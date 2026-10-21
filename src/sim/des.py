@@ -80,6 +80,39 @@ class RampState:
 
 
 @dataclass
+class PalletStagingState:
+    """M1 floor positions. One box per slot; independent of M2 ramp staging."""
+    slots: list[Box | None]
+    parks: int = 0
+    unparks: int = 0
+    max_occupancy: int = 0
+
+    @property
+    def occupied(self) -> list[tuple[int, Box]]:
+        return [(i, box) for i, box in enumerate(self.slots) if box is not None]
+
+    def park(self, slot: int, box: Box) -> None:
+        if self.slots[slot] is not None:
+            raise ValueError("Pallet staging slot is occupied")
+        self.slots[slot] = box
+        self.parks += 1
+        self.max_occupancy = max(self.max_occupancy, len(self.occupied))
+
+    def unpark(self, slot: int) -> Box:
+        box = self.slots[slot]
+        if box is None:
+            raise ValueError("Pallet staging slot is empty")
+        self.slots[slot] = None
+        self.unparks += 1
+        return box
+
+    def summary(self, makespan: float) -> dict[str, object]:
+        return dict(pallet_staging_slots=len(self.slots), staging_parks=self.parks,
+                    staging_unparks=self.unparks, staging_max_occupancy=self.max_occupancy,
+                    staging_remaining=len(self.occupied), makespan=makespan)
+
+
+@dataclass
 class SimConfig:
     model: str = "M1"
     ramp_capacity: int = 15
@@ -91,6 +124,9 @@ class SimConfig:
     t_unstage: float = 10.0
     logger: logging.Logger | None = None
     decision_policy: Any | None = None
+    pallet_staging_slots: int = 0
+    staging_park_s: float = 6.0
+    staging_unpark_s: float = 10.0
 
 
 @dataclass
@@ -114,6 +150,7 @@ class SimulationResult:
     staging_full_percent: dict[int, float]
     pallet_kpis: dict[str, object] = field(default_factory=dict)
     stop_reason: str | None = None
+    pallet_staging: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -137,6 +174,7 @@ class SimulationResult:
             "staging_full_percent": dict(self.staging_full_percent),
             "pallet_kpis": dict(self.pallet_kpis),
             "stop_reason": self.stop_reason,
+            **({"pallet_staging": dict(self.pallet_staging)} if self.pallet_staging else {}),
         }
 
 
@@ -224,6 +262,15 @@ def simulate(
     max_pallets: int = 0,
     max_pallets_destination: int | None = None,
 ) -> SimulationResult:
+    from palca.scheduler.staging import validate_staging
+
+    validate_staging(config.pallet_staging_slots, "reserve_narrow", "free", .75,
+                     config.staging_park_s, config.staging_unpark_s)
+    policy = decision_policy or config.decision_policy
+    if config.pallet_staging_slots and (config.model.upper() != "M1" or policy is None):
+        raise ValueError("Pallet staging requires M1 with a decision policy")
+    pallet_staging = (PalletStagingState([None] * config.pallet_staging_slots)
+                      if config.pallet_staging_slots else None)
     arrival_mode_key = str(arrival_mode).strip().lower()
     if arrival_mode_key not in ("excel", "immediate"):
         raise ValueError(f"arrival_mode no soportado: {arrival_mode}")
@@ -277,6 +324,7 @@ def simulate(
                 "deadlock_samples": [],
             },
             stop_reason=None,
+            pallet_staging=pallet_staging.summary(0.0) if pallet_staging else {},
         )
 
     logger = config.logger or logging.getLogger(__name__)
@@ -474,7 +522,7 @@ def simulate(
     def handle_robot_done(event: Event) -> None:
         nonlocal robot_busy
         robot_busy = False
-        if event.action == "PICK":
+        if event.action in ("PICK", "UNPARK"):
             if event.box is None:
                 return
             if event.plan is not None and policy is not None and hasattr(policy, "commit_plan"):
@@ -483,6 +531,8 @@ def simulate(
                 except Exception:
                     logger.exception("policy commit_plan failed")
             place_box(event.box, event.time)
+        elif event.action == "PARK":
+            pallet_staging.park(getattr(event.plan, "staging_slot", None), event.box)
         elif event.action == "STAGE":
             if event.box is None or event.ramp_id is None:
                 return
@@ -533,12 +583,14 @@ def simulate(
         return None
 
     def system_has_boxes() -> bool:
+        if pallet_staging is not None and pallet_staging.occupied:
+            return True
         if any(ramp.queue or ramp.upstream or ramp.staging for ramp in ramps.values()):
             return True
         return False
 
     def total_remaining_boxes() -> int:
-        return sum(
+        return (len(pallet_staging.occupied) if pallet_staging else 0) + sum(
             len(ramp.queue) + len(ramp.upstream) + len(ramp.staging)
             for ramp in ramps.values()
         )
@@ -548,6 +600,9 @@ def simulate(
             rid: len(ramp.queue) + len(ramp.staging)
             for rid, ramp in ramps.items()
         }
+        if pallet_staging is not None:
+            for _, box in pallet_staging.occupied:
+                window_by_ramp[box.ramp_id] += 1
         window_total = sum(window_by_ramp.values())
         return window_by_ramp, window_total
 
@@ -631,6 +686,8 @@ def simulate(
         return f"CLOSE_{r}"
 
     def first_waiting_box_for_deadlock() -> Box | None:
+        if pallet_staging is not None and pallet_staging.occupied:
+            return pallet_staging.occupied[0][1]
         for rid in sorted(ramps):
             ramp = ramps[rid]
             if ramp.queue:
@@ -750,7 +807,9 @@ def simulate(
                             robot_busy = True
             else:
                 record_accessible_window_decision()
-                plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time)
+                staging_kwargs = {"pallet_staging": pallet_staging} if pallet_staging is not None else {}
+                plan = policy.choose_action(ramps=ramps, destinations=destinations, now=current_time,
+                                            **staging_kwargs)
                 if plan is None:
                     wakeup = getattr(policy, "next_wakeup", lambda now: None)(current_time)
                     if wakeup is not None and system_has_boxes():
@@ -812,15 +871,31 @@ def simulate(
                         break
                 else:
                     ramp = ramps[plan.ramp_id]
-                    box = pick_from_queue(ramp, int(plan.buffer_index), current_time, "PICK")
+                    kind = getattr(plan, "kind", "PICK")
+                    staging_slot = getattr(plan, "staging_slot", None)
+                    if kind in ("PARK", "UNPARK") and (pallet_staging is None or staging_slot is None):
+                        raise ValueError(f"{kind} requires a pallet staging slot")
+                    if kind == "UNPARK":
+                        box = pallet_staging.unpark(staging_slot)
+                        duration = config.staging_unpark_s
+                    elif kind == "PARK":
+                        if pallet_staging.slots[staging_slot] is not None:
+                            raise ValueError("PARK requires a free pallet staging slot")
+                        box = pick_from_queue(ramp, int(plan.buffer_index), current_time, "PARK")
+                        duration = config.staging_park_s
+                    elif kind == "PICK":
+                        box = pick_from_queue(ramp, int(plan.buffer_index), current_time, "PICK")
+                        duration = config.t_pick_place
+                    else:
+                        raise ValueError(f"Unknown policy action: {kind}")
                     dt_extra = float(getattr(plan, "dt_extra", 0.0) or 0.0)
                     schedule_event(
                         Event(
-                            time=current_time + config.t_pick_place + dt_extra,
+                            time=current_time + duration + (dt_extra if kind == "PICK" else 0.0),
                             kind="ROBOT_DONE",
                             seq=next_seq(),
                             box=box,
-                            action="PICK",
+                            action=kind,
                             plan=plan,
                         )
                     )
@@ -938,6 +1013,7 @@ def simulate(
         changeover_time_by_destination=changeover_time_by_destination,
         staging_max_occupancy={rid: ramp.max_staging for rid, ramp in ramps.items()},
         staging_full_percent=staging_full_percent,
+        pallet_staging=pallet_staging.summary(makespan) if pallet_staging else {},
         pallet_kpis=pallet_kpis,
         stop_reason=stop_reason,
     )

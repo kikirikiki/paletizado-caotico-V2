@@ -159,6 +159,7 @@ class StabilityPlacementControl:
         pallet: "PalletModel",
         box: Box,
         placement: Placement,
+        known_settled: bool = False,
     ) -> PlacementControlResult:
         cfg = self.config
         eps = float(cfg.eps_mm)
@@ -169,14 +170,21 @@ class StabilityPlacementControl:
         # settle_placement devuelve (Placement, settle_mm)
         if cfg.enable_settle():
             z_before = float(getattr(adjusted, "z_mm", 0.0) or 0.0)
-            settled, settle_mm = pallet.settle_placement(
-                adjusted,
-                eps_mm=eps,
-                snap_grid=bool(cfg.settle_snap_grid),
-                grid_mm=cfg.grid_mm,
-                max_iter=cfg.settle_max_iter,
-                timeout_ms=cfg.settle_timeout_ms,
-            )
+            if (known_settled and eps >= 0 and not cfg.settle_snap_grid
+                    and cfg.settle_max_iter <= 0 and cfg.settle_timeout_ms <= 0):
+                # Heightfield preview starts exactly at the greatest overlapping
+                # top. Unlimited scalar settling tries that same height first.
+                pallet.stats.settle_checks += 1
+                settled, settle_mm = adjusted, 0.0
+            else:
+                settled, settle_mm = pallet.settle_placement(
+                    adjusted,
+                    eps_mm=eps,
+                    snap_grid=bool(cfg.settle_snap_grid),
+                    grid_mm=cfg.grid_mm,
+                    max_iter=cfg.settle_max_iter,
+                    timeout_ms=cfg.settle_timeout_ms,
+                )
             adjusted = settled
             z_after = float(getattr(adjusted, "z_mm", 0.0) or 0.0)
 

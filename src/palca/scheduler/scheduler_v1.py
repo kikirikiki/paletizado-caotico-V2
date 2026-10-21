@@ -25,6 +25,7 @@ from ..scoring.height_slack import (
 )
 from .columns import adaptive_partition, column_rectangles, dominant_width
 from .costs import priority_bonus, selection_dt, starvation_penalty, time_penalty
+from .staging import STAGING_RAMP_ID
 
 
 ALLOWED_SCORE_MODES = tuple(mode.value for mode in ScoreMode)
@@ -174,9 +175,11 @@ class PickPlan:
     buffer_index: int
     box_id: int | str
     pallet_id: int | str
-    preview: PlacementPreview
+    preview: PlacementPreview | None
     score: float
     dt_extra: float
+    kind: str = "PICK"
+    staging_slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,7 @@ class SchedulerRampState:
     queue: tuple[Box, ...] = ()
     upstream: tuple[Box, ...] = ()
     capacity: int = 0
+    always_visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,6 +201,7 @@ class SchedulerSimState:
     remaining_total: int = 0
     # Vacío conserva exactamente un palet por destino; solo la variante bound lo amplía.
     pallet_choices: Mapping[int | str, Sequence[int | str]] = field(default_factory=dict)
+    staging_hole: bool = False
 
 
 @dataclass
@@ -204,6 +209,7 @@ class _BeamRampState:
     queue: list[Box]
     upstream: list[Box]
     capacity: int
+    always_visible: bool = False
 
 
 @dataclass(frozen=True)
@@ -580,8 +586,12 @@ class SchedulerV1:
         window_boxes_by_pallet_id: dict[int | str, list[Box]] = {}
         deadlock_item: dict[str, Any] | None = None
 
-        for ramp_id, ramp in sim_state.ramps.items():
-            ramp_items = list(ramp)[: max(1, int(lookahead_k))]
+        ramp_items_by_id = sim_state.ramps.items()
+        if sim_state.staging_hole:
+            ramp_items_by_id = sorted(ramp_items_by_id, key=lambda item: item[0] == STAGING_RAMP_ID)
+        for ramp_id, ramp in ramp_items_by_id:
+            ramp_items = (list(ramp) if ramp_id == STAGING_RAMP_ID else
+                          list(ramp)[: max(1, int(lookahead_k))])
             if deadline is not None and time.perf_counter() >= deadline:
                 cutoff = True
                 cutoff_reason = "time_budget"
@@ -617,7 +627,9 @@ class SchedulerV1:
 
                 items_evaluated += 1
                 evaluated_by_pallet[pallet_id] = evaluated_by_pallet.get(pallet_id, 0) + 1
-                preview = self._preview_place(pallet, box)
+                preview = self._preview_place(pallet, box, hole_only=(
+                    sim_state.staging_hole and ramp_id == STAGING_RAMP_ID
+                    and any(c.plan.ramp_id != STAGING_RAMP_ID for c in feasible_candidates)))
 
                 if next_heartbeat is not None and time.perf_counter() >= next_heartbeat:
                     dims = (
@@ -849,8 +861,8 @@ class SchedulerV1:
         if self.config.micro_plan_value != "score" or self.config.column_template == "adaptive":
             # Freeze precisely the initial action window. In particular, never
             # refill simulated queues from the unknown upstream stream.
-            allocation = self._allocate_micro_window({rid: len(r.queue) for rid, r in root.ramps.items()})
-            root.ramps = {rid: _BeamRampState(list(r.queue[:allocation[rid]]), [], r.capacity)
+            allocation = self._beam_window(root.ramps)
+            root.ramps = {rid: _BeamRampState(list(r.queue[:allocation[rid]]), [], r.capacity, r.always_visible)
                           for rid, r in root.ramps.items()}
             if self.config.micro_plan_value != "score":
                 self._set_state_value(root)
@@ -920,6 +932,10 @@ class SchedulerV1:
                         node=node,
                         action=action,
                         sim_state=sim_state,
+                        hole_only=(depth == 0 and sim_state.staging_hole
+                                   and action.ramp_id == STAGING_RAMP_ID
+                                   and any(e.node.first_plan.ramp_id != STAGING_RAMP_ID
+                                           for e in expansions)),
                     )
                     if expansion is None:
                         continue
@@ -1056,7 +1072,11 @@ class SchedulerV1:
                         else:
                             ordered_expansions = self._rank_free_beam(ordered_expansions, node_fn=lambda e: e.node)
                     keep = min(len(ordered_expansions), topk_per_step)
-                    next_beam.extend(candidate.node for candidate in ordered_expansions[:keep])
+                    retained = ordered_expansions[:keep]
+                    if depth == 0:
+                        retained += [e for e in ordered_expansions[keep:]
+                                     if e.node.first_plan.ramp_id == STAGING_RAMP_ID]
+                    next_beam.extend(candidate.node for candidate in retained)
 
                 if cutoff:
                     break
@@ -1342,6 +1362,7 @@ class SchedulerV1:
                         queue=queue_items,
                         upstream=[],
                         capacity=max(0, len(queue_items)),
+                        always_visible=rid == STAGING_RAMP_ID,
                     )
                     continue
                 queue_items = list(snapshot.queue)
@@ -1354,6 +1375,7 @@ class SchedulerV1:
                     queue=queue_items,
                     upstream=upstream_items,
                     capacity=max(0, cap),
+                    always_visible=snapshot.always_visible or rid == STAGING_RAMP_ID,
                 )
             return result
 
@@ -1363,16 +1385,17 @@ class SchedulerV1:
                 queue=queue_items,
                 upstream=[],
                 capacity=max(0, len(queue_items)),
+                always_visible=rid == STAGING_RAMP_ID,
             )
         return result
 
     def _enumerate_beam_actions(self, ramps: Mapping[int, _BeamRampState]) -> list[_BeamAction]:
         if not ramps:
             return []
-        queue_lens = {int(rid): len(state.queue) for rid, state in ramps.items()}
-        allocation = self._allocate_micro_window(queue_lens)
+        allocation = self._beam_window(ramps)
         actions: list[_BeamAction] = []
-        for rid in sorted(allocation):
+        # Belt first: hole release can then detect that no belt box fits.
+        for rid in sorted(allocation, key=lambda rid: (ramps[rid].always_visible, rid)):
             limit = int(allocation[rid])
             if limit <= 0:
                 continue
@@ -1381,6 +1404,12 @@ class SchedulerV1:
             for idx in range(limit):
                 actions.append(_BeamAction(ramp_id=int(rid), buffer_index=int(idx), max_priority=max_priority))
         return actions
+
+    def _beam_window(self, ramps: Mapping[int, _BeamRampState]) -> dict[int, int]:
+        allocation = self._allocate_micro_window(
+            {rid: len(r.queue) for rid, r in ramps.items() if not r.always_visible})
+        allocation.update({rid: len(r.queue) for rid, r in ramps.items() if r.always_visible})
+        return allocation
 
     def _allocate_micro_window(self, queue_lens: Mapping[int, int]) -> dict[int, int]:
         ramp_ids = sorted(int(rid) for rid in queue_lens)
@@ -1426,6 +1455,7 @@ class SchedulerV1:
         node: _BeamNode,
         action: _BeamAction,
         sim_state: SchedulerSimState,
+        hole_only: bool = False,
     ) -> _BeamExpansion | None:
         ramp = node.ramps.get(action.ramp_id)
         if ramp is None:
@@ -1445,7 +1475,7 @@ class SchedulerV1:
         if pallet is None:
             return None
 
-        preview = action.preview if action.preview is not None else self._preview_place(pallet, box)
+        preview = action.preview if action.preview is not None else self._preview_place(pallet, box, hole_only=hole_only)
         if not preview.feasible:
             return None
 
@@ -1517,7 +1547,8 @@ class SchedulerV1:
         while cap > 0 and len(queue) < cap and upstream:
             queue.append(upstream.pop(0))
 
-        return _BeamRampState(queue=queue, upstream=upstream, capacity=cap)
+        return _BeamRampState(queue=queue, upstream=upstream, capacity=cap,
+                              always_visible=ramp.always_visible)
 
     @staticmethod
     def _preview_layer_id(preview: PlacementPreview | None) -> int | None:
@@ -2798,8 +2829,13 @@ class SchedulerV1:
         if bool(stats.slack_set_used) and int(stats.slack_set_n) > 0:
             self.selected_height_slack_filtered_count += 1
 
-    def _preview_place(self, pallet: PalletModel, box: Box) -> PlacementPreview:
+    def _preview_place(self, pallet: PalletModel, box: Box, *, hole_only: bool = False) -> PlacementPreview:
         kwargs: dict[str, object] = {}
+        if hole_only:
+            spec = pallet.spec
+            bounds = (spec.offset_mm, spec.offset_mm,
+                      spec.length_mm + spec.overhang_mm, spec.width_mm + spec.overhang_mm)
+            kwargs["placement_filter"] = lambda p: free_sides(p, pallet.placements, bounds=bounds) <= 1
         if self.config.free_sides_tiebreak:
             kwargs.update(free_sides_tiebreak=True,
                           free_sides_tolerance=self.config.free_sides_tolerance)
