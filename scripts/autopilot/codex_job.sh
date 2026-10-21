@@ -22,6 +22,9 @@ MAIN_GIT=${MAIN_GIT:-$HOME/code/Paletizador/09_Software/paletizado-caotico-V2/.g
 LOG_DIR=${LOG_DIR:-$HOME/code/Paletizador/09_Software/autopilot_logs}
 name=$1; model=$2; effort=$3; spec=$4; sid=${5:-}
 mkdir -p "$LOG_DIR"
+# D-038: reglas fijas de ahorro de tokens delante de cada spec.
+full_spec="$LOG_DIR/$name.spec_full.md"
+cat "$(dirname "$(readlink -f "$0")")/codex_preamble.md" "$spec" > "$full_spec"
 rm -f "$LOG_DIR/$name.exit"
 cd "$WT" || exit 9
 # D-027: no lanzar trabajos si la cuota semanal de Codex ya está en el límite (60 %).
@@ -30,9 +33,9 @@ if ! bash "$(dirname "$(readlink -f "$0")")/codex_quota.sh" check > "$LOG_DIR/$n
 fi
 if [ -n "$sid" ]; then
   "$CODEX" exec resume "$sid" -c sandbox_mode='"workspace-write"' -m "$model" -c model_reasoning_effort="$effort" \
-    --json -o "$LOG_DIR/$name.last.md" - < "$spec" > "$LOG_DIR/$name.jsonl" 2> "$LOG_DIR/$name.err"
+    --json -o "$LOG_DIR/$name.last.md" - < "$full_spec" > "$LOG_DIR/$name.jsonl" 2> "$LOG_DIR/$name.err"
 else
   "$CODEX" exec -s workspace-write -C "$WT" --add-dir "$MAIN_GIT" -m "$model" -c model_reasoning_effort="$effort" \
-    --json -o "$LOG_DIR/$name.last.md" - < "$spec" > "$LOG_DIR/$name.jsonl" 2> "$LOG_DIR/$name.err"
+    --json -o "$LOG_DIR/$name.last.md" - < "$full_spec" > "$LOG_DIR/$name.jsonl" 2> "$LOG_DIR/$name.err"
 fi
 echo $? > "$LOG_DIR/$name.exit"

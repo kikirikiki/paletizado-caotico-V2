@@ -9,20 +9,22 @@
 # reinicie la ventana de 5 h de la lectura.
 #
 # Uso:
-#   codex_quota.sh check            imprime "weekly=<pct|?> 5h=<pct|?> limit=<L> status=<ok|over|unknown|blocked>";
-#                                   sale con 0 (ok), 3 (semanal >= LIMIT), 4 (usage limit del último job) o 5 (desconocida).
+#   codex_quota.sh check            imprime "weekly=<pct|?> 5h=<pct|?> limit=<L> status=<ok|over|over5h|unknown|blocked>";
+#                                   sale con 0 (ok), 3 (semanal >= LIMIT), 4 (usage limit del último job), 5 (desconocida)
+#                                   o 6 (ventana de 5 h >= CODEX_5H_LIMIT, 70 %).
 #                                   CODEX_QUOTA_ASSUME_OK=1 deja pasar "unknown" (solo con decisión explícita del director).
 #   codex_quota.sh watch [segundos] guardián: cada N s (60) comprueba y, si weekly >= LIMIT, mata los `codex exec`
 #                                   en marcha (el trabajo queda reanudable con su thread id) y termina.
 set -u
 LIMIT=${CODEX_WEEKLY_LIMIT:-60}
+LIMIT5=${CODEX_5H_LIMIT:-70}  # D-038: un job exigente agota la ventana de 5 h en ~50 min
 SESS=${CODEX_SESSIONS:-$HOME/.codex/sessions}
 LOGS=${CODEX_JOB_LOGS:-$HOME/code/Paletizador/09_Software/autopilot_logs}
 
 read_status() {
-  python3 - "$SESS" "$LOGS" "$LIMIT" <<'PY'
+  python3 - "$SESS" "$LOGS" "$LIMIT" "$LIMIT5" <<'PY'
 import glob, json, os, sys, time
-sess, logs, limit = sys.argv[1], sys.argv[2], float(sys.argv[3])
+sess, logs, limit, limit5 = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
 now = time.time()
 
 def find_rl(obj):
@@ -65,6 +67,8 @@ status = "unknown"
 if rl is not None:
     wk, h5 = f"{pct(rl.get('secondary')):.0f}", f"{pct(rl.get('primary')):.0f}"
     status = "over" if float(wk) >= limit else ("unknown" if newer_without else "ok")
+    if status == "ok" and float(h5) >= limit5:
+        status = "over5h"
 
 # Señal directa: el último job terminó por límite de uso (vale 5 h).
 jobs = sorted(glob.glob(os.path.join(logs, "*.jsonl")) + glob.glob(os.path.join(logs, "*.err")),
@@ -86,6 +90,7 @@ case "${1:-check}" in
       ok) exit 0 ;;
       over) exit 3 ;;
       blocked) exit 4 ;;
+      over5h) exit 6 ;;
       *) [ "${CODEX_QUOTA_ASSUME_OK:-0}" = 1 ] && exit 0; exit 5 ;;
     esac ;;
   watch)

@@ -480,3 +480,21 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   hay que optimizar o recortar el presupuesto de búsqueda y volver a medir. Corrige la conclusión "ver más cajas no ayuda" del INFORME
   (venía de k30/k75 sobre H1+H3+H5, sin réplica). La oficial de software sigue siendo `h6_sin_gate` (77,06 %).
 
+
+## D-038 · Ahorro de tokens de Claude y Codex (instrucción del usuario, 2026-10-21)
+- Contexto: el usuario quiere la investigación larga (D-035) con buena gestión de cuotas y pide usar todos los sistemas posibles de
+  ahorro de tokens, solo para este proyecto.
+- Medidas aplicadas:
+  1. **Trabajo pesado en scripts/GPU**, nunca en los modelos: generación de datos, entrenamientos, sweeps, smoke y medidas de tiempo
+     los lanza el director con scripts que escriben un resumen; los modelos solo diseñan, programan y revisan.
+  2. **Director:** `scripts/autopilot/status.sh` da el estado en ~10 líneas; CURRENT.md ≤ ~20 líneas (histórico en CURRENT_hist.md);
+     cada paso en un único script WSL (menos turnos); esperas con aviso al terminar, sin sondeo; revisar diffs por `--stat` y trozos
+     clave; sesiones cortas por fase (reanudar desde CURRENT.md); respuestas breves al usuario.
+  3. **Codex:** `codex_job.sh` antepone `scripts/autopilot/codex_preamble.md` a cada spec (no explorar, no vigilar procesos largos,
+     solo tests de su módulo, entrega breve con JSON de comprobaciones); `codex_quota.sh` bloquea también con la ventana de 5 h
+     ≥ 70 % (exit 6); esfuerzo `medium` por defecto, `high` solo para el núcleo algorítmico, nunca `gpt-6-astra`; correcciones
+     reanudando el mismo hilo.
+- Configuración (con permiso explícito del usuario, solo este proyecto): `.claude/settings.local.json` en la carpeta del proyecto
+  Windows (`03_Software`): `disableClaudeAiConnectors: true`, `syncClaudeAiPlugins: false`, `syncClaudeAiSkills: false` y
+  `frontend-design` y `claude-mem` desactivados. Se mantiene `headroom` (compresión de contexto). Surte efecto en sesiones nuevas.
+  Si algún día hace falta un conector (p. ej. Docs), se reactiva quitando la clave.
