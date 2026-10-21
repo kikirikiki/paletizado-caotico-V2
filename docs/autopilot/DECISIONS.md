@@ -377,3 +377,11 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   sin ese conocimiento es −2,61 significativa). Siguiendo D-017: **no cuenta como técnica general; se reporta como PALANCA "configuración
   por catálogo" (+0,81 pp en 30 seeds) y la oficial sigue siendo h6_sin_gate (77,06 %)**. [REVISAR — usuario] Si en producción el
   sistema conoce el catálogo de cajas y es legítimo configurar el ancho de columna con él, H4 w455 pasaría a oficial.
+
+## D-032 · No hay catálogo previo: el sistema solo conoce las 15 cajas de la cinta (respuesta del usuario, 2026-10-20)
+- Respuesta: "No hay un catálogo de cajas que se conozca con anterioridad, solo se conocen las 15 de la cinta".
+- Consecuencias: H4 w455 queda como palanca informativa, no implantable tal cual; la oficial sigue siendo h6_sin_gate (77,06 %).
+  H6 ya usa el prior genérico sin información del flujo (D-017), conforme. Ninguna técnica futura puede usar parámetros que codifiquen
+  dimensiones del flujo evaluado (anchos, alturas o familias concretas); los pesos y presupuestos ajustados en seeds de ajuste siguen
+  permitidos, pero cualquier parámetro geométrico debe deducirse de las 15 cajas visibles o del prior genérico.
+- Contador anti-estancamiento: 7 (H4 no cuenta como técnica general).

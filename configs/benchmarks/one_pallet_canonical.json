@@ -7,6 +7,7 @@
   "params": {
     "column_template": "off",
     "column_min_fill": 0.85,
+    "column_slack_mm": 10,
     "column_fallback": "free",
     "access_debt_weight": 0.0,
     "access_debt_band_mm": 300,

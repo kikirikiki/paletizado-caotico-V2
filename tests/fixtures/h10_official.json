@@ -1,0 +1,11 @@
+{
+  "source": "/home/ingen/code/Paletizador/09_Software/paletizado-autopilot/out/sweeps/h6_sin_gate_ref/h6_sin_gate",
+  "seeds": {
+    "50021": {
+      "pallets_sha256": "e3347d7e5d477f41742ba0b3bccfde28be908d69b27901021d7afab25d9a6f0a"
+    },
+    "1": {
+      "pallets_sha256": "19e26de3f83519bc2f26811db467126313649995664577bf41843c7c07219c3b"
+    }
+  }
+}

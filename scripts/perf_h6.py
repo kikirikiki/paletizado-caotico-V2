@@ -57,7 +57,8 @@ def assert_equivalent(actual_dump, actual_kpi, expected_dump, expected_kpi):
                              ("accessibility_tall_box_exemption", False), ("accessibility_top_clearance_mm", 0),
                              ("access_debt_exempt_delta_mm", 750), ("dead_headroom_weight", 0.0),
                              ("dead_headroom_min_mm", 250), ("column_template", "off"),
-                             ("column_min_fill", 0.85), ("column_fallback", "free")):
+                             ("column_min_fill", 0.85), ("column_fallback", "free"),
+                             ("column_slack_mm", 10)):
             if key not in expected.get("params", {}) and key in actual.get("params", {}):
                 assert actual["params"][key] == default
                 del actual["params"][key]

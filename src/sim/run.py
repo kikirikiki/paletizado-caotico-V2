@@ -260,8 +260,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-prior", choices=("catalog", "uniform_types", "generic"), default="catalog")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
     parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
-    parser.add_argument("--column-template", choices=("off", "w445", "w450", "w455", "auto"), default="off")
+    parser.add_argument("--column-template", choices=("off", "w445", "w450", "w455", "auto", "adaptive"), default="off")
     parser.add_argument("--column-min-fill", type=float, default=0.85)
+    parser.add_argument("--column-slack-mm", type=int, default=10)
     parser.add_argument("--column-fallback", choices=("free", "none"), default="free")
     parser.add_argument(
         "--micro-topk",
@@ -487,6 +488,7 @@ def run_simulation(
     dead_headroom_min_mm: int = 250,
     column_template: str = "off",
     column_min_fill: float = 0.85,
+    column_slack_mm: int = 10,
     column_fallback: str = "free",
     tower_z_band_mm: int = 0,
     tower_z_penalty_weight: float = 0.0,
@@ -740,6 +742,7 @@ def run_simulation(
             dead_headroom_min_mm=dead_headroom_min_mm,
             column_template=column_template,
             column_min_fill=column_min_fill,
+            column_slack_mm=column_slack_mm,
             column_fallback=column_fallback,
             tower_z_band_mm=max(0, int(tower_z_band_mm)),
             tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
@@ -874,6 +877,7 @@ def run_simulation(
             "dead_headroom_min_mm": int(dead_headroom_min_mm),
             "column_template": column_template,
             "column_min_fill": column_min_fill,
+            "column_slack_mm": column_slack_mm,
             "column_fallback": column_fallback,
             "tower_z_band_mm": int(max(0, int(tower_z_band_mm))),
             "tower_z_penalty_weight": float(max(0.0, float(tower_z_penalty_weight))),
@@ -1026,6 +1030,7 @@ def main() -> None:
         micro_topk=int(args.micro_topk),
         column_template=args.column_template,
         column_min_fill=args.column_min_fill,
+        column_slack_mm=args.column_slack_mm,
         column_fallback=args.column_fallback,
         batchfill_layer_starter=bool(args.batchfill_layer_starter),
         batchfill_starters_max=int(args.batchfill_starters_max),
