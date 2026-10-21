@@ -522,3 +522,16 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - G5 (simulador vectorizado en GPU) solo se abre si G0(a) muestra ≥ +1 pp con más cómputo, o para hacer implantable `ventana18`;
   G8/G9 solo en CPU ociosa. Los presupuestos son por semana de cuota; si una fase cruza semanas, se reanuda desde CURRENT.md.
 - Contador anti-estancamiento: sigue en 9 (D-034); esta investigación no lo reinicia salvo adopción.
+- **Resultado G0 (2026-10-21, seeds 1001–1010, deterministas, 0 cortes; baseline idéntico dump a dump a `pulmon_tune`):**
+  | Cota | Pareada vs `h6_sin_gate` (76,33 %) |
+  |---|---|
+  | G0(a) cómputo b150_l4 | **+1,37 [0,21; 2,54] sig.** (≈ 2× tiempo) |
+  | G0(a) cómputo b400_l4 / b400_d4_l8 | +0,38 / −0,01 n.s. |
+  | G0(b) oráculo f6 (futuro real, mismo presupuesto) | +0,84 [−1,01; 2,69] n.s. |
+  | G0(b) oráculo f30 b400_l4 | +0,48 [−0,70; 1,66] n.s. |
+  Lectura: **conocer el futuro real apenas ayuda dentro de esta búsqueda** (el cuello de botella no es la información sino cómo
+  se valora la continuación: un escaneo greedy de las cajas futuras no explota ese conocimiento); algo de margen por cómputo, no
+  monótono. El corte de A no salta (cómputo ≥ +0,5). Consecuencias: B sigue (la red debe aprender las consecuencias a largo plazo
+  —pozos— que el escaneo greedy no ve; la inferencia por lotes puede pagar el ~2× de b150); en C, G6 con el oráculo de búsqueda
+  como profesor pierde interés (su cota es ≤ +0,8 pp): el profesor útil sería el planificador offline de columnas (81,45 %).
+  Fase A pendiente solo de la generación de datos (greedy mix 4000 + official mix 1500 episodios). Spec 25 (red, fase B) a Codex.
