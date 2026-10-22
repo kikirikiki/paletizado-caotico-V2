@@ -22,6 +22,23 @@ import time
 os.environ["OMP_NUM_THREADS"] = "1"
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+# Only these modules determine the episodes; other learning modules (value_net.py) and this
+# script's own text are recorded but do not block resuming (git_head is recorded per run).
+GENERATION_MODULES = ("__init__.py", "episode.py", "state_encoding.py", "synthetic_flows.py")
+SCRIPT_KEY = "scripts/gen_value_data.py"
+
+
+def _compatible(previous, identity):
+    for key, value in identity.items():
+        old = previous.get(key)
+        if key == "source_sha256":
+            old = {k: h for k, h in (old or {}).items() if Path(k).name in GENERATION_MODULES}
+        if key == "configuration_sha256":
+            old = {k: h for k, h in (old or {}).items() if k != SCRIPT_KEY}
+            value = {k: h for k, h in value.items() if k != SCRIPT_KEY}
+        if old != value:
+            return False
+    return True
 
 
 def _worker(task):
@@ -70,23 +87,27 @@ def main(argv=None):
 
     arguments = dict(vars(args), out=str(args.out))
     sources = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-               for p in sorted((ROOT / "src/palca/learning").glob("*.py"))}
+               for p in sorted((ROOT / "src/palca/learning").glob("*.py"))
+               if p.name in GENERATION_MODULES}
     config_paths = [ROOT / "configs/sweeps/pulmon_tune.yaml", Path(__file__).resolve(),
                     ROOT / "src/palca/study/params.py"]
     config_hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                      for p in config_paths}
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     identity = dict(encoding_version=ENCODING_VERSION, source_sha256=sources,
-                    configuration_sha256=config_hashes, git_head=head,
+                    configuration_sha256=config_hashes,
                     policy=args.policy, prior=args.prior, epsilon=args.epsilon)
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.json"
     previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
-    if previous is not None and any(previous.get(k) != v for k, v in identity.items()):
+    if previous is not None and not _compatible(previous, identity):
         parser.error("Output manifest is incompatible with this source/configuration/policy")
     if previous is None and any(args.out.glob("ep_*.npz")):
         parser.error("Existing episodes have no provenance manifest")
-    manifest = dict(identity, arguments=arguments, runs=previous.get("runs", []) if previous else [])
+    for stale in args.out.glob("*.npz.tmp"):
+        stale.unlink()
+    manifest = dict(identity, git_head=previous.get("git_head", head) if previous else head,
+                    arguments=arguments, runs=previous.get("runs", []) if previous else [])
     _atomic_json(manifest_path, manifest)
     seeds = range(args.seed_start, args.seed_start + args.episodes)
     tasks = [(seed, arguments) for seed in seeds
@@ -105,7 +126,7 @@ def main(argv=None):
             totals["states"] += len(episode["util_final"])
             totals["closed_pallets"] += int(episode["closed_pallets"])
             totals["censored_states"] += int(episode["censored_states"])
-    run = dict(arguments=arguments, generated_episodes=len(tasks), skipped=args.episodes-len(tasks),
+    run = dict(arguments=arguments, git_head=head, generated_episodes=len(tasks), skipped=args.episodes-len(tasks),
                generated_states=generated_states, seconds=seconds,
                states_per_hour=generated_states * 3600 / seconds,
                states_per_hour_per_worker=generated_states * 3600 / seconds / args.workers)
