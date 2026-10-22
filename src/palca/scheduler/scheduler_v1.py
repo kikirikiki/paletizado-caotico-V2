@@ -74,6 +74,9 @@ class SchedulerConfig:
     micro_plan_value: str = "score"
     micro_plan_value_weight: float = 1.0
     learned_value_weight: float = 1.0
+    learned_value_model: str = "r13"
+    learned_value_model_path: str = ""
+    learned_value_device: str = "cpu"
     micro_plan_rollout_leaves: int = 4
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
@@ -98,6 +101,12 @@ class SchedulerConfig:
             raise ValueError("micro_plan_node_budget must be a nonnegative int and hard_cap_ms a positive int")
         if self.micro_plan_value not in ("score", "potential", "rollout", "learned", "rollout+learned"):
             raise ValueError("Invalid micro_plan_value")
+        if self.learned_value_model not in ("r13", "g1"):
+            raise ValueError("learned_value_model must be r13 or g1")
+        if self.learned_value_device not in ("cpu", "cuda"):
+            raise ValueError("learned_value_device must be cpu or cuda")
+        if self.learned_value_model == "g1" and not self.learned_value_model_path:
+            raise ValueError("learned_value_model_path is required for g1")
         if not 0 <= self.learned_value_weight < float("inf"):
             raise ValueError("learned_value_weight must be finite and nonnegative")
         if not 0 <= self.micro_plan_value_weight < float("inf"):
@@ -314,6 +323,16 @@ class SchedulerV1:
         self.last_deadlock_item: dict[str, Any] | None = None
         self.last_eval_stats: dict[str, Any] = {}
         self.last_micro_plan_stats: dict[str, Any] = {}
+        self._g1_batching = True
+        self._g1_pending_nodes = None
+        self._g1_pending_tails = None
+        self._g1_network_ms = 0.0
+        self.g1_network_times_ms = []
+        self._g1_model = None
+        if self.config.learned_value_model == "g1":
+            from ..learning.value_net import cached_value_net
+            self._g1_model = cached_value_net(self.config.learned_value_model_path,
+                                            self.config.learned_value_device)
         self.last_micro_feasible_first_candidates = 0
         self._logger = logging.getLogger(__name__)
 
@@ -843,6 +862,9 @@ class SchedulerV1:
         sim_state: SchedulerSimState,
         deadline: float | None,
     ) -> tuple[PickPlan | None, dict[str, Any], SlackDecisionStats | None]:
+        self._g1_network_ms = 0.0
+        self._g1_pending_nodes = None
+        self._g1_pending_tails = None
         node_budget = self.config.micro_plan_node_budget
         deadline_reason = "hard_cap" if node_budget > 0 else "time_budget"
         depth_limit = max(1, int(self.config.micro_plan_depth))
@@ -901,6 +923,9 @@ class SchedulerV1:
                 break
 
             next_beam: list[_BeamNode] = []
+            g1_layer = self._g1_model is not None and self.config.micro_plan_value == "learned"
+            self._g1_pending_nodes = [] if g1_layer else None
+            expansion_groups = []
             for node in beam:
                 if deadline is not None and time.perf_counter() >= deadline:
                     cutoff = True
@@ -1029,6 +1054,8 @@ class SchedulerV1:
                                     / max(1, int(batchfill_selected_boxes_count_local))
                                 ),
                             }
+                            self._g1_pending_nodes = None
+                            self._record_g1_stats(stats)
                             return chosen_plan, stats, None
 
                 if depth == 0:
@@ -1048,43 +1075,22 @@ class SchedulerV1:
                             gain_frag_key_fn=self._beam_expansion_gain_frag_key,
                         )
 
-                if expansions:
-                    if any(action.preview is not None for action in actions):
-                        ordered_expansions = sorted(expansions, key=lambda c: self._beam_rank_key(c.node), reverse=True)
-                    elif (self.config.micro_plan_value == "score"
-                            and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
-                        ordered_expansions = rank_for_expansion_with_height_slack(
-                            candidates=expansions,
-                            score_mode=self.config.score_mode,
-                            height_slack_mm=int(self.config.height_slack_mm),
-                            height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
-                            gain_frag_key_fn=self._beam_expansion_gain_frag_key,
-                        )
-                    else:
-                        ordered_expansions = sorted(
-                            expansions,
-                            key=lambda candidate: self._beam_rank_key(candidate.node),
-                            reverse=True,
-                        )
-                    if self.config.free_sides_tiebreak:
-                        if (self.config.micro_plan_value == "score"
-                                and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
-                            ordered_expansions = rank_free_sides(
-                                ordered_expansions, value=lambda e: e.terms.scalar_score,
-                                sides=lambda e: e.node.first_free_sides,
-                                legacy_key=self._beam_expansion_gain_frag_key,
-                                tolerance=self.config.free_sides_tolerance)
-                        else:
-                            ordered_expansions = self._rank_free_beam(ordered_expansions, node_fn=lambda e: e.node)
-                    keep = min(len(ordered_expansions), topk_per_step)
-                    retained = ordered_expansions[:keep]
-                    if depth == 0:
-                        retained += [e for e in ordered_expansions[keep:]
-                                     if e.node.first_plan.ramp_id == STAGING_RAMP_ID]
-                    next_beam.extend(candidate.node for candidate in retained)
-
+                has_preview = any(action.preview is not None for action in actions)
+                if g1_layer:
+                    expansion_groups.append((expansions, has_preview))
+                else:
+                    next_beam.extend(self._retain_beam_expansions(expansions, has_preview, depth))
                 if cutoff:
                     break
+
+            if g1_layer:
+                pending = self._g1_pending_nodes
+                self._g1_pending_nodes = None
+                values = self._g1_tail_batch([(n.pallets, n.ramps) for n in pending])
+                for n, value in zip(pending, values):
+                    n.state_value = placed_volume(n.pallets) + self.config.learned_value_weight * value
+            for expansions, has_preview in expansion_groups:
+                next_beam.extend(self._retain_beam_expansions(expansions, has_preview, depth))
 
             if not next_beam:
                 break
@@ -1121,7 +1127,11 @@ class SchedulerV1:
             # frozen observed state; no dependence on hidden stream or clocks.
             seed = (observed_seed(root.pallets, {rid: r.queue for rid, r in root.ramps.items()})
                     if self.config.rollout_future_boxes else None)
+            g1_rollout = self._g1_model is not None and self.config.micro_plan_value == "rollout+learned" and self.config.learned_value_weight > 0
+            self._g1_pending_tails = [] if g1_rollout else None
+            tail_ranges = []
             for leaf in leaves:
+                tail_start = len(self._g1_pending_tails) if g1_rollout else 0
                 if self.config.rollout_future_boxes:
                     value, consumed, completed, nf, ns = self._stochastic_rollout_value(
                         leaf, sim_state, quota, deadline, seed)
@@ -1132,6 +1142,14 @@ class SchedulerV1:
                 rollout_nodes += consumed
                 rollout_completed += int(completed)
                 evaluated.append((value, self._beam_rank_key(leaf), leaf))
+                if g1_rollout:
+                    tail_ranges.append((tail_start, len(self._g1_pending_tails)))
+            if g1_rollout:
+                pending = self._g1_pending_tails
+                self._g1_pending_tails = None
+                tails = self._g1_tail_batch(pending)
+                evaluated = [(value + self.config.learned_value_weight * sum(tails[a:b]) / (b-a), key, leaf)
+                             for (value, key, leaf), (a, b) in zip(evaluated, tail_ranges)]
             if evaluated:
                 if self.config.free_sides_tiebreak:
                     winner = rank_free_sides(
@@ -1196,20 +1214,104 @@ class SchedulerV1:
             stats["learned_value_weight"] = self.config.learned_value_weight
             stats["learned_model"] = "r13_generic_v1"
 
+        self._record_g1_stats(stats)
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
         return best_node.first_plan, stats, root_slack_stats
 
-    def _learned_tail_value(self, pallets) -> float:
+    def _retain_beam_expansions(self, expansions, has_preview, depth):
+        if expansions:
+            if has_preview:
+                ordered_expansions = sorted(expansions, key=lambda c: self._beam_rank_key(c.node), reverse=True)
+            elif (self.config.micro_plan_value == "score"
+                    and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
+                ordered_expansions = rank_for_expansion_with_height_slack(
+                    candidates=expansions,
+                    score_mode=self.config.score_mode,
+                    height_slack_mm=int(self.config.height_slack_mm),
+                    height_after_mm_fn=lambda candidate: int(candidate.terms.height_after_mm),
+                    gain_frag_key_fn=self._beam_expansion_gain_frag_key,
+                )
+            else:
+                ordered_expansions = sorted(
+                    expansions,
+                    key=lambda candidate: self._beam_rank_key(candidate.node),
+                    reverse=True,
+                )
+            if self.config.free_sides_tiebreak:
+                if (self.config.micro_plan_value == "score"
+                        and self.config.score_mode == ScoreMode.MIN_HEIGHT_SLACK_THEN_GAIN.value):
+                    ordered_expansions = rank_free_sides(
+                        ordered_expansions, value=lambda e: e.terms.scalar_score,
+                        sides=lambda e: e.node.first_free_sides,
+                        legacy_key=self._beam_expansion_gain_frag_key,
+                        tolerance=self.config.free_sides_tolerance)
+                else:
+                    ordered_expansions = self._rank_free_beam(ordered_expansions, node_fn=lambda e: e.node)
+            keep = min(len(ordered_expansions), self.config.micro_plan_topk_per_step)
+            retained = ordered_expansions[:keep]
+            if depth == 0:
+                retained += [e for e in ordered_expansions[keep:]
+                             if e.node.first_plan.ramp_id == STAGING_RAMP_ID]
+            return [candidate.node for candidate in retained]
+        return []
+
+    def _record_g1_stats(self, stats):
+        if self._g1_model is not None:
+            self.g1_network_times_ms.append(self._g1_network_ms)
+            stats.update(self.g1_metadata())
+            stats["learned_value_network_ms"] = self._g1_network_ms
+            stats["learned_value_network_ms_mean"] = sum(self.g1_network_times_ms) / len(self.g1_network_times_ms)
+
+    def g1_metadata(self):
+        return dict(learned_value_model="g1", learned_model="g1",
+                    learned_value_sha256=self._g1_model.metadata["sha256"],
+                    learned_value_device=self.config.learned_value_device)
+
+    def _g1_tail_batch(self, states):
+        if not states:
+            return []
+        from ..learning.state_encoding import encode_state
+        from ..learning.value_net import remaining_value_batch
+        encodings, owners = [], []
+        for i, (pallets, ramps) in enumerate(states):
+            visible = [box for rid in sorted(ramps)
+                       for box in (ramps[rid].queue if hasattr(ramps[rid], "queue") else ramps[rid])]
+            for pid, pallet in pallets.items():
+                encodings.append(encode_state(pallet, [b for b in visible if b.destination == pid]))
+                owners.append(i)
+        totals = [0.0] * len(states)
+        if encodings:
+            started = time.perf_counter()
+            if self._g1_batching:
+                values = remaining_value_batch(self._g1_model, encodings, self.config.learned_value_device)
+            else:
+                values = [remaining_value_batch(self._g1_model, [e], self.config.learned_value_device)[0]
+                          for e in encodings]
+            self._g1_network_ms += (time.perf_counter() - started) * 1000
+            for owner, value in zip(owners, values):
+                totals[owner] += float(value)
+        return totals
+
+    def _learned_tail_value(self, pallets, ramps=None) -> float:
         value = placed_volume(pallets)
         if self.config.micro_plan_value in ("learned", "rollout+learned") and self.config.learned_value_weight:
-            from ..scoring.learned_value import remaining_value
-            value += self.config.learned_value_weight * remaining_value(pallets)
+            if self._g1_model is not None:
+                if self._g1_pending_tails is not None:
+                    self._g1_pending_tails.append((pallets, ramps or {}))
+                else:
+                    value += self.config.learned_value_weight * self._g1_tail_batch([(pallets, ramps or {})])[0]
+            else:
+                from ..scoring.learned_value import remaining_value
+                value += self.config.learned_value_weight * remaining_value(pallets)
         return value
 
     def _set_state_value(self, node: _BeamNode) -> None:
         if self.config.micro_plan_value == "learned":
-            node.state_value = self._learned_tail_value(node.pallets)
+            if self._g1_pending_nodes is not None:
+                self._g1_pending_nodes.append(node)
+                return
+            node.state_value = self._learned_tail_value(node.pallets, node.ramps)
             return
         potential = 0.0
         for pid, pallet in node.pallets.items():
@@ -1247,7 +1349,7 @@ class SchedulerV1:
                 break
             pallets[plan.pallet_id].commit_place(plan.preview)
             ramps[plan.ramp_id].pop(plan.buffer_index)
-        return self._learned_tail_value(pallets), consumed, completed or not any(ramps.values())
+        return self._learned_tail_value(pallets, ramps), consumed, completed or not any(ramps.values())
 
     def _stochastic_rollout_value(self, leaf, sim_state, quota, deadline, seed):
         """Complete visible greedy once, then average prior continuations.
@@ -1280,7 +1382,7 @@ class SchedulerV1:
         while any(ramps.values()):
             plan, scanned = scan(pallets, ramps, self.config.micro_plan_window_total or 15)
             if not scanned:
-                return self._learned_tail_value(pallets), consumed, False, 0, 0
+                return self._learned_tail_value(pallets, ramps), consumed, False, 0, 0
             if plan is None:
                 break
 
@@ -1289,7 +1391,7 @@ class SchedulerV1:
         # from upstream for synthetic priors. Blocked visible boxes need not prevent later arrivals.
         destinations = tuple(pid for pid in pallets if pid not in sim_state.pallet_blocked)
         if not destinations:
-            return self._learned_tail_value(pallets), consumed, True, 0, self.config.rollout_future_samples
+            return self._learned_tail_value(pallets, ramps), consumed, True, 0, self.config.rollout_future_samples
         # D-039 bound only: use the root's real hidden arrivals, never the
         # leaf's depleted queues. Order ramps deterministically; preserve FIFO
         # within each ramp (the canonical experiment has one ramp).
@@ -1320,7 +1422,7 @@ class SchedulerV1:
                 attempts += 1
                 future_nodes += 1
             samples_completed += int(attempts == arrival_count)
-            total_volume += self._learned_tail_value(continuation)
+            total_volume += self._learned_tail_value(continuation, ramps)
         return (total_volume / self.config.rollout_future_samples, consumed,
                 samples_completed == self.config.rollout_future_samples,
                 future_nodes, samples_completed)

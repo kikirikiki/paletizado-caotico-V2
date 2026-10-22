@@ -44,6 +44,9 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "access_debt_exempt_delta_mm",  # Spec 18 is exercised through sweeps.
     "dead_headroom_weight",
     "dead_headroom_min_mm",
+    "learned_value_model",
+    "learned_value_model_path",
+    "learned_value_device",
     "learned_value_weight",  # R13 is exercised through sweeps; frozen profile unchanged.
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
     # D-036 hardware is evaluated through sweeps; frozen profile keeps K=0.

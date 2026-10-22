@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -88,16 +90,64 @@ def save_value_net(model, path, *, seeds, data, metrics):
     return metadata
 
 
-def load_value_net(path, device="cpu"):
-    path = Path(path)
+def _verified_checkpoint_metadata(path):
     metadata = json.loads(path.with_suffix(".json").read_text())
     if (metadata.get("schema_version") != 1 or metadata.get("encoding_version") != ENCODING_VERSION
             or metadata.get("architecture") != ARCHITECTURE
             or any(not isinstance(metadata.get(k), dict) for k in ("seeds", "data", "metrics"))
             or metadata.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest()):
         raise ValueError("Invalid G1 checkpoint schema or SHA256")
+    return metadata
+
+
+def _load_verified_value_net(path, metadata, device):
     model = ValueNetG1().to(device)
     model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=True)
     model.eval()
     model.metadata = metadata
+    return model
+
+
+def load_value_net(path, device="cpu"):
+    path = Path(path)
+    return _load_verified_value_net(path, _verified_checkpoint_metadata(path), device)
+
+
+_MODEL_CACHE_LOCK = threading.Lock()
+_MODEL_CACHE = {}
+_PATH_CACHE = {}
+
+
+def cached_value_net(path, device="cpu"):
+    """Reuse verified weights; stat both artifacts to invalidate replaced checkpoints.
+
+    No training data or provenance paths from the JSON are opened at inference.
+    The model cache is keyed by absolute path, verified SHA256 and device.
+    """
+    with _MODEL_CACHE_LOCK:
+        return _cached_value_net(path, device)
+
+
+def _cached_value_net(path, device):
+    path = Path(path).expanduser().resolve()
+    try:
+        signature = tuple((st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                          for st in (path.stat(), path.with_suffix(".json").stat()))
+        previous = _PATH_CACHE.get((str(path), device))
+        if previous is not None and previous[0] == signature:
+            return _MODEL_CACHE[previous[1]]
+        if device == "cpu":
+            torch.set_num_threads(1)
+        else:
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.use_deterministic_algorithms(True)
+        metadata = _verified_checkpoint_metadata(path)
+        key = (str(path), metadata["sha256"], device)
+        model = _MODEL_CACHE.get(key)
+        if model is None:
+            model = _load_verified_value_net(path, metadata, device)
+            _MODEL_CACHE[key] = model
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ValueError(f"Cannot load G1 checkpoint {path}: {exc}") from exc
+    _PATH_CACHE[(str(path), device)] = (signature, key)
     return model

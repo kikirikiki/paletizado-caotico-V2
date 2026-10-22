@@ -80,6 +80,9 @@ class PolicyConfig:
     micro_plan_value: str = "score"
     micro_plan_value_weight: float = 1.0
     learned_value_weight: float = 1.0
+    learned_value_model: str = 'r13'
+    learned_value_model_path: str = ''
+    learned_value_device: str = 'cpu'
     micro_plan_rollout_leaves: int = 4
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
@@ -238,6 +241,9 @@ class PolicyPackerScheduler:
         micro_plan_value: str = "score",
         micro_plan_value_weight: float = 1.0,
         learned_value_weight: float = 1.0,
+        learned_value_model: str = 'r13',
+        learned_value_model_path: str = '',
+        learned_value_device: str = 'cpu',
         micro_plan_rollout_leaves: int = 4,
         rollout_future_boxes: int = 0,
         rollout_future_samples: int = 1,
@@ -308,6 +314,9 @@ class PolicyPackerScheduler:
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
             learned_value_weight=learned_value_weight,
+            learned_value_model=learned_value_model,
+            learned_value_model_path=learned_value_model_path,
+            learned_value_device=learned_value_device,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -379,6 +388,9 @@ class PolicyPackerScheduler:
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
             learned_value_weight=learned_value_weight,
+            learned_value_model=learned_value_model,
+            learned_value_model_path=learned_value_model_path,
+            learned_value_device=learned_value_device,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -861,6 +873,11 @@ class PolicyPackerScheduler:
             kpis["micro_plan_learned"] = dict(
                 model="r13_generic_v1", source="synthetic_generic_only",
                 weight=self._scheduler.config.learned_value_weight)
+        if self._scheduler.config.learned_value_model == "g1":
+            kpis.setdefault("micro_plan_learned", {}).update(
+                self._scheduler.g1_metadata(), model="g1", source="g1_checkpoint")
+            network_times = self._scheduler.g1_network_times_ms
+            kpis["micro_plan_learned_value_network_ms_mean"] = sum(network_times) / max(1, len(network_times))
         if self._scheduler.config.rollout_prior == "oracle":
             kpis["oracle_leak"] = True
         if self.config.scheduler.rollout_future_boxes:
