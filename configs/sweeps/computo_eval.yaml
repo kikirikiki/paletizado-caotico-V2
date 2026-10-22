@@ -20,7 +20,7 @@
     micro_plan_hard_cap_ms: 600000
 - name: computo_b150_l4
   preset: arm6_4orient
-  role: candidate
+  role: control
   overrides:
     access_debt_mode: penalty
     access_debt_weight: 0.25
