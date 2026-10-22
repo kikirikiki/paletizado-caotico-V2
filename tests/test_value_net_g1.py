@@ -114,16 +114,34 @@ def test_guards(tmp_path, generated):
         trainer.validate_source(altered)
 
 
-def test_deterministic_training(tmp_path, generated, monkeypatch):
+@pytest.mark.parametrize("probability", [0., .5])
+def test_deterministic_training(tmp_path, monkeypatch, probability):
+    source = tmp_path / 'synthetic'
+    source.mkdir()
+    paths = []
+    for group in ('train', 'validation', 'test'):
+        name = next(f'ep_generic_{i}.npz' for i in range(1000)
+                    if trainer.episode_split(f'ep_generic_{i}.npz') == group)
+        path = source / name
+        np.savez(path, **encodings(), util_final=np.linspace(.4, .8, 4, dtype=np.float32),
+                 cajas_hasta_cierre=np.arange(4, dtype=np.float32))
+        paths.append(path)
+    monkeypatch.setattr(trainer, 'validate_source', lambda _: (
+        source, {'policy': 'greedy', 'prior': 'generic'}, paths))
     # Latency is measured by the standalone run, not repeated in unit tests.
     monkeypatch.setattr(trainer, 'benchmark', lambda *args: {})
     states = []
     for run in range(2):
         output = tmp_path / str(run)
-        args = trainer.argparse.Namespace(data=[str(generated)], weights=[1.], out=str(output),
-            epochs=2, batch=64, lr=.001, device='cpu', seed=39, max_states=None, aux_weight=.1)
+        args = trainer.argparse.Namespace(data=[str(source)], weights=[1.], out=str(output),
+            epochs=2, batch=64, lr=.001, device='cpu', seed=39, max_states=None, aux_weight=.1,
+            mask_visible_prob=probability)
         report = trainer.train(args)
         assert len(report['curve']) == 2
+        for row in report['curve']:
+            assert row['selection_mae_pp'] == (row['unmasked_mae_pp'] + row['k0_mae_pp']) / 2
+        for group in ('validation', 'test'):
+            assert set(report['groups'][group]['visible_k']) == {'unmasked', '0', '5', '10'}
         states.append(load_value_net(output / 'value_g1.pt').state_dict())
     assert all(torch.equal(states[0][key], states[1][key]) for key in states[0])
 
@@ -145,3 +163,77 @@ def test_split_and_block_loading(generated):
     assert 750 < assignments.count('train') < 850
     assert list(trainer.BlockSampler(blocked, 39)) == list(trainer.BlockSampler(blocked, 39))
     assert sorted(trainer.BlockSampler(blocked, 39)) == list(range(len(blocked)))
+
+
+@pytest.mark.parametrize("k", [0, 5, 10])
+def test_visible_mask(k):
+    enc = encodings(1)
+    boxes, scalars = enc['boxes'][0], enc['scalars'][0]
+    original_boxes, original_scalars = boxes.copy(), scalars.copy()
+    b, s = trainer.mask_visible(boxes, scalars, 39, 2, 7, k=k)
+    again = trainer.mask_visible(boxes, scalars, 39, 2, 7, k=k)
+    count = min(k, 8)
+    np.testing.assert_array_equal(b[count:], 0)
+    np.testing.assert_array_equal(b[:, 3], [1] * count + [0] * (15-count))
+    assert s[3] == np.float32(count / 15)
+    indices = [next(i for i, row in enumerate(boxes) if np.array_equal(row, item))
+               for item in b[:count]]
+    assert indices == sorted(set(indices))
+    for left, right in zip((b, s), again):
+        np.testing.assert_array_equal(left, right)
+    np.testing.assert_array_equal(boxes, original_boxes)
+    np.testing.assert_array_equal(scalars, original_scalars)
+    np.testing.assert_array_equal(s[:3], scalars[:3])
+
+
+def test_random_visible_mask():
+    enc = encodings(1)
+    boxes, scalars = enc['boxes'][0], enc['scalars'][0]
+    counts = set()
+    for index in range(100):
+        b, s = trainer.mask_visible(boxes, scalars, 39, 1, index)
+        again = trainer.mask_visible(boxes, scalars, 39, 1, index)
+        count = int(b[:, 3].sum())
+        counts.add(count)
+        assert s[3] == np.float32(count / 15)
+        np.testing.assert_array_equal(b[count:], 0)
+        for left, right in zip((b, s), again):
+            np.testing.assert_array_equal(left, right)
+    assert counts == set(range(9))
+    empty = np.zeros_like(boxes)
+    b, s = trainer.mask_visible(empty, scalars, 39, 1, 0)
+    assert not b.any() and s[3] == 0
+
+
+def test_zero_probability_legacy_weights():
+    # Compare every epoch against the original unwrapped input/optimizer path.
+    enc = encodings()
+    dataset = [(enc['height'][i], enc['boxes'][i], enc['scalars'][i],
+                np.float32(.6 + i * .01), np.float32(10), np.float32(1))
+               for i in range(4)]
+    histories = []
+    for wrapped in (False, True):
+        trainer.seed_everything(39)
+        model = ValueNetG1()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 2)
+        data = trainer.VisibleEpisodes(dataset, 39, probability=0) if wrapped else dataset
+        loader = torch.utils.data.DataLoader(data, batch_size=2, shuffle=True,
+                                            generator=torch.Generator().manual_seed(39))
+        history = []
+        for epoch in range(2):
+            if wrapped:
+                data.epoch = epoch
+            model.train()
+            for h, b, s, y, auxiliary, weight in loader:
+                optimizer.zero_grad(set_to_none=True)
+                prediction, aux = model(h, b, s)
+                loss_row = trainer.F.huber_loss(prediction, y, reduction='none') + .1 * (
+                    trainer.F.huber_loss(aux, auxiliary / 100, reduction='none'))
+                (loss_row * weight).mean().backward()
+                optimizer.step()
+            scheduler.step()
+            history.append({key: value.clone() for key, value in model.state_dict().items()})
+        histories.append(history)
+    for legacy, masked in zip(*histories):
+        assert all(torch.equal(legacy[key], masked[key]) for key in legacy)

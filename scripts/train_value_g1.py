@@ -116,6 +116,38 @@ class Episodes(Dataset):
         return (*(arrays[k][row] for k in KEYS), np.float32(self.records[i]["weight"]))
 
 
+def mask_visible(boxes, scalars, seed, epoch, index, probability=1., k=None):
+    """Independent per-state RNG; compact a sorted sample without mutating inputs."""
+    if k is None and probability == 0:
+        return boxes, scalars
+    rng = np.random.default_rng(np.random.SeedSequence([seed, epoch, index]))
+    if k is None and rng.random() >= probability:
+        return boxes, scalars
+    present = np.flatnonzero(boxes[:, 3] > 0)
+    count = int(rng.integers(len(present) + 1)) if k is None else min(k, len(present))
+    selected = np.sort(rng.choice(present, size=count, replace=False))
+    masked = np.zeros_like(boxes)
+    masked[:count] = boxes[selected]
+    effective_scalars = scalars.copy()
+    effective_scalars[3] = count / 15
+    return masked, effective_scalars
+
+
+class VisibleEpisodes(Dataset):
+    """Mask only fetched copies; epoch and global state index define augmentation."""
+    def __init__(self, dataset, seed, probability=0., k=None):
+        self.dataset, self.seed, self.probability, self.k = dataset, seed, probability, k
+        self.epoch = 0
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        h, b, s, y, auxiliary, weight = self.dataset[index]
+        b, s = mask_visible(b, s, self.seed, self.epoch, int(index), self.probability, self.k)
+        return h, b, s, y, auxiliary, weight
+
+
 class BlockSampler(torch.utils.data.Sampler):
     """Shuffle episodes and their rows without thrashing the disk block cache."""
     def __init__(self, dataset, seed):
@@ -171,7 +203,10 @@ def metrics(y, p):
 def evaluate(model, dataset, device, batch):
     predictions, targets = [], []
     model.eval()
-    for h, b, s, y, _, _ in DataLoader(dataset, batch_size=batch):
+    # Extra masked evaluations must not advance the legacy training RNG.
+    generator = (torch.Generator().manual_seed(dataset.seed)
+                 if isinstance(dataset, VisibleEpisodes) else None)
+    for h, b, s, y, _, _ in DataLoader(dataset, batch_size=batch, generator=generator):
         enc = dict(height=h.numpy(), boxes=b.numpy(), scalars=s.numpy())
         predictions.append(predict_utilization_batch(model, enc, device))
         targets.append(y.numpy())
@@ -214,6 +249,9 @@ def train(args):
         raise ValueError("Invalid training hyperparameters")
     if args.max_states is not None and args.max_states < 1:
         raise ValueError("max-states must be positive")
+    mask_probability = getattr(args, "mask_visible_prob", .5)
+    if not 0 <= mask_probability <= 1:
+        raise ValueError("mask-visible-prob must be between 0 and 1")
     weights = args.weights or [1.] * len(args.data)
     if len(weights) != len(args.data) or any(not np.isfinite(w) or w <= 0 for w in weights):
         raise ValueError("--weights requires one positive finite weight per directory")
@@ -260,7 +298,8 @@ def train(args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
     blocked = not datasets["train"].resident
-    loader = DataLoader(datasets["train"], batch_size=args.batch, shuffle=not blocked,
+    training_data = VisibleEpisodes(datasets["train"], args.seed, mask_probability)
+    loader = DataLoader(training_data, batch_size=args.batch, shuffle=not blocked,
                         sampler=BlockSampler(datasets["train"], args.seed) if blocked else None,
                         generator=torch.Generator().manual_seed(args.seed))
     curve, best, best_state = [], float("inf"), None
@@ -270,6 +309,7 @@ def train(args):
     for epoch in range(args.epochs):
         sync(args.device)
         tick = time.perf_counter()
+        training_data.epoch = epoch
         model.train()
         total, states = 0., 0
         for h, b, s, y, auxiliary, weight in loader:
@@ -285,9 +325,14 @@ def train(args):
             states += len(y)
         scheduler.step()
         y, p = evaluate(model, datasets[selection_group], args.device, args.batch)
-        score = metrics(y, p)["mae_pp"]
+        unmasked_score = metrics(y, p)["mae_pp"]
+        y0, p0 = evaluate(model, VisibleEpisodes(datasets[selection_group], args.seed, k=0),
+                          args.device, args.batch)
+        zero_score = metrics(y0, p0)["mae_pp"]
+        score = (unmasked_score + zero_score) / 2
         sync(args.device)
         curve.append(dict(epoch=epoch+1, loss=total/states, selection_mae_pp=score,
+                          unmasked_mae_pp=unmasked_score, k0_mae_pp=zero_score,
                           seconds=time.perf_counter()-tick, device=args.device))
         if score < best:
             best, best_state = score, copy.deepcopy(model.state_dict())
@@ -295,7 +340,9 @@ def train(args):
     # Only now evaluate the held-out test, with the selected checkpoint.
     evaluated = {k: evaluate(model, ds, args.device, args.batch) for k, ds in datasets.items()}
     train_mean = float(evaluated["train"][0].mean())
-    report = dict(selection_group=selection_group, best_mae_pp=best, curve=curve,
+    report = dict(selection_group=selection_group,
+                  selection_rule="mean(unmasked MAE, k=0 MAE), in percentage points",
+                  mask_visible_prob=mask_probability, best_mae_pp=best, curve=curve,
                   parameters=sum(p.numel() for p in model.parameters()),
                   split_rule=__doc__, seeds=dict(training=args.seed), constant_mean=train_mean,
                   groups={}, latency={}, cpu_gpu_max_abs=None,
@@ -313,6 +360,13 @@ def train(args):
                                             constant=metrics(y[mask], np.full(mask.sum(), train_mean)))
         report["groups"][group] = dict(model=metrics(y, p),
             constant=metrics(y, np.full(len(y), train_mean)), sources=sources_report)
+    for group in ("validation", "test"):
+        table = {"unmasked": report["groups"][group]["model"]}
+        for k in (0, 5, 10):
+            y, p = evaluate(model, VisibleEpisodes(datasets[group], args.seed, k=k),
+                            args.device, args.batch)
+            table[str(k)] = metrics(y, p)
+        report["groups"][group]["visible_k"] = table
     h, b, s, *_ = datasets["train"][0]
     sample = dict(height=h[None], boxes=b[None], scalars=s[None])
     devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
@@ -333,7 +387,13 @@ def train(args):
     (output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     lines = ["# G1 training", "", f"Selection: {selection_group}; parameters: {report['parameters']}",
              "", "MAE/RMSE in percentage points; R² dimensionless. Constant fitted on training only.",
-             "", "```json", json.dumps(report, indent=2), "```", ""]
+             "", "Best epoch: mean of unmasked MAE and k=0 MAE.",
+             "", "| Split | k (capped at available) | MAE (pp) | R² |",
+             "| --- | --- | --- | --- |"]
+    for group in ("validation", "test"):
+        for k, values in report["groups"][group]["visible_k"].items():
+            lines.append(f"| {group} | {k} | {values['mae_pp']} | {values['r2']} |")
+    lines.extend(["", "```json", json.dumps(report, indent=2), "```", ""])
     (output / "report.md").write_text("\n".join(lines))
     if report["cpu_gpu_max_abs"] is not None and report["cpu_gpu_max_abs"] >= 1e-5:
         raise ValueError("CPU/GPU predictions differ by >= 1e-5; see report.json")
@@ -352,6 +412,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=39)
     parser.add_argument("--max-states", type=int)
     parser.add_argument("--aux-weight", type=float, default=.1)
+    parser.add_argument("--mask-visible-prob", type=float, default=.5)
     args = parser.parse_args(argv)
     try:
         report = train(args)
