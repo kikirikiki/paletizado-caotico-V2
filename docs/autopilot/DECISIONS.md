@@ -561,3 +561,12 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   (`micro_plan_hard_cap_ms: 600000`); referencia 10 seeds (`computo_ref`) + réplica 20 seeds (índices 10–29, `computo_replica`);
   **se adopta como nueva oficial si la pareada en la réplica es significativa (IC95 > 0) con 0 cortes y cumple D-040** (medido en
   1 proceso sin carga, seeds 1 y 42: `computo_timing`).
+- **Resultado (2026-10-22, deterministas, 0 cortes, oficiales reproducidas exactamente: 77,06 % / 76,21 %):**
+  | | Referencia (10) | Réplica (20) |
+  |---|---|---|
+  | `computo_b150_l4` − `h6_sin_gate` | +0,67 [−0,34; 1,68] | **+1,61 [0,81; 2,40] sig.** |
+  | KPI candidata | 77,74 % | 77,82 % |
+  Tiempo (1 proceso, sin carga, seeds 1 y 42): **1,79 s de media, p95 4,12 s** (oficial 0,91 / 2,05) → cumple D-040.
+  → **ADOPTADA: nueva oficial `computo_b150_l4` ("h7_computo")**: 30 seeds 77,79 % frente a 76,49 % (+1,30 pp). T2 (79,49 %)
+  sigue sin alcanzarse (faltan ~1,7 pp en referencia). Contador anti-estancamiento: 0. Siguiente (D-039): único rediseño de
+  red = red de política/poda G3 sobre la nueva oficial.
