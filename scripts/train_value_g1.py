@@ -163,12 +163,14 @@ class BlockSampler(torch.utils.data.Sampler):
             yield from (start + self.rng.permutation(self.dataset.records[i]["count"])).tolist()
 
 
-def seed_everything(seed):
+def seed_everything(seed, deterministic=True):
+    """--fast (D-039 enmienda): training may be non-deterministic; the saved checkpoint is
+    fixed by its SHA256 and evaluation/inference stay deterministic."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
-    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(deterministic)
+    torch.backends.cudnn.benchmark = not deterministic
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
@@ -292,7 +294,9 @@ def train(args):
     datasets = {k: Episodes(v, budget) for k, v in groups.items()}
     if not len(datasets["train"]):
         raise ValueError("No training states in fixed episode split")
-    seed_everything(args.seed)
+    seed_everything(args.seed, deterministic=not getattr(args, "fast", False))
+    amp = bool(getattr(args, "fast", False) and str(args.device).startswith("cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
     torch.set_num_threads(1)
     model = ValueNetG1().to(args.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -315,12 +319,15 @@ def train(args):
         for h, b, s, y, auxiliary, weight in loader:
             h, b, s, y, auxiliary, weight = [t.to(args.device) for t in (h, b, s, y, auxiliary, weight)]
             optimizer.zero_grad(set_to_none=True)
-            prediction, aux = model(h, b, s)
+            with torch.autocast("cuda", dtype=torch.float16, enabled=amp):
+                prediction, aux = model(h, b, s)
+            prediction, aux = prediction.float(), aux.float()
             loss_row = F.huber_loss(prediction, y, reduction="none") + args.aux_weight * F.huber_loss(
                 aux, auxiliary/100, reduction="none")
             loss = (loss_row * weight).mean()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             total += loss.item() * len(y)
             states += len(y)
         scheduler.step()
@@ -334,6 +341,7 @@ def train(args):
         curve.append(dict(epoch=epoch+1, loss=total/states, selection_mae_pp=score,
                           unmasked_mae_pp=unmasked_score, k0_mae_pp=zero_score,
                           seconds=time.perf_counter()-tick, device=args.device))
+        print(json.dumps(dict(curve[-1], fast=getattr(args, "fast", False))), flush=True)
         if score < best:
             best, best_state = score, copy.deepcopy(model.state_dict())
     model.load_state_dict(best_state)
@@ -413,6 +421,8 @@ def main(argv=None):
     parser.add_argument("--max-states", type=int)
     parser.add_argument("--aux-weight", type=float, default=.1)
     parser.add_argument("--mask-visible-prob", type=float, default=.5)
+    parser.add_argument("--fast", action="store_true",
+                        help="AMP fp16 + non-deterministic kernels for TRAINING only (D-039 enmienda)")
     args = parser.parse_args(argv)
     try:
         report = train(args)

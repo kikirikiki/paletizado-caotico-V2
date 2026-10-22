@@ -535,3 +535,29 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   —pozos— que el escaneo greedy no ve; la inferencia por lotes puede pagar el ~2× de b150); en C, G6 con el oráculo de búsqueda
   como profesor pierde interés (su cota es ≤ +0,8 pp): el profesor útil sería el planificador offline de columnas (81,45 %).
   Fase A pendiente solo de la generación de datos (greedy mix 4000 + official mix 1500 episodios). Spec 25 (red, fase B) a Codex.
+- **Resultado fase B (2026-10-22): NO se cumple el corte → la red de valor no se adopta.** Red G1 (`models/g1_v1`, 15 epochs con
+  `--fast` en GPU, 716 k estados greedy + 139 episodios oficiales): test independiente MAE 4,22 pp, **R² 0,59** (R13: 0,34);
+  inferencia CPU 1 hilo, lote 64 = 76 ms. Pero en la búsqueda (`g1_tune_v1`, 1001–1010, 0 cortes): solo red b57 **−3,55
+  [−4,30; −2,79]**, b150 −2,79 (sig., peor); mezcla w0,5 −0,47, w1 −0,05 (n.s.); mezcla w1 b150_l4 +1,17 n.s. (≈ efecto del cómputo
+  de G0(a), no de la red). Estimar bien la utilización final no basta para ordenar opciones parecidas; con el oráculo de G0(b)
+  (+0,84 n.s.) como techo de "mejor información del futuro" en esta búsqueda, la red como **estimador de valor** se cierra. El único
+  rediseño permitido (D-039) se reorienta, de acuerdo con el usuario, a una **red de política/poda (G3)** que decida qué opciones
+  expandir (el cómputo sí ayuda, G0(a), y la poda no está acotada por el oráculo); se hará tras D-041 con los datos ya generados;
+  si no da ≥ +1 pp en ajuste, la línea de redes se cierra. Generación de datos oficiales detenida (139 episodios). GPU: Quadro RTX 4000 bajo WSL se queda en P8 aunque esté al 100 %
+  (~1,4 TFLOPS fp32 / ~3,8 fp16) pese a "máximo rendimiento", reloj fijado y reinicio; `--fast` (AMP, entrenamiento no
+  determinista; checkpoint fijado por SHA y evaluación determinista) = enmienda aceptada de D-028 solo para entrenar.
+
+## D-040 · Nuevo límite de tiempo real: media ≤ 3 s y p95 ≤ 7 s por decisión (instrucción del usuario, 2026-10-22)
+- Respuesta del usuario: se puede superar 1 s; más adelante se evaluará un PC más potente para bajarlo. Sustituye a D-007 para
+  las técnicas nuevas: **media ≤ 3,0 s y p95 ≤ 7,0 s** en un núcleo de esta workstation, sin carga (sigue ≥ 2× de margen sobre el
+  ciclo de robot de 14 s). Las cifras y decisiones anteriores no cambian.
+- La cinta con 18 visibles **no es posible físicamente** (usuario): `ventana18` queda como palanca informativa, no implantable.
+
+## D-041 · "Pensar más" (`computo_b150_l4`) como candidata preregistrada (2026-10-22, ANTES de evaluar)
+- Candidata = `h6_sin_gate` con `micro_plan_node_budget: 150` y `micro_plan_rollout_leaves: 4` (solo software, 15 visibles, sin red).
+  Ajuste G0(a): +1,37 [0,21; 2,54]; advertencia previa: b400_l4 (+0,38) y b400_d4_l8 (−0,01) no mejoran (paisaje no monótono) y
+  en este estudio las ganancias de ajuste suelen encogerse en la réplica → expectativa realista +0,5…+1 pp.
+- Regla (D-016/D-029/D-031/D-034/D-037): `configs/sweeps/computo_eval.yaml` = oficial + candidata, deterministas
+  (`micro_plan_hard_cap_ms: 600000`); referencia 10 seeds (`computo_ref`) + réplica 20 seeds (índices 10–29, `computo_replica`);
+  **se adopta como nueva oficial si la pareada en la réplica es significativa (IC95 > 0) con 0 cortes y cumple D-040** (medido en
+  1 proceso sin carga, seeds 1 y 42: `computo_timing`).
