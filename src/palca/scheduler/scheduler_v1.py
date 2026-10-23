@@ -323,6 +323,7 @@ class SchedulerV1:
         self.last_deadlock_item: dict[str, Any] | None = None
         self.last_eval_stats: dict[str, Any] = {}
         self.last_micro_plan_stats: dict[str, Any] = {}
+        self.last_root_candidates: list[dict[str, Any]] = []
         self._g1_batching = True
         self._g1_pending_nodes = None
         self._g1_pending_tails = None
@@ -436,6 +437,7 @@ class SchedulerV1:
         self.last_deadlock_item = None
         self.last_eval_stats = {}
         self.last_micro_plan_stats = {}
+        self.last_root_candidates = []
         self.last_micro_feasible_first_candidates = 0
         self._hard_floor_phase_active_counted_this_decision = False
         self._rebuild_spatial_state(sim_state.pallets)
@@ -972,6 +974,8 @@ class SchedulerV1:
                     if node_budget == 0:
                         nodes_expanded += 1  # Preserve legacy feasible-node telemetry.
                     expansions.append(expansion)
+                    if depth == 0:
+                        self._record_root_candidate(expansion.node.first_plan)
 
                 if expansions:
                     min_h = min(int(e.terms.height_after_mm) for e in expansions)
@@ -1056,6 +1060,9 @@ class SchedulerV1:
                             }
                             self._g1_pending_nodes = None
                             self._record_g1_stats(stats)
+                            for item in hard_floor_expansions:
+                                self._record_root_candidate(item.expansion.node.first_plan, item.base_score)
+                            self._record_root_candidate(chosen_plan, chosen=True)
                             return chosen_plan, stats, None
 
                 if depth == 0:
@@ -1095,6 +1102,13 @@ class SchedulerV1:
             if not next_beam:
                 break
 
+            if self.config.micro_plan_value not in ("rollout", "rollout+learned"):
+                for leaf in next_beam:
+                    # Score mode uses a lexicographic criterion; preserve its
+                    # scale rather than inventing a weighted scalar surrogate.
+                    value = (self._beam_rank_key(leaf) if self.config.micro_plan_value == "score"
+                             else float(leaf.state_value))
+                    self._record_root_candidate(leaf.first_plan, value)
             next_beam.sort(key=self._beam_rank_key, reverse=True)
             if self.config.free_sides_tiebreak:
                 next_beam = self._rank_free_beam(next_beam)
@@ -1150,6 +1164,8 @@ class SchedulerV1:
                 tails = self._g1_tail_batch(pending)
                 evaluated = [(value + self.config.learned_value_weight * sum(tails[a:b]) / (b-a), key, leaf)
                              for (value, key, leaf), (a, b) in zip(evaluated, tail_ranges)]
+            for value, _, leaf in evaluated:
+                self._record_root_candidate(leaf.first_plan, value)
             if evaluated:
                 if self.config.free_sides_tiebreak:
                     winner = rank_free_sides(
@@ -1214,10 +1230,36 @@ class SchedulerV1:
             stats["learned_value_weight"] = self.config.learned_value_weight
             stats["learned_model"] = "r13_generic_v1"
 
+        self._record_root_candidate(best_node.first_plan, chosen=True)
         self._record_g1_stats(stats)
         if best_node.first_plan is None:
             return None, stats, root_slack_stats
         return best_node.first_plan, stats, root_slack_stats
+
+    def _record_root_candidate(self, plan, value=None, *, chosen=False):
+        """Side-channel only: never feed these observations back into ranking.
+
+        For rollout search only evaluated leaves receive values. Score mode
+        retains the lexicographic rank tuple; state-value modes use a scalar. Ties
+        retain the production beam rank (and optional free-sides tolerance).
+        """
+        if plan is None:
+            return
+        if value is not None and not isinstance(value, tuple):
+            value = float(value)
+        p = plan.preview.placement
+        placement = (p.x_mm, p.y_mm, p.z_mm, p.length_mm, p.width_mm, p.height_mm)
+        for candidate in self.last_root_candidates:
+            if (candidate["ramp_id"], candidate["buffer_index"], candidate["placement"]) == (
+                    plan.ramp_id, plan.buffer_index, placement):
+                if value is not None:
+                    candidate["value"] = (value if candidate["value"] is None
+                                          else max(candidate["value"], value))
+                candidate["chosen"] |= chosen
+                return
+        self.last_root_candidates.append(dict(
+            ramp_id=plan.ramp_id, buffer_index=plan.buffer_index, placement=placement,
+            value=value, chosen=chosen))
 
     def _retain_beam_expansions(self, expansions, has_preview, depth):
         if expansions:

@@ -1,16 +1,15 @@
 """Complete synthetic FIFO episodes; all configuration I/O happens at import.
 
-Official microsearch exposes only the winner and aggregate statistics, not root
-plans/values. Consequently official epsilon is rejected and G3 roots are omitted.
-Greedy exposes scored roots through its selection callback: retain its top three,
-ranked by repeated application of the unchanged production selector. Their values
-are immediate scalar scores, NOT microsearch rollout values.
+Official policies expose expanded roots and rollout values for policy training.
+Greedy values remain immediate scalar scores, not rollout values.
 
 Each row is before a successful placement. cajas_hasta_cierre includes that
 placement. The final open pallet's decision rows are censored, even if full.
 """
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
 import hashlib
 from inspect import Parameter, signature
 from pathlib import Path
@@ -28,10 +27,12 @@ from .state_encoding import encode_state
 from .synthetic_flows import synthetic_flow
 
 
-def _official_kwargs():
+def _official_kwargs(member="h6_sin_gate"):
     """Same preset/default merge and argument renaming as run_sweep -> sim.run."""
     path = Path(__file__).resolve().parents[3] / "configs/sweeps/pulmon_tune.yaml"
-    config = next(c for c in yaml.safe_load(path.read_text()) if c["name"] == "h6_sin_gate")
+    if member == "computo_b150_l4":
+        path = path.with_name("computo_eval.yaml")
+    config = next(c for c in yaml.safe_load(path.read_text()) if c["name"] == member)
     params = {k: p.default for k, p in signature(run_simulation).parameters.items()
               if p.default is not Parameter.empty}
     overrides = dict(config["overrides"], micro_plan_hard_cap_ms=600000)
@@ -44,10 +45,12 @@ def _official_kwargs():
 
 
 OFFICIAL_KWARGS = _official_kwargs()
+OFFICIAL_B150_KWARGS = _official_kwargs("computo_b150_l4")
 
 
-def official_policy():
-    return PolicyPackerScheduler.from_defaults(**OFFICIAL_KWARGS)
+def official_policy(policy="official"):
+    kwargs = OFFICIAL_B150_KWARGS if policy == "official_b150" else OFFICIAL_KWARGS
+    return PolicyPackerScheduler.from_defaults(**kwargs)
 
 
 class _RootGreedy(SchedulerV1):
@@ -71,17 +74,17 @@ def _placement(plan):
     return (p.x_mm, p.y_mm, p.z_mm, p.length_mm, p.width_mm, p.height_mm)
 
 
-def run_episode(seed, prior, policy, epsilon=0.0, *, count=186) -> dict:
+def run_episode(seed, prior, policy, epsilon=0.0, *, count=186, with_after=False) -> dict:
     """Pure in-memory episode; no upstream is provided to either scheduler."""
-    if policy not in {"official", "greedy"}:
-        raise ValueError("policy must be official or greedy")
+    if policy not in {"official", "official_b150", "greedy"}:
+        raise ValueError("policy must be official, official_b150 or greedy")
     if not 0 <= epsilon <= 1:
         raise ValueError("epsilon must be in [0, 1]")
-    if policy == "official" and epsilon:
-        raise ValueError("official search does not expose root candidates; epsilon is greedy-only")
+    if policy != "greedy" and epsilon:
+        raise ValueError("epsilon is greedy-only")
     stream = synthetic_flow(seed, prior, count)
-    packing = official_policy() if policy == "official" else training_policy()
-    engine = packing._scheduler if policy == "official" else _RootGreedy(packing._scheduler.config)
+    packing = official_policy(policy) if policy != "greedy" else training_policy()
+    engine = packing._scheduler if policy != "greedy" else _RootGreedy(packing._scheduler.config)
     key = hashlib.sha256(f"palca-g1-exploration-v1:{seed}".encode()).digest()
     rng = np.random.default_rng(int.from_bytes(key, "big"))
     pallet = packing._new_pallet()
@@ -90,7 +93,7 @@ def run_episode(seed, prior, policy, epsilon=0.0, *, count=186) -> dict:
     closed = placed = 0
     while queue:
         state = SchedulerSimState(0, {1: queue}, {1: pallet}, set())
-        if policy == "official":
+        if policy != "greedy":
             plan = engine.choose_action(state)
             if engine.last_micro_plan_stats.get("hard_cap_hits"):
                 raise RuntimeError("official hard cap hit; refusing time-dependent training data")
@@ -121,6 +124,34 @@ def run_episode(seed, prior, policy, epsilon=0.0, *, count=186) -> dict:
                 root_actions[i] = (c.plan.buffer_index, *_placement(c.plan))
                 root_values[i] = c.terms.scalar_score
             row.update(root_actions=root_actions, root_values=root_values, root_count=len(roots))
+        if policy != "greedy":
+            candidates = engine.last_root_candidates
+            if len(candidates) > 64:
+                raise RuntimeError("More than 64 expanded roots; refusing silent truncation")
+            actions = np.full((64, 7), -1, dtype=np.int32)
+            values = np.full(64, np.nan, dtype=np.float32)
+            chosen = -1
+            after = np.zeros((64, 62, 42), dtype=np.uint16) if with_after else None
+            for i, candidate in enumerate(candidates):
+                actions[i] = (candidate["buffer_index"], *candidate["placement"])
+                if candidate["value"] is not None:
+                    values[i] = candidate["value"]
+                if candidate["chosen"]:
+                    chosen = i
+                if with_after:
+                    # Encoding reads geometry only. Copy the pallet and append the
+                    # actual candidate geometry; never mutate the live preview.
+                    clone = copy.deepcopy(pallet)
+                    x, y, z, l, w, h = candidate["placement"]
+                    clone.placements.append(replace(plan.preview.placement,
+                        x_mm=x, y_mm=y, z_mm=z, length_mm=l, width_mm=w, height_mm=h))
+                    after[i] = encode_state(clone, queue)["height"]
+            if chosen < 0:
+                raise RuntimeError("Official placement has no chosen root candidate")
+            row.update(cand_actions=actions, cand_values=values, cand_chosen=chosen,
+                       cand_count=len(candidates))
+            if with_after:
+                row["cand_height_after"] = after
         pending.append(row)
         pallet.commit_place(plan.preview)
         placed += 1
@@ -135,6 +166,11 @@ def run_episode(seed, prior, policy, epsilon=0.0, *, count=186) -> dict:
     if policy == "greedy":
         schema.update(root_actions=((3, 7), np.int32), root_values=((3,), np.float64),
                       root_count=((), np.int8))
+    if policy != "greedy":
+        schema.update(cand_actions=((64, 7), np.int32), cand_values=((64,), np.float32),
+                      cand_chosen=((), np.int16), cand_count=((), np.int16))
+        if with_after:
+            schema["cand_height_after"] = ((64, 62, 42), np.uint16)
     result = {k: np.asarray([row[k] for row in rows], dtype=dtype).reshape((-1, *shape))
               for k, (shape, dtype) in schema.items()}
     result.update(seed=seed, closed_pallets=closed, placed_boxes=placed,

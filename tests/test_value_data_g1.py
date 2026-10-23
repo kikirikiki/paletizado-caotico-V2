@@ -166,7 +166,7 @@ def test_cli_resume_manifest_and_output_guard(tmp_path, monkeypatch, capsys):
 
     calls = []
 
-    def small_episode(seed, prior, policy, epsilon):
+    def small_episode(seed, prior, policy, epsilon, **_kwargs):
         calls.append(seed)
         return run_episode(seed, prior, policy, epsilon, count=1)
 

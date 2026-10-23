@@ -2,9 +2,9 @@
 """Generate resumable G1 synthetic episodes outside the worktree.
 
 OMP_NUM_THREADS is set before NumPy imports, including in spawned workers.
-Official roots are not exposed; epsilon exploration and root scalar scores are
-available only for greedy. NPZ arrays contain successful pre-placement decisions
-on closed pallets; censored_states counts discarded final-pallet decisions.
+Official policies include root rollout values; epsilon exploration remains
+greedy-only. Optional candidate height maps are compressed in NPZ files.
+NPZ arrays contain successful pre-placement decisions on closed pallets; censored_states counts discarded final-pallet decisions.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ SCRIPT_KEY = "scripts/gen_value_data.py"
 
 def _compatible(previous, identity):
     for key, value in identity.items():
-        old = previous.get(key)
+        old = previous.get(key, False if key == "with_after" else None)
         if key == "source_sha256":
             old = {k: h for k, h in (old or {}).items() if Path(k).name in GENERATION_MODULES}
         if key == "configuration_sha256":
@@ -47,7 +47,8 @@ def _worker(task):
     from palca.learning.episode import run_episode
 
     seed, args = task
-    result = run_episode(seed, args["prior"], args["policy"], args["epsilon"])
+    result = run_episode(seed, args["prior"], args["policy"], args["epsilon"],
+                         with_after=args.get("with_after", False))
     path = Path(args["out"]) / f'ep_{args["prior"]}_{seed}.npz'
     temporary = path.with_suffix(".npz.tmp")
     try:
@@ -67,7 +68,8 @@ def _atomic_json(path, data):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--policy", choices=["official", "greedy"], required=True)
+    parser.add_argument("--policy", choices=["official", "official_b150", "greedy"], required=True)
+    parser.add_argument("--with-after", action="store_true")
     parser.add_argument("--prior", choices=["generic", "families", "mix"], required=True)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--episodes", type=int, required=True)
@@ -80,8 +82,8 @@ def main(argv=None):
         parser.error("--out must be outside the repository worktree")
     if args.episodes < 1 or args.workers < 1 or not 0 <= args.epsilon <= 1:
         parser.error("episodes/workers must be positive and epsilon in [0, 1]")
-    if args.policy == "official" and args.epsilon:
-        parser.error("official roots are not exposed; epsilon is greedy-only")
+    if args.policy != "greedy" and args.epsilon:
+        parser.error("epsilon is greedy-only")
     import numpy as np
     from palca.learning.state_encoding import ENCODING_VERSION
 
@@ -91,12 +93,14 @@ def main(argv=None):
                if p.name in GENERATION_MODULES}
     config_paths = [ROOT / "configs/sweeps/pulmon_tune.yaml", Path(__file__).resolve(),
                     ROOT / "src/palca/study/params.py"]
+    if args.policy == "official_b150":
+        config_paths.append(ROOT / "configs/sweeps/computo_eval.yaml")
     config_hashes = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                      for p in config_paths}
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     identity = dict(encoding_version=ENCODING_VERSION, source_sha256=sources,
                     configuration_sha256=config_hashes,
-                    policy=args.policy, prior=args.prior, epsilon=args.epsilon)
+                    policy=args.policy, prior=args.prior, epsilon=args.epsilon, with_after=args.with_after)
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.json"
     previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
@@ -126,7 +130,8 @@ def main(argv=None):
             totals["states"] += len(episode["util_final"])
             totals["closed_pallets"] += int(episode["closed_pallets"])
             totals["censored_states"] += int(episode["censored_states"])
-    run = dict(arguments=arguments, git_head=head, generated_episodes=len(tasks), skipped=args.episodes-len(tasks),
+    sizes = [p.stat().st_size for p in args.out.glob(f"ep_{args.prior}_*.npz")]
+    run = dict(mean_episode_bytes=sum(sizes) / len(sizes) if sizes else 0, arguments=arguments, git_head=head, generated_episodes=len(tasks), skipped=args.episodes-len(tasks),
                generated_states=generated_states, seconds=seconds,
                states_per_hour=generated_states * 3600 / seconds,
                states_per_hour_per_worker=generated_states * 3600 / seconds / args.workers)
