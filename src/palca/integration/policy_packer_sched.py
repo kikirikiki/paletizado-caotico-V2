@@ -83,6 +83,10 @@ class PolicyConfig:
     learned_value_model: str = 'r13'
     learned_value_model_path: str = ''
     learned_value_device: str = 'cpu'
+    policy_prune_model_path: str = ''
+    policy_prune_k: int = 6
+    policy_prune_device: str = 'cpu'
+    policy_prune_depths: str = 'root'
     micro_plan_rollout_leaves: int = 4
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
@@ -244,6 +248,10 @@ class PolicyPackerScheduler:
         learned_value_model: str = 'r13',
         learned_value_model_path: str = '',
         learned_value_device: str = 'cpu',
+        policy_prune_model_path: str = '',
+        policy_prune_k: int = 6,
+        policy_prune_device: str = 'cpu',
+        policy_prune_depths: str = 'root',
         micro_plan_rollout_leaves: int = 4,
         rollout_future_boxes: int = 0,
         rollout_future_samples: int = 1,
@@ -317,6 +325,10 @@ class PolicyPackerScheduler:
             learned_value_model=learned_value_model,
             learned_value_model_path=learned_value_model_path,
             learned_value_device=learned_value_device,
+            policy_prune_model_path=policy_prune_model_path,
+            policy_prune_k=policy_prune_k,
+            policy_prune_device=policy_prune_device,
+            policy_prune_depths=policy_prune_depths,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -391,6 +403,10 @@ class PolicyPackerScheduler:
             learned_value_model=learned_value_model,
             learned_value_model_path=learned_value_model_path,
             learned_value_device=learned_value_device,
+            policy_prune_model_path=policy_prune_model_path,
+            policy_prune_k=policy_prune_k,
+            policy_prune_device=policy_prune_device,
+            policy_prune_depths=policy_prune_depths,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -878,6 +894,9 @@ class PolicyPackerScheduler:
                 self._scheduler.g1_metadata(), model="g1", source="g1_checkpoint")
             network_times = self._scheduler.g1_network_times_ms
             kpis["micro_plan_learned_value_network_ms_mean"] = sum(network_times) / max(1, len(network_times))
+        if self._scheduler.config.policy_prune_model_path:
+            kpis['policy_prune_network_ms'] = list(self._scheduler.g3_network_times_ms)
+            kpis['policy_prune_network_ms_mean'] = sum(self._scheduler.g3_network_times_ms) / max(1, len(self._scheduler.g3_network_times_ms))
         if self._scheduler.config.rollout_prior == "oracle":
             kpis["oracle_leak"] = True
         if self.config.scheduler.rollout_future_boxes:

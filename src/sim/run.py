@@ -262,6 +262,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learned-value-model", choices=("r13", "g1"), default="r13")
     parser.add_argument("--learned-value-model-path", default="")
     parser.add_argument("--learned-value-device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument('--policy-prune-model-path', default='')
+    parser.add_argument('--policy-prune-k', type=int, default=6)
+    parser.add_argument('--policy-prune-device', choices=('cpu', 'cuda'), default='cpu')
+    parser.add_argument('--policy-prune-depths', choices=('root', 'all'), default='root')
     parser.add_argument("--micro-plan-rollout-leaves", type=int, default=4)
     parser.add_argument("--rollout-future-boxes", type=int, default=0)
     parser.add_argument("--rollout-future-samples", type=int, default=1)
@@ -531,6 +535,10 @@ def run_simulation(
     learned_value_model: str = 'r13',
     learned_value_model_path: str = '',
     learned_value_device: str = 'cpu',
+    policy_prune_model_path: str = '',
+    policy_prune_k: int = 6,
+    policy_prune_device: str = 'cpu',
+    policy_prune_depths: str = 'root',
     micro_plan_rollout_leaves: int = 4,
     rollout_future_boxes: int = 0,
     rollout_future_samples: int = 1,
@@ -736,6 +744,10 @@ def run_simulation(
             learned_value_model=learned_value_model,
             learned_value_model_path=learned_value_model_path,
             learned_value_device=learned_value_device,
+            policy_prune_model_path=policy_prune_model_path,
+            policy_prune_k=policy_prune_k,
+            policy_prune_device=policy_prune_device,
+            policy_prune_depths=policy_prune_depths,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
@@ -937,6 +949,11 @@ def run_simulation(
             "micro_plan": bool(micro_plan),
             "micro_plan_node_budget": micro_plan_node_budget,
             "micro_plan_hard_cap_ms": micro_plan_hard_cap_ms,
+            **(dict(policy_prune_model_path=str(Path(policy_prune_model_path).expanduser().resolve()),
+                    policy_prune_k=policy_prune_k, policy_prune_device=policy_prune_device,
+                    policy_prune_depths=policy_prune_depths,
+                    policy_prune_sha256=decision_policy._scheduler._g3_model.metadata['sha256'])
+               if policy_prune_model_path else {}),
             **(decision_policy._scheduler.g1_metadata() if learned_value_model == "g1" else {}),
             **({"learned_value_model_path": str(Path(learned_value_model_path).expanduser().resolve())}
                if learned_value_model == "g1" else {}),
@@ -1085,6 +1102,10 @@ def main() -> None:
         learned_value_model=args.learned_value_model,
         learned_value_model_path=args.learned_value_model_path,
         learned_value_device=args.learned_value_device,
+        policy_prune_model_path=args.policy_prune_model_path,
+        policy_prune_k=args.policy_prune_k,
+        policy_prune_device=args.policy_prune_device,
+        policy_prune_depths=args.policy_prune_depths,
         micro_plan_rollout_leaves=args.micro_plan_rollout_leaves,
         rollout_future_boxes=args.rollout_future_boxes,
         rollout_future_samples=args.rollout_future_samples,

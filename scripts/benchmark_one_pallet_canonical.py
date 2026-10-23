@@ -47,6 +47,10 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "learned_value_model",
     "learned_value_model_path",
     "learned_value_device",
+    "policy_prune_model_path",
+    "policy_prune_k",
+    "policy_prune_device",
+    "policy_prune_depths",
     "learned_value_weight",  # R13 is exercised through sweeps; frozen profile unchanged.
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
     # D-036 hardware is evaluated through sweeps; frozen profile keeps K=0.

@@ -77,6 +77,10 @@ class SchedulerConfig:
     learned_value_model: str = "r13"
     learned_value_model_path: str = ""
     learned_value_device: str = "cpu"
+    policy_prune_model_path: str = ''
+    policy_prune_k: int = 6
+    policy_prune_device: str = 'cpu'
+    policy_prune_depths: str = 'root'
     micro_plan_rollout_leaves: int = 4
     rollout_future_boxes: int = 0
     rollout_future_samples: int = 1
@@ -95,6 +99,11 @@ class SchedulerConfig:
     batchfill_greedy_topk: int = 12
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.policy_prune_model_path, str)
+                or type(self.policy_prune_k) is not int or self.policy_prune_k < 1
+                or self.policy_prune_device not in ('cpu', 'cuda')
+                or self.policy_prune_depths not in ('root', 'all')):
+            raise ValueError('Invalid policy_prune parameters')
         validate_tolerance(self.free_sides_tolerance)
         if (not isinstance(self.micro_plan_node_budget, int) or self.micro_plan_node_budget < 0
                 or not isinstance(self.micro_plan_hard_cap_ms, int) or self.micro_plan_hard_cap_ms <= 0):
@@ -324,6 +333,13 @@ class SchedulerV1:
         self.last_eval_stats: dict[str, Any] = {}
         self.last_micro_plan_stats: dict[str, Any] = {}
         self.last_root_candidates: list[dict[str, Any]] = []
+        self._g3_model = None
+        self._g3_network_ms = 0.0
+        self.g3_network_times_ms = []
+        if self.config.policy_prune_model_path:
+            from ..learning.policy_net import cached_policy_net
+            self._g3_model = cached_policy_net(self.config.policy_prune_model_path,
+                                              self.config.policy_prune_device)
         self._g1_batching = True
         self._g1_pending_nodes = None
         self._g1_pending_tails = None
@@ -438,6 +454,7 @@ class SchedulerV1:
         self.last_eval_stats = {}
         self.last_micro_plan_stats = {}
         self.last_root_candidates = []
+        self._g3_network_ms = 0.0
         self.last_micro_feasible_first_candidates = 0
         self._hard_floor_phase_active_counted_this_decision = False
         self._rebuild_spatial_state(sim_state.pallets)
@@ -887,7 +904,8 @@ class SchedulerV1:
             placed_count=0,
             first_plan=None,
         )
-        if self.config.micro_plan_value != "score" or self.config.column_template == "adaptive":
+        if (self.config.micro_plan_value != "score" or self.config.column_template == "adaptive"
+                or self._g3_model is not None):
             # Freeze precisely the initial action window. In particular, never
             # refill simulated queues from the unknown upstream stream.
             allocation = self._beam_window(root.ramps)
@@ -946,6 +964,7 @@ class SchedulerV1:
                 if not actions:
                     continue
 
+                policy_actions = []
                 expansions: list[_BeamExpansion] = []
                 for action in actions:
                     if deadline is not None and time.perf_counter() >= deadline:
@@ -974,8 +993,12 @@ class SchedulerV1:
                     if node_budget == 0:
                         nodes_expanded += 1  # Preserve legacy feasible-node telemetry.
                     expansions.append(expansion)
+                    policy_actions.append(action)
                     if depth == 0:
                         self._record_root_candidate(expansion.node.first_plan)
+
+                if expansions and self._g3_model is not None and (depth == 0 or self.config.policy_prune_depths == 'all'):
+                    expansions = self._prune_policy(node, expansions, policy_actions)
 
                 if expansions:
                     min_h = min(int(e.terms.height_after_mm) for e in expansions)
@@ -1298,7 +1321,40 @@ class SchedulerV1:
             return [candidate.node for candidate in retained]
         return []
 
+    def _prune_policy(self, node, expansions, actions):
+        from ..learning.state_encoding import encode_state
+        import numpy as np
+        # One batch for all candidates of this node, even across destinations.
+        rows = []
+        for expansion, action in zip(expansions, actions):
+            box = node.ramps[action.ramp_id].queue[action.buffer_index]
+            pid = box.destination
+            visible = [b for rid in sorted(node.ramps) for b in node.ramps[rid].queue
+                       if b.destination == pid]
+            enc = encode_state(node.pallets[pid], visible)
+            after = encode_state(expansion.node.pallets[pid], [])['height']
+            # Child geometry contains the actual placement (first_plan is root-only).
+            placement = expansion.node.pallets[pid].placements[-1]
+            vector = [action.buffer_index, placement.x_mm, placement.y_mm, placement.z_mm,
+                      placement.length_mm, placement.width_mm, placement.height_mm]
+            rows.append(dict(enc, cand_actions=np.asarray([vector]),
+                             cand_height_after=after[None], cand_count=1))
+        # Independent candidate logits, followed by a node-wide stable ordering.
+        batch = {k: np.stack([r[k] for r in rows]) for k in rows[0]}
+        import torch
+        from ..learning.policy_net import policy_tensors
+        started = time.perf_counter()
+        with torch.inference_mode():
+            logits = self._g3_model(*policy_tensors(batch, self.config.policy_prune_device))[:, 0].cpu().numpy()
+        self._g3_network_ms += (time.perf_counter()-started)*1000
+        keep = set(sorted(range(len(expansions)), key=lambda i: -float(logits[i]))[:self.config.policy_prune_k])
+        return [e for i, e in enumerate(expansions) if i in keep]
+
     def _record_g1_stats(self, stats):
+        if self._g3_model is not None:
+            self.g3_network_times_ms.append(self._g3_network_ms)
+            stats['policy_prune_network_ms'] = self._g3_network_ms
+            stats['policy_prune_sha256'] = self._g3_model.metadata['sha256']
         if self._g1_model is not None:
             self.g1_network_times_ms.append(self._g1_network_ms)
             stats.update(self.g1_metadata())
