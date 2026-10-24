@@ -18,6 +18,8 @@
   nuevo límite de tiempo del usuario (media ≤ 3 s, p95 ≤ 7 s; con un PC más potente se podrá bajar). Investigación con GPU (D-039):
   una red de valor entrenada con 716 k estados sintéticos estima bien (R² 0,59) pero no mejora las decisiones; saber el futuro
   real dentro de la búsqueda tampoco (+0,8 n.s.). La cinta de 18 visibles no es posible físicamente.
+  Una red de política que poda las opciones (G3, 92 % de acierto entre sus 6 mejores) tampoco mejora (−0,15 n.s.):
+  la búsqueda ya descarta bien; lo que limita es el valor de las hojas. Línea de redes cerrada.
 - **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
   de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
 - **Palancas de hardware nuevas (D-037):** un pulmón de 1–3 posiciones junto al palet **no mejora** (réplica +0,12 n.s.); en cambio,

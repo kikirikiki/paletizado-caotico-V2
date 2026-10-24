@@ -570,3 +570,11 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   → **ADOPTADA: nueva oficial `computo_b150_l4` ("h7_computo")**: 30 seeds 77,79 % frente a 76,49 % (+1,30 pp). T2 (79,49 %)
   sigue sin alcanzarse (faltan ~1,7 pp en referencia). Contador anti-estancamiento: 0. Siguiente (D-039): único rediseño de
   red = red de política/poda G3 sobre la nueva oficial.
+- **Resultado G3 (rediseño único de D-039, 2026-10-24): NO se cumple el corte → se cierra la línea de redes.** Datos: 1 200
+  episodios `official_b150` (~220 k decisiones con candidatos); `PolicyNetG3` (25 k parámetros, 50 epochs `--fast`, ~16 h en la GPU
+  en P8): la elegida por la búsqueda está entre las 6 mejores de la red el 92 % de las veces (top-1 52 %, regret 0,47 pp). Sweep
+  `g3_tune_v1` (1001–1010, 0 cortes) frente a la oficial `computo_b150_l4`: raíz k6 −0,51; todos k6 −0,15; todos k4 −1,75;
+  todos k6 d4 −0,15 (idéntico a d3: el presupuesto de 150 nodos no llega a la profundidad 4); todos k6 b300 d4 −0,41; todas n.s.
+  Podar con la red no deja más margen útil: la búsqueda ya descarta bien las opciones malas, y lo que la limita es el valor de las
+  hojas (G0/G1). Balance de la investigación con GPU: la mejora adoptada viene del cómputo (D-041, +1,61 en réplica), no de las
+  redes. Datos y modelos se conservan fuera del repo (`data/`, `models/`).
