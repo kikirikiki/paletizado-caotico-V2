@@ -44,6 +44,13 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "access_debt_exempt_delta_mm",  # Spec 18 is exercised through sweeps.
     "dead_headroom_weight",
     "dead_headroom_min_mm",
+    "learned_value_model",
+    "learned_value_model_path",
+    "learned_value_device",
+    "policy_prune_model_path",
+    "policy_prune_k",
+    "policy_prune_device",
+    "policy_prune_depths",
     "learned_value_weight",  # R13 is exercised through sweeps; frozen profile unchanged.
     "open_pallets",  # Benchmark de un solo palet: mantiene el default 1.
     # D-036 hardware is evaluated through sweeps; frozen profile keeps K=0.
@@ -53,6 +60,7 @@ RUN_SIM_EXCLUDED_PROFILE_KEYS: frozenset[str] = frozenset({
     "staging_narrow_frac",
     "staging_park_s",
     "staging_unpark_s",
+    "allow_oracle_leak",  # D-039 G0(b): cota con fuga, solo en sweeps.
     "free_sides_tiebreak",  # Perfil congelado: conserva False / 0.0; D-024 usa sweeps.
     "free_sides_tolerance",
 })

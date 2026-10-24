@@ -13,6 +13,15 @@
   Metas: **T1 ≥ 71,67 %**, **T2 ≥ 79,49 %**, **T3 ≥ 92,84 %**.
 - **Mejor resultado online: 77,06 % ± 0,90** (H1+H3+H5+H6, sin gate de cajas de pie): **+15,2 pp sobre el baseline, 77,6 % del gap
   → T1 alcanzado sin condiciones.** Réplica en 20 seeds nuevas: 76,21 %. Tiempo real: 0,957 s/decisión de media, p95 2,36 s.
+- **Nueva oficial (2026-10-22, D-040/D-041): "pensar más"**, la misma búsqueda con 150 nodos y 4 hojas en lugar de 57 y 2:
+  **77,74 % en referencia y 77,82 % en la réplica (+1,61 pp significativo)**, 1,79 s/decisión de media (p95 4,12 s), dentro del
+  nuevo límite de tiempo del usuario (media ≤ 3 s, p95 ≤ 7 s; con un PC más potente se podrá bajar). Investigación con GPU (D-039):
+  una red de valor entrenada con 716 k estados sintéticos estima bien (R² 0,59) pero no mejora las decisiones; saber el futuro
+  real dentro de la búsqueda tampoco (+0,8 n.s.). La cinta de 18 visibles no es posible físicamente.
+  Una red de política que poda las opciones (G3, 92 % de acierto entre sus 6 mejores) tampoco mejora (−0,15 n.s.):
+  la búsqueda ya descarta bien; lo que limita es el valor de las hojas. Línea de redes cerrada.
+  Imitar al planificador offline de columnas (G6) tampoco es viable: en flujos sintéticos rinde 6,9 pp MENOS que el robot
+  online, porque sus plantillas están hechas a medida del flujo de referencia (D-042).
 - **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
   de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
 - **Palancas de hardware nuevas (D-037):** un pulmón de 1–3 posiciones junto al palet **no mejora** (réplica +0,12 n.s.); en cambio,

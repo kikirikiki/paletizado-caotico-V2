@@ -259,12 +259,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--micro-plan-value", choices=("score", "potential", "rollout", "learned", "rollout+learned"), default="score")
     parser.add_argument("--micro-plan-value-weight", type=float, default=1.0)
     parser.add_argument("--learned-value-weight", type=float, default=1.0)
+    parser.add_argument("--learned-value-model", choices=("r13", "g1"), default="r13")
+    parser.add_argument("--learned-value-model-path", default="")
+    parser.add_argument("--learned-value-device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument('--policy-prune-model-path', default='')
+    parser.add_argument('--policy-prune-k', type=int, default=6)
+    parser.add_argument('--policy-prune-device', choices=('cpu', 'cuda'), default='cpu')
+    parser.add_argument('--policy-prune-depths', choices=('root', 'all'), default='root')
     parser.add_argument("--micro-plan-rollout-leaves", type=int, default=4)
     parser.add_argument("--rollout-future-boxes", type=int, default=0)
     parser.add_argument("--rollout-future-samples", type=int, default=1)
     parser.add_argument("--free-sides-tiebreak", action="store_true")
     parser.add_argument("--free-sides-tolerance", type=float, default=0.0)
-    parser.add_argument("--rollout-prior", choices=("catalog", "uniform_types", "generic"), default="catalog")
+    parser.add_argument("--allow-oracle-leak", action="store_true",
+                        help="Allow deliberate future leakage for the oracle research bound")
+    parser.add_argument("--rollout-prior", choices=("catalog", "uniform_types", "generic", "oracle"), default="catalog")
     parser.add_argument("--micro-depth", type=int, default=3, help="Profundidad del micro-planner")
     parser.add_argument("--micro-width", type=int, default=8, help="Ancho del beam del micro-planner")
     parser.add_argument("--column-template", choices=("off", "w445", "w450", "w455", "auto", "adaptive"), default="off")
@@ -523,10 +532,18 @@ def run_simulation(
     micro_plan_value: str = "score",
     micro_plan_value_weight: float = 1.0,
     learned_value_weight: float = 1.0,
+    learned_value_model: str = 'r13',
+    learned_value_model_path: str = '',
+    learned_value_device: str = 'cpu',
+    policy_prune_model_path: str = '',
+    policy_prune_k: int = 6,
+    policy_prune_device: str = 'cpu',
+    policy_prune_depths: str = 'root',
     micro_plan_rollout_leaves: int = 4,
     rollout_future_boxes: int = 0,
     rollout_future_samples: int = 1,
     rollout_prior: str = "catalog",
+    allow_oracle_leak: bool = False,
     free_sides_tiebreak: bool = False,
     free_sides_tolerance: float = 0.0,
     micro_depth: int = 3,
@@ -724,10 +741,18 @@ def run_simulation(
             micro_plan_value=micro_plan_value,
             micro_plan_value_weight=micro_plan_value_weight,
             learned_value_weight=learned_value_weight,
+            learned_value_model=learned_value_model,
+            learned_value_model_path=learned_value_model_path,
+            learned_value_device=learned_value_device,
+            policy_prune_model_path=policy_prune_model_path,
+            policy_prune_k=policy_prune_k,
+            policy_prune_device=policy_prune_device,
+            policy_prune_depths=policy_prune_depths,
             micro_plan_rollout_leaves=micro_plan_rollout_leaves,
             rollout_future_boxes=rollout_future_boxes,
             rollout_future_samples=rollout_future_samples,
             rollout_prior=rollout_prior,
+            allow_oracle_leak=allow_oracle_leak,
             free_sides_tiebreak=free_sides_tiebreak,
             free_sides_tolerance=free_sides_tolerance,
             micro_plan_depth=int(micro_depth),
@@ -924,14 +949,24 @@ def run_simulation(
             "micro_plan": bool(micro_plan),
             "micro_plan_node_budget": micro_plan_node_budget,
             "micro_plan_hard_cap_ms": micro_plan_hard_cap_ms,
+            **(dict(policy_prune_model_path=str(Path(policy_prune_model_path).expanduser().resolve()),
+                    policy_prune_k=policy_prune_k, policy_prune_device=policy_prune_device,
+                    policy_prune_depths=policy_prune_depths,
+                    policy_prune_sha256=decision_policy._scheduler._g3_model.metadata['sha256'])
+               if policy_prune_model_path else {}),
+            **(decision_policy._scheduler.g1_metadata() if learned_value_model == "g1" else {}),
+            **({"learned_value_model_path": str(Path(learned_value_model_path).expanduser().resolve())}
+               if learned_value_model == "g1" else {}),
             "micro_plan_value": micro_plan_value,
             "micro_plan_value_weight": micro_plan_value_weight,
-            **({"learned_value_weight": learned_value_weight, "learned_model": "r13_generic_v1"}
+            **({"learned_value_weight": learned_value_weight, "learned_model": ("g1" if learned_value_model == "g1" else "r13_generic_v1")}
                if micro_plan_value in ("learned", "rollout+learned") else {}),
             "micro_plan_rollout_leaves": micro_plan_rollout_leaves,
             "rollout_future_boxes": rollout_future_boxes,
             "rollout_future_samples": rollout_future_samples,
             "rollout_prior": rollout_prior,
+            **({"allow_oracle_leak": True, "oracle_leak": True}
+               if rollout_prior == "oracle" else {}),
             "free_sides_tiebreak": free_sides_tiebreak,
             "free_sides_tolerance": free_sides_tolerance,
             "micro_depth": int(micro_depth),
@@ -1064,10 +1099,18 @@ def main() -> None:
         micro_plan_value=args.micro_plan_value,
         micro_plan_value_weight=args.micro_plan_value_weight,
         learned_value_weight=args.learned_value_weight,
+        learned_value_model=args.learned_value_model,
+        learned_value_model_path=args.learned_value_model_path,
+        learned_value_device=args.learned_value_device,
+        policy_prune_model_path=args.policy_prune_model_path,
+        policy_prune_k=args.policy_prune_k,
+        policy_prune_device=args.policy_prune_device,
+        policy_prune_depths=args.policy_prune_depths,
         micro_plan_rollout_leaves=args.micro_plan_rollout_leaves,
         rollout_future_boxes=args.rollout_future_boxes,
         rollout_future_samples=args.rollout_future_samples,
         rollout_prior=args.rollout_prior,
+        allow_oracle_leak=args.allow_oracle_leak,
         free_sides_tiebreak=args.free_sides_tiebreak,
         free_sides_tolerance=args.free_sides_tolerance,
         micro_depth=int(args.micro_depth),
@@ -1157,6 +1200,7 @@ def _build_placements_dump(*, decision_policy: Any | None, params: dict[str, Any
         except Exception:
             pallets = {}
     return {
+        **({"oracle_leak": True} if params.get("rollout_prior") == "oracle" else {}),
         "schema_version": 1,
         "git_head": _git_head(),
         "params": dict(params),

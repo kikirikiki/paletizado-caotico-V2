@@ -498,3 +498,98 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   Windows (`03_Software`): `disableClaudeAiConnectors: true`, `syncClaudeAiPlugins: false`, `syncClaudeAiSkills: false` y
   `frontend-design` y `claude-mem` desactivados. Se mantiene `headroom` (compresión de contexto). Surte efecto en sesiones nuevas.
   Si algún día hace falta un conector (p. ej. Docs), se reactiva quitando la clave.
+
+## D-039 · Investigación larga con GPU: fases, presupuestos y cortes (2026-10-21, ANTES de programar)
+- Contexto: el usuario elige la investigación larga (D-035) sin prisa, con la GPU y gestión estricta de cuotas (D-038). Catálogo
+  de ideas G0–G9 en RESEARCH §4. Rama `feat/investigacion-larga` sobre `feat/pulmon-staging` (wt2), PR borrador apilado sobre #164.
+- Reglas que no cambian: oficial `h6_sin_gate` (77,06 %) hasta que una candidata preregistrada pase D-016; D-022 (test de fuga),
+  D-032 (solo flujos sintéticos de un prior genérico o más amplio; nunca el Excel ni `out/` para entrenar), D-028 (determinismo;
+  sweeps con `micro_plan_hard_cap_ms: 600000`), D-007 (media ≤ 1 s, p95 ≤ 3 s en 1 proceso). El tiempo se mide **en CPU y en GPU**:
+  si solo cumple con GPU, se informa como **palanca de hardware** (GPU en la célula), aparte de la técnica de software.
+- Determinismo con redes: semillas fijas, `torch.use_deterministic_algorithms(True)`, cuDNN sin benchmark; la evaluación oficial
+  usa inferencia en CPU (float32, 1 hilo); la de GPU se compara con ella en 2 seeds y se informa si alguna decisión diverge.
+- Cuotas (D-038): Claude ≤ 50 % semanal para el estudio y pausa al 80 %; Codex ≤ 60 % semanal y ventana de 5 h ≤ 70 %
+  (`codex_job.sh` lo comprueba), `gpt-6.1-sol` esfuerzo `medium` (`high` solo núcleo algorítmico), nunca astra, un módulo por encargo.
+  Datos, entrenamientos, sweeps y smoke van en scripts de fondo con aviso al terminar. Gasto y logros en PROGRESS por fase.
+
+| Fase | Contenido | Presupuesto (Codex sem. / Claude sem. / máquina) | Criterio de corte |
+|---|---|---|---|
+| **A** | PyTorch+CUDA en `.venv` (hecho); G0 diagnóstico de margen (cómputo y oráculo de futuro, cotas CON FUGA, nunca candidatas); generador masivo de estados sintéticos con codificación para la red (G1b: on-policy con `h6_sin_gate` + prior jerárquico de familias) | ≤ 15 pp / ≤ 8 % / CPU 1–2 días | A termina con: datos ≥ 1 M estados, deterministas, tests D-022/D-032 en verde y throughput medido. Si el oráculo de G0(b) da < +1 pp sobre `h6_sin_gate` en 1001–1010 Y el cómputo de G0(a) < +0,5 pp, se replantea antes de B (el margen de un mejor valor dentro de esta búsqueda sería pequeño) |
+| **B** | G1 red de valor CNN entrenada en GPU + G2 inferencia por lotes en H5/H6 | ≤ 20 pp / ≤ 12 % / GPU ≤ 2 días | **≥ +1 pp** pareado sobre `h6_sin_gate` en 1001–1010 (0 cortes) cumpliendo D-007 en CPU o GPU. Si no: un único rediseño (etiquetas/arquitectura) y, si tampoco, se pasa a C solo si G0(b) mostró margen; si no, cierre con informe |
+| **C** | G6 destilación del profesor con futuro real y/o G4 expert iteration (G3 política/PUCT) | ≤ 25 pp / ≤ 15 % / GPU ≤ 5 días | cada iteración debe mejorar el KPI en flujos sintéticos reservados; se para tras 2 iteraciones sin mejora o al agotar el presupuesto; salida = ≥ +1 pp en 1001–1010 |
+| **D** | candidata preregistrada; referencia 10 seeds + réplica 20 (D-016); tiempo real CPU y GPU | ≤ 5 pp / ≤ 5 % / CPU ~2 h | se adopta solo si la pareada en la réplica es significativa (IC95 > 0) con 0 cortes |
+
+- G5 (simulador vectorizado en GPU) solo se abre si G0(a) muestra ≥ +1 pp con más cómputo, o para hacer implantable `ventana18`;
+  G8/G9 solo en CPU ociosa. Los presupuestos son por semana de cuota; si una fase cruza semanas, se reanuda desde CURRENT.md.
+- Contador anti-estancamiento: sigue en 9 (D-034); esta investigación no lo reinicia salvo adopción.
+- **Resultado G0 (2026-10-21, seeds 1001–1010, deterministas, 0 cortes; baseline idéntico dump a dump a `pulmon_tune`):**
+  | Cota | Pareada vs `h6_sin_gate` (76,33 %) |
+  |---|---|
+  | G0(a) cómputo b150_l4 | **+1,37 [0,21; 2,54] sig.** (≈ 2× tiempo) |
+  | G0(a) cómputo b400_l4 / b400_d4_l8 | +0,38 / −0,01 n.s. |
+  | G0(b) oráculo f6 (futuro real, mismo presupuesto) | +0,84 [−1,01; 2,69] n.s. |
+  | G0(b) oráculo f30 b400_l4 | +0,48 [−0,70; 1,66] n.s. |
+  Lectura: **conocer el futuro real apenas ayuda dentro de esta búsqueda** (el cuello de botella no es la información sino cómo
+  se valora la continuación: un escaneo greedy de las cajas futuras no explota ese conocimiento); algo de margen por cómputo, no
+  monótono. El corte de A no salta (cómputo ≥ +0,5). Consecuencias: B sigue (la red debe aprender las consecuencias a largo plazo
+  —pozos— que el escaneo greedy no ve; la inferencia por lotes puede pagar el ~2× de b150); en C, G6 con el oráculo de búsqueda
+  como profesor pierde interés (su cota es ≤ +0,8 pp): el profesor útil sería el planificador offline de columnas (81,45 %).
+  Fase A pendiente solo de la generación de datos (greedy mix 4000 + official mix 1500 episodios). Spec 25 (red, fase B) a Codex.
+- **Resultado fase B (2026-10-22): NO se cumple el corte → la red de valor no se adopta.** Red G1 (`models/g1_v1`, 15 epochs con
+  `--fast` en GPU, 716 k estados greedy + 139 episodios oficiales): test independiente MAE 4,22 pp, **R² 0,59** (R13: 0,34);
+  inferencia CPU 1 hilo, lote 64 = 76 ms. Pero en la búsqueda (`g1_tune_v1`, 1001–1010, 0 cortes): solo red b57 **−3,55
+  [−4,30; −2,79]**, b150 −2,79 (sig., peor); mezcla w0,5 −0,47, w1 −0,05 (n.s.); mezcla w1 b150_l4 +1,17 n.s. (≈ efecto del cómputo
+  de G0(a), no de la red). Estimar bien la utilización final no basta para ordenar opciones parecidas; con el oráculo de G0(b)
+  (+0,84 n.s.) como techo de "mejor información del futuro" en esta búsqueda, la red como **estimador de valor** se cierra. El único
+  rediseño permitido (D-039) se reorienta, de acuerdo con el usuario, a una **red de política/poda (G3)** que decida qué opciones
+  expandir (el cómputo sí ayuda, G0(a), y la poda no está acotada por el oráculo); se hará tras D-041 con los datos ya generados;
+  si no da ≥ +1 pp en ajuste, la línea de redes se cierra. Generación de datos oficiales detenida (139 episodios). GPU: Quadro RTX 4000 bajo WSL se queda en P8 aunque esté al 100 %
+  (~1,4 TFLOPS fp32 / ~3,8 fp16) pese a "máximo rendimiento", reloj fijado y reinicio; `--fast` (AMP, entrenamiento no
+  determinista; checkpoint fijado por SHA y evaluación determinista) = enmienda aceptada de D-028 solo para entrenar.
+
+## D-040 · Nuevo límite de tiempo real: media ≤ 3 s y p95 ≤ 7 s por decisión (instrucción del usuario, 2026-10-22)
+- Respuesta del usuario: se puede superar 1 s; más adelante se evaluará un PC más potente para bajarlo. Sustituye a D-007 para
+  las técnicas nuevas: **media ≤ 3,0 s y p95 ≤ 7,0 s** en un núcleo de esta workstation, sin carga (sigue ≥ 2× de margen sobre el
+  ciclo de robot de 14 s). Las cifras y decisiones anteriores no cambian.
+- La cinta con 18 visibles **no es posible físicamente** (usuario): `ventana18` queda como palanca informativa, no implantable.
+
+## D-041 · "Pensar más" (`computo_b150_l4`) como candidata preregistrada (2026-10-22, ANTES de evaluar)
+- Candidata = `h6_sin_gate` con `micro_plan_node_budget: 150` y `micro_plan_rollout_leaves: 4` (solo software, 15 visibles, sin red).
+  Ajuste G0(a): +1,37 [0,21; 2,54]; advertencia previa: b400_l4 (+0,38) y b400_d4_l8 (−0,01) no mejoran (paisaje no monótono) y
+  en este estudio las ganancias de ajuste suelen encogerse en la réplica → expectativa realista +0,5…+1 pp.
+- Regla (D-016/D-029/D-031/D-034/D-037): `configs/sweeps/computo_eval.yaml` = oficial + candidata, deterministas
+  (`micro_plan_hard_cap_ms: 600000`); referencia 10 seeds (`computo_ref`) + réplica 20 seeds (índices 10–29, `computo_replica`);
+  **se adopta como nueva oficial si la pareada en la réplica es significativa (IC95 > 0) con 0 cortes y cumple D-040** (medido en
+  1 proceso sin carga, seeds 1 y 42: `computo_timing`).
+- **Resultado (2026-10-22, deterministas, 0 cortes, oficiales reproducidas exactamente: 77,06 % / 76,21 %):**
+  | | Referencia (10) | Réplica (20) |
+  |---|---|---|
+  | `computo_b150_l4` − `h6_sin_gate` | +0,67 [−0,34; 1,68] | **+1,61 [0,81; 2,40] sig.** |
+  | KPI candidata | 77,74 % | 77,82 % |
+  Tiempo (1 proceso, sin carga, seeds 1 y 42): **1,79 s de media, p95 4,12 s** (oficial 0,91 / 2,05) → cumple D-040.
+  → **ADOPTADA: nueva oficial `computo_b150_l4` ("h7_computo")**: 30 seeds 77,79 % frente a 76,49 % (+1,30 pp). T2 (79,49 %)
+  sigue sin alcanzarse (faltan ~1,7 pp en referencia). Contador anti-estancamiento: 0. Siguiente (D-039): único rediseño de
+  red = red de política/poda G3 sobre la nueva oficial.
+- **Resultado G3 (rediseño único de D-039, 2026-10-24): NO se cumple el corte → se cierra la línea de redes.** Datos: 1 200
+  episodios `official_b150` (~220 k decisiones con candidatos); `PolicyNetG3` (25 k parámetros, 50 epochs `--fast`, ~16 h en la GPU
+  en P8): la elegida por la búsqueda está entre las 6 mejores de la red el 92 % de las veces (top-1 52 %, regret 0,47 pp). Sweep
+  `g3_tune_v1` (1001–1010, 0 cortes) frente a la oficial `computo_b150_l4`: raíz k6 −0,51; todos k6 −0,15; todos k4 −1,75;
+  todos k6 d4 −0,15 (idéntico a d3: el presupuesto de 150 nodos no llega a la profundidad 4); todos k6 b300 d4 −0,41; todas n.s.
+  Podar con la red no deja más margen útil: la búsqueda ya descarta bien las opciones malas, y lo que la limita es el valor de las
+  hojas (G0/G1). Balance de la investigación con GPU: la mejora adoptada viene del cómputo (D-041, +1,61 en réplica), no de las
+  redes. Datos y modelos se conservan fuera del repo (`data/`, `models/`).
+
+## D-042 · G6 (imitar al planificador offline de columnas): sin profesor en flujos sintéticos → cerrada (2026-10-24)
+- Petición del usuario: última apuesta larga, imitar el planificador offline de columnas (81,45 % en el flujo de referencia).
+- Pega previa: sus plantillas de columnas (`COLUMN_TEMPLATES`) son particiones fijas del suelo diseñadas para la familia dominante
+  del flujo de referencia (≈ 600 × 445 × 345). Por D-032 el alumno solo puede aprender en flujos sintéticos, así que el profesor
+  tiene que ser bueno ALLÍ.
+- Diagnóstico (`scripts/g6_teacher_diag.py`; 20 flujos sintéticos nuevos, seeds 900000–900009; columnas gap 0, plantillas 0–2,
+  ancho 8, 900 s CPU, R7; frente a la oficial `computo_b150_l4`; media de palets cerrados, excluido el último en ambos):
+  | Flujos | Offline columnas | Oficial online | Offline − online |
+  |---|---|---|---|
+  | genéricos (10) | 67,55 % | 74,41 % | **−6,85 pp** (sd 2,92) |
+  | familias (10) | 57,26 % | 57,58 % | −0,32 pp (sd 7,70) |
+- Conclusión: fuera del flujo para el que se diseñaron sus plantillas, el planificador offline es PEOR que el robot online; no hay
+  nada que imitar sin codificar medidas del flujo evaluado (prohibido, D-032; mismo motivo que H4 "por catálogo"). **G6 cerrada**
+  sin gastar cuota de Codex. Con esto la investigación larga con GPU (D-039) queda agotada: la mejora conseguida es D-041.
