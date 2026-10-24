@@ -22,6 +22,10 @@
   la búsqueda ya descarta bien; lo que limita es el valor de las hojas. Línea de redes cerrada.
   Imitar al planificador offline de columnas (G6) tampoco es viable: en flujos sintéticos rinde 6,9 pp MENOS que el robot
   online, porque sus plantillas están hechas a medida del flujo de referencia (D-042).
+- **Palanca de hardware confirmada (D-044): una garra que pueda colocar cajas en huecos más profundos.** Con la regla de acceso
+  ampliada de 400 a 800 mm: **79,15 % en la réplica (+1,33 pp, significativo)**, 79,06 % en 30 seeds; con 600 mm, +0,74 pp
+  (78,56 %). Ataca la causa principal de pérdida (pozos a media altura). Relajar la regla de apoyo (0,75/0,70) o imaginar más
+  futuros no aporta. Es la palanca física más clara después de la cinemática gantry (82 %).
 - **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
   de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
 - **Palancas de hardware nuevas (D-037):** un pulmón de 1–3 posiciones junto al palet **no mejora** (réplica +0,12 n.s.); en cambio,

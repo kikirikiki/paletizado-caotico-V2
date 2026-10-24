@@ -614,3 +614,12 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Regla (D-016/D-037): `configs/sweeps/acceso_eval.yaml` (oficial `computo_b150_l4` + `acceso600` + `acceso800`), deterministas;
   referencia 10 seeds (`acceso_ref`) + réplica 20 seeds (`acceso_replica`); cada palanca se confirma si la pareada en la réplica
   es significativa (IC95 > 0) con 0 cortes.
+- **Resultado (2026-10-24, deterministas, 0 cortes; la oficial reproduce 77,74 % / 77,82 %):**
+  | Palanca | Referencia (10) | Réplica (20) | KPI ref / réplica | 30 seeds |
+  |---|---|---|---|---|
+  | `acceso600` | +1,07 [−0,01; 2,15] | **+0,74 [0,10; 1,38] sig.** | 78,81 % / 78,56 % | 78,64 % (+0,85) |
+  | `acceso800` | +1,15 [−0,17; 2,47] | **+1,33 [0,79; 1,87] sig.** | 78,89 % / 79,15 % | 79,06 % (+1,27) |
+  → **PALANCA DE GARRA CONFIRMADA** (hardware: herramienta que pueda colocar en huecos de hasta 600/800 mm de profundidad
+  respecto a sus vecinas). La oficial de software sigue siendo `computo_b150_l4`. T2 (79,49 %) no se alcanza en referencia
+  (78,89 %). Columnas con memoria (idea 2) descartadas sin código: la plantilla H4 codifica medidas de la familia de referencia
+  (620/445/350 mm y filtro 550–620 × 400–500) y su versión genérica (H10) ya falló.
