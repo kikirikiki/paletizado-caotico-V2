@@ -578,3 +578,18 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   Podar con la red no deja más margen útil: la búsqueda ya descarta bien las opciones malas, y lo que la limita es el valor de las
   hojas (G0/G1). Balance de la investigación con GPU: la mejora adoptada viene del cómputo (D-041, +1,61 en réplica), no de las
   redes. Datos y modelos se conservan fuera del repo (`data/`, `models/`).
+
+## D-042 · G6 (imitar al planificador offline de columnas): sin profesor en flujos sintéticos → cerrada (2026-10-24)
+- Petición del usuario: última apuesta larga, imitar el planificador offline de columnas (81,45 % en el flujo de referencia).
+- Pega previa: sus plantillas de columnas (`COLUMN_TEMPLATES`) son particiones fijas del suelo diseñadas para la familia dominante
+  del flujo de referencia (≈ 600 × 445 × 345). Por D-032 el alumno solo puede aprender en flujos sintéticos, así que el profesor
+  tiene que ser bueno ALLÍ.
+- Diagnóstico (`scripts/g6_teacher_diag.py`; 20 flujos sintéticos nuevos, seeds 900000–900009; columnas gap 0, plantillas 0–2,
+  ancho 8, 900 s CPU, R7; frente a la oficial `computo_b150_l4`; media de palets cerrados, excluido el último en ambos):
+  | Flujos | Offline columnas | Oficial online | Offline − online |
+  |---|---|---|---|
+  | genéricos (10) | 67,55 % | 74,41 % | **−6,85 pp** (sd 2,92) |
+  | familias (10) | 57,26 % | 57,58 % | −0,32 pp (sd 7,70) |
+- Conclusión: fuera del flujo para el que se diseñaron sus plantillas, el planificador offline es PEOR que el robot online; no hay
+  nada que imitar sin codificar medidas del flujo evaluado (prohibido, D-032; mismo motivo que H4 "por catálogo"). **G6 cerrada**
+  sin gastar cuota de Codex. Con esto la investigación larga con GPU (D-039) queda agotada: la mejora conseguida es D-041.

@@ -20,6 +20,8 @@
   real dentro de la búsqueda tampoco (+0,8 n.s.). La cinta de 18 visibles no es posible físicamente.
   Una red de política que poda las opciones (G3, 92 % de acierto entre sus 6 mejores) tampoco mejora (−0,15 n.s.):
   la búsqueda ya descarta bien; lo que limita es el valor de las hojas. Línea de redes cerrada.
+  Imitar al planificador offline de columnas (G6) tampoco es viable: en flujos sintéticos rinde 6,9 pp MENOS que el robot
+  online, porque sus plantillas están hechas a medida del flujo de referencia (D-042).
 - **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
   de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
 - **Palancas de hardware nuevas (D-037):** un pulmón de 1–3 posiciones junto al palet **no mejora** (réplica +0,12 n.s.); en cambio,
