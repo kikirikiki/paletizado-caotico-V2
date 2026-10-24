@@ -593,3 +593,24 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
 - Conclusión: fuera del flujo para el que se diseñaron sus plantillas, el planificador offline es PEOR que el robot online; no hay
   nada que imitar sin codificar medidas del flujo evaluado (prohibido, D-032; mismo motivo que H4 "por catálogo"). **G6 cerrada**
   sin gastar cuota de Codex. Con esto la investigación larga con GPU (D-039) queda agotada: la mejora conseguida es D-041.
+
+## D-043 · El robot puede recordar las cajas que ya han pasado (respuesta del usuario, 2026-10-24)
+- Pregunta: ¿puede el sistema usar la memoria de las cajas ya vistas/paletizadas del propio flujo? Respuesta: sí ("¿por qué no
+  va a poder recordarlas?").
+- Interpretación: D-032 prohíbe el catálogo PREVIO y cualquier información de cajas que aún no han llegado; la historia observada
+  (cajas que ya entraron en la cinta) es información legítima. Se permite estimar online, a partir de esa historia, parámetros
+  geométricos (p. ej. la familia dominante y su ancho para columnas tipo H4, o el prior de los rollouts de H6).
+- Condiciones: test de fuga D-022 obligatorio (decisiones idénticas mientras las cajas cambiadas no hayan entrado en la cinta);
+  nada de la historia de OTROS flujos ni del Excel completo; el estimador se reinicia al empezar cada flujo.
+- Lote `lote_palancas` (2026-10-24, sobre `computo_b150_l4`, seeds 1001–1010): palancas físicas acceso 600/800 mm y apoyo
+  0,75/0,70 (se reportan aparte; decisión de ingeniería) y más futuros por hoja (s2, s4, f12_s2; software, candidatas posibles).
+- **Resultado `lote_palancas` (1001–1010, 0 cortes; oficial 77,70 %):** acceso800 **+1,50 [0,56; 2,44] sig.** (79,20 %);
+  acceso600 +1,00 [−0,09; 2,10] (78,71 %); apoyo075 +0,00, apoyo070 +0,31; futuros s2 +0,49, s4 −0,67, f12_s2 −0,91 (todas n.s.).
+  → apoyo y más futuros, sin efecto (cerradas); la garra con acceso más profundo es monótona y fuerte.
+
+## D-044 · Palanca de garra: acceso 600 y 800 mm preregistrados (2026-10-24, ANTES de referencia y réplica)
+- PALANCA DE HARDWARE (diseño de garra/herramienta que pueda bajar a huecos más profundos que 400 mm respecto a sus vecinas):
+  se reporta aparte y no cambia la oficial de software salvo decisión del usuario.
+- Regla (D-016/D-037): `configs/sweeps/acceso_eval.yaml` (oficial `computo_b150_l4` + `acceso600` + `acceso800`), deterministas;
+  referencia 10 seeds (`acceso_ref`) + réplica 20 seeds (`acceso_replica`); cada palanca se confirma si la pareada en la réplica
+  es significativa (IC95 > 0) con 0 cortes.

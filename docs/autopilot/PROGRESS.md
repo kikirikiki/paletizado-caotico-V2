@@ -133,6 +133,7 @@ Fases A–D y cortes en D-039; ideas G0–G9 en RESEARCH §4.
 | 2026-10-22 | D | **D-041 `computo_b150_l4` ADOPTADA**: referencia +0,67 n.s. (77,74 %); **réplica +1,61 [0,81; 2,40] sig.** (77,82 %); 0 cortes; 1,79 s / p95 4,12 s (D-040). Nueva oficial: 77,79 % en 30 seeds (+1,30) | ~17 % | 49 % / — |
 | 2026-10-24 | C | G3 red de política/poda (spec 27/28): datos 1 200 episodios, red top-6 92 %; **`g3_tune_v1` todas n.s. (−0,15…−1,75)** → corte no cumplido; línea de redes cerrada (D-039) | ~22 % | ~3 % / — |
 | 2026-10-24 | C | **G6 diagnóstico (D-042)**: en flujos sintéticos el offline de columnas es peor que la oficial (genéricos −6,85 pp; familias −0,32): sus plantillas son del flujo de referencia → sin profesor, G6 cerrada sin código | ~24 % | ~3 % / — |
+| 2026-10-24 | — | D-043 memoria de cajas vistas permitida. **`lote_palancas`**: garra acceso800 **+1,50 sig.** (79,20 %), acceso600 +1,00; apoyo 0,75/0,70 y más futuros n.s. D-044 preregistra la palanca de garra | ~26 % | ~3 % / — |
 
 Comandos (wt2): `WT=$(pwd) bash scripts/autopilot/codex_job.sh 24_fase_a_datos gpt-6.1-sol medium docs/autopilot/specs/24_fase_a_datos_valor.md`;
 `run_sweep.py --configs configs/sweeps/g0_margen.yaml --seed-list 1001,…,1010 --workers 12 --name g0_margen_computo --baseline h6_sin_gate`.
