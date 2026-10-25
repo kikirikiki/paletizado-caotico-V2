@@ -120,7 +120,30 @@ Pendientes con Codex (≥ 00:02), en orden: **09 H4 plantilla de columnas online
 - `stand_hl` (PR #139) duplica `stand_hw` (D-004). Gate stand_hw no es palanca. Simulador determinista.
 - H1: banda 200 mm empeora; banda ≥ 445 mejora; paisaje plano con ruido ~2 pp/seed.
 
-## Siguiente acción (vigente, 2026-10-21 tarde)
+## Investigación larga con GPU (D-039; rama `feat/investigacion-larga`, PR borrador #165 sobre #164, wt2)
+Fases A–D y cortes en D-039; ideas G0–G9 en RESEARCH §4.
+
+| Fecha | Fase | Hecho | Claude semanal | Codex semanal / 5 h |
+|---|---|---|---|---|
+| 2026-10-21 | A | D-039 + catálogo; PyTorch 2.11+cu128 en `.venv` (RTX 4000 sm_75, conv determinista); spec 24 (generador de datos) a Codex; sweep G0(a) `g0_margen_computo` (57/150/400 nodos, 1001–1010, 12 workers) | 4 % → ver siguiente fila | 44 % / 17 % al empezar |
+| 2026-10-21 | A | Codex 24 (generador G1, 11 tests) y 24a (oráculo, equivalencia de dumps 50021/1 OK; D-022 detecta la fuga); **G0(a) `g0_margen_computo`** (determinista, baseline idéntico a `pulmon_tune`): b150_l4 **+1,37 [0,21; 2,54] sig.**, b400_l4 +0,38 n.s., b400_d4_l8 −0,01 n.s. → algo de margen por cómputo, no monótono (ruido del valor por rollout); throughput: greedy ~8,5 k estados/h/worker, oficial ~1 k con carga | 4–6 % | 45 % / 24 % |
+| 2026-10-21 | A | **G0(b) `g0_oraculo`**: oráculo f6 +0,84 [−1,01; 2,69] n.s.; f30 b400_l4 +0,48 [−0,70; 1,66] n.s. → saber el futuro real apenas ayuda en esta búsqueda (D-039); corte de A no salta. Smoke OK, commits d64856d/560ce37. Spec 25 (red de valor) a Codex; generación de datos en marcha | ~7 % | 45 % / 24 % |
+| 2026-10-21 | B | Codex 25: `ValueNetG1` (CNN 5 capas + DeepSets, 148 770 parámetros) y `train_value_g1.py` (partición fija por episodio, guardas D-032). Comprobado en GPU por el director: pesos idénticos en dos entrenamientos CUDA, CPU vs GPU ≤ 6e-8; latencia con la CPU saturada (lote 64): GPU 56 ms, CPU 1 hilo 397 ms (D-007 se medirá sin carga) | ~8 % | 46 % / 0 % |
+| 2026-10-22 | B | Red G1 entrenada (`--fast`, 15 epochs, ~3 h; GPU atascada en P8 bajo WSL): test R² 0,59, MAE 4,22 pp. **`g1_tune_v1`**: solo red −3,55 / −2,79 sig.; mezclas −0,47 / −0,05 n.s.; mezcla b150_l4 +1,17 n.s. → **corte de B no cumplido**; único rediseño → red de política/poda (G3) tras D-041 (D-039). D-040: límite 3 s / 7 s; 18 visibles imposible. D-041: candidata `computo_b150_l4` preregistrada | ~15 % | 49 % / — |
+| 2026-10-22 | D | **D-041 `computo_b150_l4` ADOPTADA**: referencia +0,67 n.s. (77,74 %); **réplica +1,61 [0,81; 2,40] sig.** (77,82 %); 0 cortes; 1,79 s / p95 4,12 s (D-040). Nueva oficial: 77,79 % en 30 seeds (+1,30) | ~17 % | 49 % / — |
+| 2026-10-24 | C | G3 red de política/poda (spec 27/28): datos 1 200 episodios, red top-6 92 %; **`g3_tune_v1` todas n.s. (−0,15…−1,75)** → corte no cumplido; línea de redes cerrada (D-039) | ~22 % | ~3 % / — |
+| 2026-10-24 | C | **G6 diagnóstico (D-042)**: en flujos sintéticos el offline de columnas es peor que la oficial (genéricos −6,85 pp; familias −0,32): sus plantillas son del flujo de referencia → sin profesor, G6 cerrada sin código | ~24 % | ~3 % / — |
+| 2026-10-24 | — | D-043 memoria de cajas vistas permitida. **`lote_palancas`**: garra acceso800 **+1,50 sig.** (79,20 %), acceso600 +1,00; apoyo 0,75/0,70 y más futuros n.s. D-044 preregistra la palanca de garra | ~26 % | ~3 % / — |
+| 2026-10-24 | D | **D-044 palanca de garra CONFIRMADA**: réplica acceso800 **+1,33 [0,79; 1,87]** (79,15 %), acceso600 +0,74 [0,10; 1,38]; 30 seeds 79,06 % / 78,64 % frente a 77,79 % | ~28 % | ~3 % / — |
+| 2026-10-25 | — | **ESTUDIO CERRADO (D-045)**: INFORME final (oficial "pensar más" 77,8 %; garra de acceso profundo hasta 79,1 %; GPU sin ganancia) | ~30 % | ~3 % / — |
+
+Comandos (wt2): `WT=$(pwd) bash scripts/autopilot/codex_job.sh 24_fase_a_datos gpt-6.1-sol medium docs/autopilot/specs/24_fase_a_datos_valor.md`;
+`run_sweep.py --configs configs/sweeps/g0_margen.yaml --seed-list 1001,…,1010 --workers 12 --name g0_margen_computo --baseline h6_sin_gate`.
+En marcha: sweep `g0_oraculo` (G0(b), `configs/sweeps/g0_oraculo.yaml`); después, generación grande
+(`gen_value_data.py`: greedy mix 4000 episodios → `data/g1_v1_greedy`; official mix 1500 → `data/g1_v1_official`, 15 workers).
+Siguiente: con G0(a)+G0(b) aplicar el corte de A (D-039) y escribir la spec de la fase B (red de valor CNN en GPU).
+
+## Siguiente acción (anterior, 2026-10-21 tarde)
 1. (hecho) D-036 modelo del pulmón; Codex 23 (+23b regresión de tests) lo implementa (desactivado por defecto, dumps idénticos,
    test de fuga, 0,96 s/decisión con K=3). `codex_quota.sh` corregido (D-027, enmienda).
 2. (hecho) Ajuste `pulmon_tune`, preregistro D-037, `pulmon_ref` + `pulmon_replica`: pulmón no adoptado; ventana18 confirmada en KPI.
