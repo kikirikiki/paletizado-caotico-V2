@@ -135,6 +135,7 @@ Fases A–D y cortes en D-039; ideas G0–G9 en RESEARCH §4.
 | 2026-10-24 | C | **G6 diagnóstico (D-042)**: en flujos sintéticos el offline de columnas es peor que la oficial (genéricos −6,85 pp; familias −0,32): sus plantillas son del flujo de referencia → sin profesor, G6 cerrada sin código | ~24 % | ~3 % / — |
 | 2026-10-24 | — | D-043 memoria de cajas vistas permitida. **`lote_palancas`**: garra acceso800 **+1,50 sig.** (79,20 %), acceso600 +1,00; apoyo 0,75/0,70 y más futuros n.s. D-044 preregistra la palanca de garra | ~26 % | ~3 % / — |
 | 2026-10-24 | D | **D-044 palanca de garra CONFIRMADA**: réplica acceso800 **+1,33 [0,79; 1,87]** (79,15 %), acceso600 +0,74 [0,10; 1,38]; 30 seeds 79,06 % / 78,64 % frente a 77,79 % | ~28 % | ~3 % / — |
+| 2026-10-25 | — | **ESTUDIO CERRADO (D-045)**: INFORME final (oficial "pensar más" 77,8 %; garra de acceso profundo hasta 79,1 %; GPU sin ganancia) | ~30 % | ~3 % / — |
 
 Comandos (wt2): `WT=$(pwd) bash scripts/autopilot/codex_job.sh 24_fase_a_datos gpt-6.1-sol medium docs/autopilot/specs/24_fase_a_datos_valor.md`;
 `run_sweep.py --configs configs/sweeps/g0_margen.yaml --seed-list 1001,…,1010 --workers 12 --name g0_margen_computo --baseline h6_sin_gate`.

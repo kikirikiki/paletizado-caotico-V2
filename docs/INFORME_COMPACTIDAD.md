@@ -1,38 +1,30 @@
 # Informe de compactidad — paletizado caótico con robot de 6 ejes
 
-> **Borrador en curso** (autopiloto, actualizado el 2026-10-21). Cada cifra tiene su comando de reproducción en
+> **Versión final — estudio cerrado el 2026-10-25** (D-045). Cada cifra tiene su comando de reproducción en
 > `docs/autopilot/PROGRESS.md`; las decisiones están en `docs/autopilot/DECISIONS.md`.
 
 ## 1. Resumen ejecutivo
 - **Configuración objetivo:** robot articulado de 6 ejes, `arm6_4orient`: 4 orientaciones (nunca apoyado en la cara Alto × Largo),
-  accesibilidad de 400 mm y soporte ≥ 0,85. El robot solo ve las 15 cajas de la cinta (D-022).
+  accesibilidad de 400 mm (con la excepción R7) y soporte ≥ 0,85. El robot solo ve las 15 cajas de la cinta (D-022), sin catálogo
+  previo (D-032); puede recordar las cajas que ya han pasado (D-043).
 - **KPI congelado (v1.0.0):** volumen real de las cajas de los palets cerrados / (nº palets cerrados × 1240 × 840 × 2400 mm).
-- **Baseline re-medido: 61,89 % ± 1,32.** Las cifras históricas (64,6 % brazo, 72,1 % gantry) usaban un volumen medio supuesto y una
-  envolvente errónea (1240 × 820); además, el "stand_hl" de aquel estudio era un duplicado de "stand_hw".
-- **Techo alcanzable offline (información completa): 81,45 %**, en 9 palets; igual con la regla de acceso R7. Gap = 19,56 pp.
+- **Baseline re-medido: 61,89 % ± 1,32.** Techo alcanzable offline (información completa, plantillas a medida del flujo): **81,45 %**.
   Metas: **T1 ≥ 71,67 %**, **T2 ≥ 79,49 %**, **T3 ≥ 92,84 %**.
-- **Mejor resultado online: 77,06 % ± 0,90** (H1+H3+H5+H6, sin gate de cajas de pie): **+15,2 pp sobre el baseline, 77,6 % del gap
-  → T1 alcanzado sin condiciones.** Réplica en 20 seeds nuevas: 76,21 %. Tiempo real: 0,957 s/decisión de media, p95 2,36 s.
-- **Nueva oficial (2026-10-22, D-040/D-041): "pensar más"**, la misma búsqueda con 150 nodos y 4 hojas en lugar de 57 y 2:
-  **77,74 % en referencia y 77,82 % en la réplica (+1,61 pp significativo)**, 1,79 s/decisión de media (p95 4,12 s), dentro del
-  nuevo límite de tiempo del usuario (media ≤ 3 s, p95 ≤ 7 s; con un PC más potente se podrá bajar). Investigación con GPU (D-039):
-  una red de valor entrenada con 716 k estados sintéticos estima bien (R² 0,59) pero no mejora las decisiones; saber el futuro
-  real dentro de la búsqueda tampoco (+0,8 n.s.). La cinta de 18 visibles no es posible físicamente.
-  Una red de política que poda las opciones (G3, 92 % de acierto entre sus 6 mejores) tampoco mejora (−0,15 n.s.):
-  la búsqueda ya descarta bien; lo que limita es el valor de las hojas. Línea de redes cerrada.
-  Imitar al planificador offline de columnas (G6) tampoco es viable: en flujos sintéticos rinde 6,9 pp MENOS que el robot
-  online, porque sus plantillas están hechas a medida del flujo de referencia (D-042).
-- **Palanca de hardware confirmada (D-044): una garra que pueda colocar cajas en huecos más profundos.** Con la regla de acceso
-  ampliada de 400 a 800 mm: **79,15 % en la réplica (+1,33 pp, significativo)**, 79,06 % en 30 seeds; con 600 mm, +0,74 pp
-  (78,56 %). Ataca la causa principal de pérdida (pozos a media altura). Relajar la regla de apoyo (0,75/0,70) o imaginar más
-  futuros no aporta. Es la palanca física más clara después de la cinemática gantry (82 %).
-- **T2 no se alcanza** (faltan 2,4 pp). Desde el 77,06 % se han probado y descartado ocho líneas más (sección 5), con tres ciclos
-  de pensamiento lateral: **77,06 % es el límite práctico medido con software para esta célula viendo 15 cajas** (D-035).
-- **Palancas de hardware nuevas (D-037):** un pulmón de 1–3 posiciones junto al palet **no mejora** (réplica +0,12 n.s.); en cambio,
-  **ver 18 cajas en la cinta en vez de 15 sí: +1,57 pp en la réplica (significativo), 77,7 % en 30 seeds**, aunque hoy tarda
-  ~1,2× más por decisión y hay que optimizarlo para cumplir el tiempo real.
-- **T3 (+50 %) no se alcanza.** Las cotas formales relajadas no lo descartan, y el techo alcanzable queda 11,4 pp por debajo
-  (refutación empírica, D-010).
+- **Resultado final de software (oficial, D-041): "pensar más"** = H1+H3+H5+H6 sin gate de cajas de pie, con la búsqueda ampliada
+  a 150 nodos y 4 hojas: **77,74 % en las 10 seeds de referencia y 77,82 % en la réplica de 20 seeds nuevas** (77,79 % en 30 seeds).
+  **+15,9 pp sobre el baseline (≈ 81 % del gap); T1 alcanzado.** Tiempo real: 1,79 s/decisión de media, p95 4,12 s, dentro del
+  límite fijado por el usuario (media ≤ 3 s, p95 ≤ 7 s, D-040; con un PC más potente se podrá bajar). Determinista, 0 cortes,
+  test de fuga superado.
+- **Mejor palanca de hardware para el brazo (D-044): garra que pueda colocar cajas en huecos más profundos.** Ampliando el acceso
+  de 400 a **800 mm: 78,89 % ref. / 79,15 % réplica (+1,33 pp significativo), 79,06 % en 30 seeds**; con 600 mm, +0,74 pp
+  (78,64 % en 30 seeds). Ataca la causa principal de pérdida (pozos a media altura).
+- **T2 no se alcanza con el brazo:** el mejor resultado en referencia es 78,89 % (garra de 800 mm), a 0,6 pp. Solo otra cinemática
+  la supera (gantry de 6 orientaciones: 82,0 % medido). **T3 no se alcanza** (refutación empírica, D-010).
+- **Investigación larga con GPU (D-039–D-042), sin ganancia adicional:** una red de valor entrenada con 716 k estados sintéticos
+  (R² 0,59) y una red de política/poda (92 % de acierto entre sus 6 mejores) no mejoran las decisiones; ni siquiera conocer el
+  futuro real dentro de la búsqueda (+0,8 n.s.). El límite está en cómo valora la búsqueda la continuación de cada opción.
+  Imitar al planificador offline tampoco es viable: en flujos sintéticos rinde 6,9 pp menos que el robot, porque sus plantillas
+  están hechas para el flujo de referencia. La mejora adoptada vino de dar más cálculo a la búsqueda.
 
 ## 2. Datos y parámetros
 Ver `docs/PARAMETROS.md`. 186 cajas, 111 referencias distintas, Σ vol = 16,79 m³ (mínimo trivial: 7 palets). Familia dominante
@@ -81,40 +73,50 @@ más de 400 mm (regla R7, D-026).
 | H10 columnas adaptativas (solo 15 visibles) | −0,4…−2,1 (ajuste) | — | — | descartada |
 | R13 valor de estado aprendido (flujos sintéticos) | réplica +0,78 [−0,13; 1,69] n.s. | — | — | descartada (D-034) |
 | Re-ajuste de mandos existentes / gate solo | 0 / n.s. | — | — | descartadas |
+| **"Pensar más": búsqueda con 150 nodos y 4 hojas (D-041)** | ref. +0,67 n.s.; **réplica +1,61 [0,81; 2,40]** | **77,74 % (réplica 77,82 %)** | **81 %** | **adoptada (oficial final)** |
+| Más futuros por hoja (2/4 muestras, 12 cajas) | +0,49 / −0,67 / −0,91 n.s. (ajuste) | — | — | descartada |
+| Red de valor CNN en GPU (G1, D-039) | sola −3,55 (sig.); mezclada −0,05 n.s. (ajuste) | — | — | descartada |
+| Red de política / poda (G3, D-039) | −0,15…−1,75 n.s. (ajuste) | — | — | descartada |
+| Imitar al planificador offline (G6, D-042) | profesor −6,85 pp en flujos sintéticos | — | — | descartada sin implementar |
+| Columnas con memoria de cajas vistas (D-043/D-044) | — | — | — | descartada sin implementar (plantilla H4 = medidas de la familia de referencia) |
 
 La ventaja de la búsqueda solo usa las 15 cajas visibles (test de fuga, D-022). Es determinista: todas las cifras de evaluación se
-miden sin cortes de reloj (D-028). Tiempo por decisión de la mejor configuración, en un proceso: 0,957 s de media, p95 2,36 s.
+miden sin cortes de reloj (D-028). Tiempo por decisión de la oficial final, en un proceso: 1,79 s de media, p95 4,12 s (la anterior,
+57 nodos: 0,957 s / 2,36 s).
 
-## 6. Palancas operativas y de hardware (sobre la mejor configuración salvo indicación)
+## 6. Palancas operativas y de hardware (sobre la oficial de cada momento)
 | Palanca | KPI | Δ | Implicación |
 |---|---|---|---|
-| Columnas online con ancho fijado por catálogo (H4, 455 mm) | 77,30 % (30 seeds) | +0,81 (réplica +1,38 [0,48; 2,29]) | exige conocer de antemano la familia dominante; **no implantable**: no hay catálogo previo (D-032); sin ese dato empeora (−2,6) |
-| Garra de canto | 77,76 % | +0,70 | cambio de garra; ~1,6 s/decisión; no justifica la inversión |
-| **Cinta con 18 cajas visibles (+3, D-037)** | **77,68 % (ref.); 77,74 % (30 seeds)** | +0,61 n.s. ref.; **réplica +1,57 [0,67; 2,46]** | **única palanca de la célula brazo confirmada**; ~1,23× tiempo por decisión: hay que optimizar para cumplir ≤ 1 s |
-| Pulmón físico de 1–3 posiciones junto al palet (D-036/D-037) | 76,67 % (ref.) | −0,39 n.s.; réplica +0,12 n.s. | no compensa: reservar cajas estrechas no rellena el hueco trasero |
-| Buffer ×2 / ×5 (medido sobre H1+H3+H5, sin réplica) | +0,87 / +0,53 n.s. | — | superado por la medición de la cinta de 18 sobre la oficial |
-| Secuenciación aguas arriba | −0,81 n.s. | — | no compensa pedirla al almacén |
-| Palets por familia (2 posiciones) | −0,74 n.s. | — | no compensa una segunda posición |
+| **Garra con acceso a huecos de hasta 800 mm (D-044)** | **78,89 % ref. / 79,15 % réplica; 79,06 % (30 seeds)** | **réplica +1,33 [0,79; 1,87]** | **la palanca más clara para el brazo**; requiere una herramienta que baje a pozos profundos sin colisionar |
+| Garra con acceso a 600 mm (D-044) | 78,81 % ref. / 78,56 % réplica | réplica +0,74 [0,10; 1,38] | versión intermedia, también confirmada |
+| Regla de apoyo 0,75 / 0,70 (en lugar de 0,85) | 77,70 % / 78,01 % (ajuste) | +0,00 / +0,31 n.s. | no compensa relajar la estabilidad |
+| Cinta con 18 cajas visibles (D-037) | 77,74 % (30 seeds, sobre la oficial anterior) | réplica +1,57 [0,67; 2,46] | **no es posible físicamente** (usuario, D-040) |
+| Columnas con ancho fijado por catálogo (H4, 455 mm) | 77,30 % (30 seeds) | réplica +1,38 | no implantable: no hay catálogo previo (D-032) |
+| Garra de canto | 77,76 % | +0,70 | no justifica la inversión |
+| Pulmón físico de 1–3 posiciones (D-036/D-037) | 76,67 % (ref.) | réplica +0,12 n.s. | no compensa |
+| Secuenciación aguas arriba / palets por familia | −0,81 / −0,74 n.s. | — | no compensan |
 | Gantry 4 orient. (contraste) | 79,29 % | +2,23 | otra cinemática |
 | Gantry 6 orient. (contraste) | 82,00 % | +4,94 | otra cinemática y garra |
 
-La única palanca que supera T2 es cambiar de cinemática (gantry), que no es la célula objetivo. Con el brazo, la cinta de 18 visibles
-recorta el gap a T2 de 2,4 a ~1,8 pp (77,7 %), sin alcanzarlo.
+Con el brazo, la garra de acceso profundo deja el resultado a 0,6 pp de T2 en referencia; solo la gantry supera T2.
 
 ## 7. Riesgos y preguntas abiertas
 - **D-015:** la regla de accesibilidad solo considera vecinas las cajas que se tocan. El responsable confirma que las cajas pueden ir
-  pegadas (D-024); conviene validar con ROBOGUIDE las trayectorias junto a vecinas pegadas.
-- **Laterales libres (D-024):** la configuración recomendada ya coloca el 94,7 % de las cajas en huecos con 3–4 laterales libres y
-  ninguna en un hueco cerrado.
+  pegadas (D-024); conviene validar con ROBOGUIDE las trayectorias junto a vecinas pegadas, y con la garra de acceso profundo, las
+  bajadas a pozos de 600–800 mm.
+- **Laterales libres (D-024):** la configuración recomendada coloca casi todas las cajas en huecos con 3–4 laterales libres.
+- **Tiempo de cálculo:** la oficial necesita ~1,8 s/decisión (p95 4,1 s) en esta workstation; el ciclo del robot es de 14 s. Un PC
+  más potente permitiría bajarlo; más cálculo por sí solo no da más compactación (400 nodos no mejoran).
+- **GPU:** la Quadro RTX 4000 bajo WSL se queda en estado de reposo (P8) aunque trabaje al 100 % (~1,4 TFLOPS fp32), pese al modo de
+  máximo rendimiento, el reloj fijado y un reinicio. No afecta a la implantación (la oficial no usa redes ni GPU).
 
-## 8. Recomendación de implantación (provisional)
-1. Implantar **H1+H3+H5+H6 sin gate** (77,06 %, +15,2 pp sobre el baseline; 9,0 palets por flujo de 186 cajas frente a 11,1, un 19 %
-   menos), validando con ROBOGUIDE las trayectorias junto a vecinas pegadas.
-2. No invertir en garra de canto, en un pulmón junto al palet, en secuenciación aguas arriba ni en una segunda posición de palet: con
-   la búsqueda no aportan. Sí merece estudio una cinta/visión con 18 cajas visibles (+1,57 pp confirmados), si se optimiza la búsqueda
-   para mantener ≤ 1 s por decisión.
-3. Lo que queda hasta T2 (~3,5 pp de pozos a media altura, RESEARCH R12) se crea con información que el robot aún no ve. Ver algunas cajas
-   más sí ayuda (cinta de 18 visibles: +1,57 pp en la réplica, D-037), pero no basta para T2 y exige optimizar el tiempo; guardar
-   cajas en un pulmón no ayuda (D-037), y tampoco una función de valor ligera entrenada con flujos sintéticos (R13). Con software y esta
-   célula, 77,06 % es el límite práctico medido. Superar T2 exige otra cinemática (gantry: 82,0 % medido) o una investigación larga
-   (RL / MCTS con valor entrenado a gran escala) sin garantía de resultado.
+## 8. Recomendación de implantación (final)
+1. Implantar la oficial **"pensar más"** (H1+H3+H5+H6 sin gate, 150 nodos y 4 hojas): **77,8 %** frente al 61,9 % del baseline, unos
+   8–9 palets por flujo de 186 cajas en lugar de 11, con 1,8 s de cálculo por decisión. Validar con ROBOGUIDE las trayectorias junto
+   a vecinas pegadas.
+2. **Estudiar una garra o herramienta que coloque cajas en huecos de hasta 600–800 mm de profundidad** respecto a sus vecinas:
+   +0,7 a +1,3 pp confirmados (hasta ~79,1 %). Es la única mejora física del brazo que ha salido significativa en la réplica.
+3. No invertir en: pulmón junto al palet, segunda posición de palet, secuenciación aguas arriba, garra de canto, relajar la regla de
+   apoyo ni, por ahora, en redes neuronales o GPU para la célula: ninguna aporta.
+4. Para superar T2 hace falta otra cinemática (gantry: 82,0 % medido).
+

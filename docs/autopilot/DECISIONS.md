@@ -623,3 +623,12 @@ para la trazabilidad. Cada una: contexto → opción elegida → justificación.
   respecto a sus vecinas). La oficial de software sigue siendo `computo_b150_l4`. T2 (79,49 %) no se alcanza en referencia
   (78,89 %). Columnas con memoria (idea 2) descartadas sin código: la plantilla H4 codifica medidas de la familia de referencia
   (620/445/350 mm y filtro 550–620 × 400–500) y su versión genérica (H10) ya falló.
+
+## D-045 · Cierre del estudio (instrucción del usuario, 2026-10-25)
+- El usuario cierra el estudio tras D-044.
+- Resultado final: oficial de software `computo_b150_l4` (D-041): 77,74 % ref. / 77,82 % réplica (77,79 % en 30 seeds), 1,79 s/decisión.
+  Palanca de hardware confirmada: garra de acceso profundo (D-044), 800 mm → 79,15 % réplica (79,06 % en 30 seeds); 600 mm → 78,56 %.
+  T1 alcanzado; T2 no con el brazo (78,89 % en referencia con la garra de 800 mm); T3 no.
+- Investigación con GPU (D-039–D-042) sin ganancia adicional: redes de valor y de política, oráculo de futuro e imitación del
+  planificador offline. Datos y modelos conservados fuera del repo (`~/code/Paletizador/09_Software/{data,models}`).
+- PRs en borrador, sin merge: la pila termina en #165 (`feat/investigacion-larga`). Informe final: `docs/INFORME_COMPACTIDAD.md`.
