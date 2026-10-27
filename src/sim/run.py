@@ -133,6 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--balance-weight", type=float, default=0.0, help="Peso del balance en score")
     parser.add_argument("--accessibility-delta-mm", type=int, default=0,
                         help="Delta mm para RobotAccessibilityControl (0=desactivado)")
+    parser.add_argument("--accessibility-tall-box-exemption", action="store_true")
+    parser.add_argument("--accessibility-top-clearance-mm", type=int, default=0)
+    parser.add_argument("--access-debt-exempt-delta-mm", type=int, default=750)
+    parser.add_argument("--dead-headroom-weight", type=float, default=0.0)
+    parser.add_argument("--dead-headroom-min-mm", type=int, default=250)
     parser.add_argument("--coverage-grid-x", type=int, default=0, help="Grid X para coverage control (0 deshabilita)")
     parser.add_argument("--coverage-grid-y", type=int, default=0, help="Grid Y para coverage control (0 deshabilita)")
     parser.add_argument("--coverage-weight", type=float, default=0.0, help="Peso coverage control (0 deshabilita)")
@@ -462,6 +467,8 @@ def run_simulation(
     priority_weight: float = 1.0,
     balance_weight: float = 0.0,
     accessibility_delta_mm: int = 0,
+    accessibility_tall_box_exemption: bool = False,
+    accessibility_top_clearance_mm: int = 0,
     coverage_grid_x: int = 0,
     coverage_grid_y: int = 0,
     coverage_weight: float = 0.0,
@@ -472,6 +479,9 @@ def run_simulation(
     access_debt_weight: float = 0.0,
     access_debt_band_mm: int = 300,
     access_debt_mode: str = "penalty",
+    access_debt_exempt_delta_mm: int = 750,
+    dead_headroom_weight: float = 0.0,
+    dead_headroom_min_mm: int = 250,
     tower_z_band_mm: int = 0,
     tower_z_penalty_weight: float = 0.0,
     spatial_xy_bin_mm: int = 150,
@@ -705,6 +715,8 @@ def run_simulation(
             loadbear_factor=loadbear_factor,
             balance_weight=balance_weight,
             accessibility_delta_mm=max(0, int(accessibility_delta_mm)),
+            accessibility_tall_box_exemption=accessibility_tall_box_exemption,
+            accessibility_top_clearance_mm=int(accessibility_top_clearance_mm),
             coverage_grid_x=int(coverage_grid_x),
             coverage_grid_y=int(coverage_grid_y),
             coverage_weight=float(coverage_weight),
@@ -715,6 +727,9 @@ def run_simulation(
             access_debt_weight=access_debt_weight,
             access_debt_band_mm=access_debt_band_mm,
             access_debt_mode=access_debt_mode,
+            access_debt_exempt_delta_mm=access_debt_exempt_delta_mm,
+            dead_headroom_weight=dead_headroom_weight,
+            dead_headroom_min_mm=dead_headroom_min_mm,
             tower_z_band_mm=max(0, int(tower_z_band_mm)),
             tower_z_penalty_weight=max(0.0, float(tower_z_penalty_weight)),
             spatial_xy_bin_mm=max(1, int(spatial_xy_bin_mm)),
@@ -831,6 +846,8 @@ def run_simulation(
             "priority_weight": priority_weight,
             "balance_weight": balance_weight,
             "accessibility_delta_mm": int(max(0, int(accessibility_delta_mm))),
+            "accessibility_tall_box_exemption": bool(accessibility_tall_box_exemption),
+            "accessibility_top_clearance_mm": int(accessibility_top_clearance_mm),
             "coverage_grid_x": int(coverage_grid_x),
             "coverage_grid_y": int(coverage_grid_y),
             "coverage_weight": float(coverage_weight),
@@ -841,6 +858,9 @@ def run_simulation(
             "access_debt_weight": float(access_debt_weight),
             "access_debt_band_mm": int(access_debt_band_mm),
             "access_debt_mode": str(access_debt_mode),
+            "access_debt_exempt_delta_mm": int(access_debt_exempt_delta_mm),
+            "dead_headroom_weight": float(dead_headroom_weight),
+            "dead_headroom_min_mm": int(dead_headroom_min_mm),
             "tower_z_band_mm": int(max(0, int(tower_z_band_mm))),
             "tower_z_penalty_weight": float(max(0.0, float(tower_z_penalty_weight))),
             "spatial_xy_bin_mm": int(max(1, int(spatial_xy_bin_mm))),
@@ -950,6 +970,11 @@ def main() -> None:
         priority_weight=args.priority_weight,
         balance_weight=args.balance_weight,
         accessibility_delta_mm=args.accessibility_delta_mm,
+        accessibility_tall_box_exemption=args.accessibility_tall_box_exemption,
+        accessibility_top_clearance_mm=args.accessibility_top_clearance_mm,
+        access_debt_exempt_delta_mm=args.access_debt_exempt_delta_mm,
+        dead_headroom_weight=args.dead_headroom_weight,
+        dead_headroom_min_mm=args.dead_headroom_min_mm,
         coverage_grid_x=int(args.coverage_grid_x),
         coverage_grid_y=int(args.coverage_grid_y),
         coverage_weight=float(args.coverage_weight),

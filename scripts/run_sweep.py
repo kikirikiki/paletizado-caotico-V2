@@ -176,17 +176,23 @@ def run_task(task: dict) -> dict:
     dump = json.loads((directory / "dump.json").read_text())
     records = split_pallets(payload, dump)
     originals = original_dims_for_run(payload, task["params"]["excel_path"])
+    run_params = payload.get("params", task["params"])
     violations = [dict(dest=rec.dest, index=rec.index, **asdict(violation))
                   for rec in records for violation in validate_pallet(
                       rec.items, originals, min_support=task["params"]["min_support"],
-                      forbidden_faces=task["forbidden_faces"])]
+                      forbidden_faces=task["forbidden_faces"], run_params=run_params)]
     result = run_kpi(records)
     result["free_sides"] = free_sides_distribution(
         [SimpleNamespace(**item) for item in rec.items] for rec in records)
     result.update({k: task[k] for k in ("config", "seed", "git_head", "source_hash", "input_hash", "task_hash", "params")})
     result.update({f"acc_violations_gap{gap}": sum(accessibility_gap_violations(
-        rec.items, task["params"]["accessibility_delta_mm"], gap) for rec in records)
+        rec.items, run_params.get("accessibility_delta_mm", 0), gap,
+        run_params.get("accessibility_tall_box_exemption", False),
+        run_params.get("accessibility_top_clearance_mm", 0)) for rec in records)
         for gap in (5, 20, 50)})
+    result["acc_violations"] = sum(v["code"] == "ROBOT_ACCESS" for v in violations)
+    result["acc_violations_base_rule"] = sum(accessibility_gap_violations(
+        rec.items, run_params.get("accessibility_delta_mm", 0), 0) for rec in records)
     result.update(n_violations=len(violations), violations=violations,
                   forbidden_faces=task["forbidden_faces"],
                   decision_timing=payload["metrics"]["decision_timing"],
@@ -194,6 +200,7 @@ def run_task(task: dict) -> dict:
                   micro_plan={key: value for key, value in payload["metrics"]["pallet_kpis"].items()
                               if key.startswith("micro_plan_")},
                   access_debt=payload["metrics"]["pallet_kpis"].get("access_debt", {}),
+                  dead_headroom=payload["metrics"]["pallet_kpis"].get("dead_headroom", {}),
                   n_boxes_input=len(originals), n_unplaced=len(originals) - result["boxes_placed"],
                   deadline_cutoffs_count=payload["metrics"]["pallet_kpis"]["deadline_cutoffs_count"],
                   wall_time_s=perf_counter() - started, worker_pid=os.getpid(),
@@ -265,6 +272,8 @@ def generate_summary(folder: Path) -> dict:
                                       for n in (4, 3, 2, 1, 0)},
                 n_seeds=len(observed), gap_mm=20, observation="before_commit",
                 scope="all_placed_including_END")
+        for key in ("acc_violations", "acc_violations_base_rule"):
+            metrics[key] = stats([row.get(key) for row in rows])
         for gap in (5, 20, 50):
             key = f"acc_violations_gap{gap}"
             metrics[key] = stats([row.get(key) for row in rows])
@@ -326,7 +335,12 @@ def render_summary(summary: dict) -> str:
     lines += ["", "Validación física (sin relajar):"]
     for name, row in summary["configs"].items():
         lines.append(f"- {name}: hard_cap_hits={row.get('hard_cap_hits_total', 0)}; {row['violations_total']} violaciones; códigos {json.dumps(row['violation_codes'], sort_keys=True)}; cortes por deadline: {row['deadline_cutoffs_count']['mean']:.3f}/seed.")
-    lines += ["", "Robustez D-015 (media de colocaciones por seed; no cambia la regla):", "",
+    lines += ["", "Accesibilidad D-025 (media de colocaciones por seed):", "",
+              "| Config | Regla del run | Regla base oficial |", "|---|---:|---:|"]
+    for name, row in summary["configs"].items():
+        lines.append(f"| {name} | " + " | ".join(
+            number(row.get(key, {}).get("mean")) for key in ("acc_violations", "acc_violations_base_rule")) + " |")
+    lines += ["", "Robustez D-015 (media de colocaciones por seed; usa la regla del run):", "",
               "| Config | gap5 | gap20 | gap50 |", "|---|---|---|---|"]
     for name, row in summary["configs"].items():
         lines.append(f"| {name} | " + " | ".join(number(row[f"acc_violations_gap{gap}"]["mean"]) for gap in (5,20,50)) + " |")

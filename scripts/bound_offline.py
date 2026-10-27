@@ -66,6 +66,12 @@ def main():
                         help="Column partition separation in mm; 0 makes zones contiguous (default: 2)")
     parser.add_argument("--group-geometry", action="store_true",
                         help="Column search only: merge equal dimensions regardless of inactive mass")
+    parser.add_argument("--tall-box-exemption", action="store_true",
+                        help="Use production R7: threshold max(delta, box height + top clearance)")
+    parser.add_argument("--top-clearance-mm", type=int, default=0,
+                        help="Top clearance added to box height with the exemption (default: 0)")
+    parser.add_argument("--column-mixed-families", action="store_true",
+                        help="Column search: also allow standing boxes in planar zones, with production gate")
     parser.add_argument("--baseline-summary", type=Path, default=Path("out/sweeps/baseline_v1/summary.json"))
     parser.add_argument("--buffer-summary", type=Path, default=Path("out/sweeps/bound_buffer_k_v1/summary.json"))
     parser.add_argument("--validate", type=Path, help="Only replay/validate an existing result; no search")
@@ -77,9 +83,10 @@ def main():
     if args.column_gap_mm < 0:
         parser.error("--column-gap-mm must be nonnegative")
     boxes = load_boxes(args.excel)
+    access = dict(tall_box_exemption=args.tall_box_exemption, top_clearance_mm=args.top_clearance_mm)
     if args.validate:
         payload = json.loads(args.validate.read_text())
-        result = summarize(payload["pallets"], boxes)
+        result = summarize(payload["pallets"], boxes, **access)
         for key in ("kpi", "n_pallets_total", "n_closed", "boxes_placed", "pallet_utils", "sequence"):
             assert result[key] == payload[key], key
         print(json.dumps({k: result[k] for k in ("kpi", "n_pallets_total", "n_violations", "n_production_violations")}))
@@ -95,12 +102,13 @@ def main():
     source_fingerprint = fingerprint(boxes, {})
     previous = json.loads(output.read_text()) if args.resume and output.exists() else {}
     common = dict(cpu_seconds=args.cpu_seconds, checkpoint=checkpoint, resume=args.resume,
-                  progress=lambda row: print(json.dumps(row), flush=True))
+                  progress=lambda row: print(json.dumps(row), flush=True), **access)
     if args.method == "order":
         result = order_search(boxes, seed=args.seed, evaluations=args.evaluations, **common)
     elif args.method == "columns":
         result = column_search(boxes, width=args.width, templates=args.templates, seed=args.seed,
-                               group_geometry=args.group_geometry, column_gap_mm=args.column_gap_mm, **common)
+                               group_geometry=args.group_geometry, column_gap_mm=args.column_gap_mm,
+                               column_mixed_families=args.column_mixed_families, **common)
     else:
         result = beam_search(boxes, width=args.width, top_m=args.top_m, objective=args.objective,
                              locations=args.locations, debt_weight=args.debt_weight,
@@ -108,7 +116,7 @@ def main():
     result.update(schema_version=1, method=args.method, started_at=previous.get("started_at", started),
                   invocation_started_at=started,
                   finished_at=datetime.now(timezone.utc).isoformat(), command=sys.argv,
-                  preset="arm6_4orient", effective_policy=asdict(production_policy().config),
+                  preset="arm6_4orient", effective_policy=asdict(production_policy(**access).config),
                   production_params=PRESETS["arm6_4orient"], references=references,
                   input=dict(path=str(args.excel), sha256=hashlib.sha256(args.excel.read_bytes()).hexdigest(),
                              n_boxes=len(boxes), volume_mm3=sum(b.volume_mm3 for b in boxes),

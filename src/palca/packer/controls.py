@@ -104,6 +104,14 @@ class BalanceConfig:
 @dataclass(frozen=True)
 class AccessibilityConfig:
     accessibility_delta_mm: int = 400
+    accessibility_tall_box_exemption: bool = False
+    accessibility_top_clearance_mm: int = 0
+
+    def effective_delta_mm(self, height_mm: int) -> int:
+        delta = int(self.accessibility_delta_mm)
+        if delta > 0 and self.accessibility_tall_box_exemption:
+            return max(delta, int(height_mm) + self.accessibility_top_clearance_mm)
+        return delta
 
 
 @dataclass(frozen=True)
@@ -328,7 +336,7 @@ class RobotAccessibilityControl:
         if not placed_list:
             return PlacementControlResult(feasible=True, placement=placement)
 
-        delta = int(self.config.accessibility_delta_mm)
+        delta = self.config.effective_delta_mm(placement.height_mm)
         cx0, cx1 = int(placement.x_mm), int(placement.x_mm) + int(placement.length_mm)
         cy0, cy1 = int(placement.y_mm), int(placement.y_mm) + int(placement.width_mm)
 

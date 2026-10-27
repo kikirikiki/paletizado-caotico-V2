@@ -30,7 +30,7 @@ from sim.io import load_arrivals
 VOLUME = prod(ENVELOPE_MM)
 
 
-def production_policy():
+def production_policy(*, tall_box_exemption=False, top_clearance_mm=0):
     """Same factory/defaults as sim.run, with full visibility and no deadline."""
     p = deepcopy(PRESETS["arm6_4orient"])
     return PolicyPackerScheduler.from_defaults(
@@ -38,6 +38,8 @@ def production_policy():
         heuristic=p["heuristic"], stacking_mode=p["stacking_mode"],
         stability_mode=p["stability_mode"], min_support_ratio=p["min_support"],
         orientation_mode=p["orientation_mode"], accessibility_delta_mm=p["accessibility_delta_mm"],
+        accessibility_tall_box_exemption=tall_box_exemption,
+        accessibility_top_clearance_mm=top_clearance_mm,
         stand_hw_height_margin_gate_mm=p["stand_hw_height_margin_gate_mm"],
         score_mode=p["score_mode"], height_slack_mm=p["height_slack_mm"],
     )
@@ -108,13 +110,13 @@ def checked_preview(pallet, box, placement):
                                                 adjusted.z_mm + adjusted.height_mm))
 
 
-def summarize(pallets, boxes):
+def summarize(pallets, boxes, *, tall_box_exemption=False, top_clearance_mm=0):
     """Reject missing/duplicate IDs, replay sequence, validate, then frozen KPI."""
     originals = {b.box_id: (b.length_mm, b.width_mm, b.height_mm) for b in boxes}
     by_id = {b.box_id: b for b in boxes}
     seen = []
     records = []
-    policy = production_policy()
+    policy = production_policy(tall_box_exemption=tall_box_exemption, top_clearance_mm=top_clearance_mm)
     for i, items in enumerate(pallets, 1):
         if not items:
             raise ValueError("Empty pallet")
@@ -126,7 +128,8 @@ def summarize(pallets, boxes):
             preview = checked_preview(model, by_id[placement.box_id], placement)
             model.commit_place(preview)
             seen.append(placement.box_id)
-        violations = validate_pallet(items, originals, min_support=PRESETS["arm6_4orient"]["min_support"])
+        violations = validate_pallet(items, originals, min_support=PRESETS["arm6_4orient"]["min_support"],
+                                     run_params=asdict(policy.config))
         if violations:
             raise ValueError(f"Frozen validation failed: {violations}")
         closed = i < len(pallets)
@@ -150,11 +153,11 @@ def quality(result):
             -result["n_pallets_total"])
 
 
-def decode_order(boxes, order):
+def decode_order(boxes, order, *, tall_box_exemption=False, top_clearance_mm=0):
     """The actual production SchedulerV1, full remaining buffer, unlimited time."""
     if sorted(order) != sorted(b.box_id for b in boxes):
         raise ValueError("Order must be a permutation of the full input")
-    policy = production_policy()
+    policy = production_policy(tall_box_exemption=tall_box_exemption, top_clearance_mm=top_clearance_mm)
     scheduler = policy._scheduler
     scheduler.config = replace(scheduler.config, lookahead_k=max(1, len(boxes)))
     lookup = {b.box_id: b for b in boxes}
@@ -173,7 +176,7 @@ def decode_order(boxes, order):
         remaining.pop(plan.buffer_index)
     if pallet.placements:
         pallets.append([asdict(p) for p in pallet.placements])
-    return summarize(pallets, boxes)
+    return summarize(pallets, boxes, tall_box_exemption=tall_box_exemption, top_clearance_mm=top_clearance_mm)
 
 
 def production_candidates(pallet, remaining, scheduler):
@@ -304,15 +307,16 @@ def greedy_finish(node, scheduler):
 
 def beam_search(boxes, *, width=16, top_m=8, objective="volume", locations="production",
                 debt_weight=1.0, roughness_weight=0.2, cpu_seconds=1800, checkpoint=None,
-                resume=False, progress=None):
+                resume=False, progress=None, tall_box_exemption=False, top_clearance_mm=0):
     if width < 16 or top_m < 1:
         raise ValueError("Beam width must be >=16 and top_m >=1")
     if objective not in ("volume", "debt") or locations not in ("production", "all"):
         raise ValueError("Unknown beam objective/locations")
-    policy = production_policy()
+    access = dict(tall_box_exemption=tall_box_exemption, top_clearance_mm=top_clearance_mm)
+    policy = production_policy(**access)
     lookup = {b.box_id: b for b in boxes}
     config = dict(width=width, top_m=top_m, objective=objective, locations=locations,
-                  debt_weight=debt_weight, roughness_weight=roughness_weight)
+                  debt_weight=debt_weight, roughness_weight=roughness_weight, **access)
     identity = fingerprint(boxes, config)
     completed, history, elapsed_cpu, elapsed_wall = [], [], 0.0, 0.0
     beam, terminal = [Node(policy._new_pallet(), tuple(boxes))], None
@@ -382,7 +386,7 @@ def beam_search(boxes, *, width=16, top_m=8, objective="volume", locations="prod
             beam = [Node(policy._new_pallet(), terminal.remaining)] if terminal.remaining else []
             terminal = None
         save()
-    result = summarize(completed, boxes)
+    result = summarize(completed, boxes, **access)
     result.update(config=config, history=history, budget_hit=budget_hit,
                   cpu_seconds=elapsed_cpu + time.process_time() - start_cpu,
                   wall_seconds=elapsed_wall + time.monotonic() - start_wall)
@@ -390,7 +394,8 @@ def beam_search(boxes, *, width=16, top_m=8, objective="volume", locations="prod
 
 
 def order_search(boxes, *, seed=0, evaluations=12, cpu_seconds=1800,
-                 checkpoint=None, resume=False, progress=None):
+                 checkpoint=None, resume=False, progress=None,
+                 tall_box_exemption=False, top_clearance_mm=0):
     """Local permutation search with random restarts, actual production decoder."""
     if evaluations < 1 or not boxes:
         raise ValueError("Need a nonempty input and at least one evaluation")
@@ -398,7 +403,9 @@ def order_search(boxes, *, seed=0, evaluations=12, cpu_seconds=1800,
     order = [b.box_id for b in boxes]
     if seed:
         rng.shuffle(order)
-    identity = fingerprint(boxes, dict(method="order", seed=seed))
+    access = dict(tall_box_exemption=tall_box_exemption, top_clearance_mm=top_clearance_mm)
+    config = dict(seed=seed, **access)
+    identity = fingerprint(boxes, dict(method="order", **config))
     best, history, elapsed_cpu, elapsed_wall = None, [], 0.0, 0.0
     if resume and checkpoint and Path(checkpoint).exists():
         raw = json.loads(Path(checkpoint).read_text())
@@ -423,7 +430,7 @@ def order_search(boxes, *, seed=0, evaluations=12, cpu_seconds=1800,
                 for _ in range(max(1, len(order) // 10)):
                     a, b = rng.randrange(len(order)), rng.randrange(len(order))
                     order[a], order[b] = order[b], order[a]
-        result = decode_order(boxes, order)
+        result = decode_order(boxes, order, **access)
         result["input_order"] = list(order)
         if best is None or quality(result) > quality(best):
             best = result
@@ -434,11 +441,11 @@ def order_search(boxes, *, seed=0, evaluations=12, cpu_seconds=1800,
         if progress:
             progress(history[-1])
         if checkpoint:
-            atomic_json(checkpoint, dict(fingerprint=identity, best=best, history=history,
+            atomic_json(checkpoint, dict(fingerprint=identity, config=config, best=best, history=history,
                         order=order, rng=rng.getstate(),
                         cpu_seconds=elapsed_cpu + time.process_time() - start_cpu,
                         wall_seconds=elapsed_wall + time.monotonic() - start_wall))
-    best.update(history=history, seed=seed, evaluations=len(history),
+    best.update(config=config, history=history, seed=seed, evaluations=len(history),
                 cpu_seconds=elapsed_cpu + time.process_time() - start_cpu,
                 wall_seconds=elapsed_wall + time.monotonic() - start_wall)
     return best
@@ -551,18 +558,24 @@ def column_completion_value(node, zone):
 
 def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometry=False,
                   column_gap_mm=2, cpu_seconds=600,
-                  checkpoint=None, resume=False, progress=None):
+                  checkpoint=None, resume=False, progress=None,
+                  tall_box_exemption=False, top_clearance_mm=0, column_mixed_families=False):
     """Sequential pallets, beam within each column, best of fixed floor partitions.
 
-    The first two zones are planar. The standing gate is NEVER forced open: a
+    The first two zones are planar unless column_mixed_families is selected.
+    The standing gate is NEVER forced open: a
     standing branch exists only after a real preceding column reached >=2000mm.
     Completed pallets are checkpointed; interruption loses at most one pallet.
     """
     if width < 1 or not templates or any(t not in range(len(COLUMN_TEMPLATES)) for t in templates):
         raise ValueError('Invalid column width/templates')
     zones_by_template = {t: column_template(t, column_gap_mm) for t in templates}
+    if column_mixed_families:
+        zones_by_template = {t: tuple((*zone[:4], 'any') if zone[4] == 'planar' else zone
+                                     for zone in zones) for t, zones in zones_by_template.items()}
+    access = dict(tall_box_exemption=tall_box_exemption, top_clearance_mm=top_clearance_mm)
     config = dict(width=width, templates=list(templates), seed=seed, group_geometry=group_geometry,
-                  column_gap_mm=column_gap_mm)
+                  column_gap_mm=column_gap_mm, column_mixed_families=column_mixed_families, **access)
     identity = fingerprint(boxes, dict(method='columns', **config))
     lookup = {b.box_id: b for b in boxes}
     remaining = list(boxes)
@@ -578,7 +591,7 @@ def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometr
         remaining = tuple(lookup[i] for i in raw['remaining'])
         elapsed_cpu, elapsed_wall = raw['cpu_seconds'], raw['wall_seconds']
     start_cpu, start_wall = time.process_time(), time.monotonic()
-    policy = production_policy()
+    policy = production_policy(**access)
 
     def exhausted():
         return elapsed_cpu + time.process_time() - start_cpu >= cpu_seconds
@@ -621,7 +634,7 @@ def column_search(boxes, *, width=16, templates=(0, 1, 2), seed=0, group_geometr
                         wall_seconds=elapsed_wall + time.monotonic() - start_wall))
         if progress:
             progress(history[-1])
-    result = summarize(completed, boxes)
+    result = summarize(completed, boxes, **access)
     result.update(config=config, history=history, budget_hit=exhausted(),
                   cpu_seconds=elapsed_cpu + time.process_time() - start_cpu,
                   wall_seconds=elapsed_wall + time.monotonic() - start_wall)
